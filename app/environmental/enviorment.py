@@ -3,10 +3,11 @@ PyBullet-specific glue code — connects pure dynamics (entity.py, methods.py)
 to the actual PyBullet simulation. No physics math lives here, only
 PyBullet API calls and translation between our data structures and PyBullet's.
 """
+
 import pybullet as p
 
 from app.dynamics.drone import QuadConfig, Vector3D
-
+from app.dynamics.methods import net_combining_thrust, net_combining_torque
 
 def spawn_drone(config: QuadConfig, start_position: Vector3D) -> int:
     """
@@ -82,6 +83,25 @@ def apply_rotor_thrust(body_id: int, config: QuadConfig, rotor_speeds: list[floa
     Converts 4 rotor speeds into total thrust, applies as a force
     on the PyBullet body along its own body-frame z-axis.
     """
+    F=net_combining_thrust(config, rotor_speeds)
+    p.applyExternalForce(
+        objectUniqueId=body_id,
+        linkIndex=-1, # -1 = apply to the base body, not a specific link
+        forceObj=[0,0,F], # thrust always points along body's own z-axis
+        posObj=[0,0,0], # applied at body's own center
+        flags=p.LINK_FRAME, # PyBullet transforms body-frame force into world-frame automatically
+
+    )
 
 
-    pass
+def apply_rotor_torque(body_id: int, config: QuadConfig,rotor_speeds: list[float]) -> None:
+
+    F=net_combining_torque(config, rotor_speeds)
+    p.applyExternalTorque(
+        objectUniqueId=body_id,
+        linkIndex=-1,
+        torqueObj=list(F),
+        flags=p.LINK_FRAME,
+    )
+
+

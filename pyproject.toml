@@ -8,4 +8,5 @@ dependencies = [
     "numpy>=2.5.1",
     "opencv-python>=5.0.0.93",
     "pybullet-arm64==3.2.8",
+    "scipy>=1.18.0",
 ]
