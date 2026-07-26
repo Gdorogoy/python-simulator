@@ -68,12 +68,16 @@ def create_quad_rotors(
     arm_length: float,
     max_rpm: float,
     motor_tau: float,
-    k_f: float = 1.0,
-    k_m: float = 1.0,
+    mass: float,
+    kf_km_ratio: float =0.02,
+    hover_rpm_fraction: float = 0.5,
 ) -> list[RotorConfig]:
 
     angles_deg = [45, 135, 225, 315]
     spin_dirs = [1, -1, 1, -1]  # alternating — cancels net yaw torque
+
+    # finiding k_f so 4 rotors will balance the gravity
+    k_f=(mass*9.81/4)/ (max_rpm*hover_rpm_fraction)**2
 
     rotors: list[RotorConfig] = []
 
@@ -87,8 +91,8 @@ def create_quad_rotors(
         rotors.append(RotorConfig(
             position=rotor_position,
             spin_dir=spin_dir,
-            k_f=k_f,
-            k_m=k_m,
+            k_f=k_f ,
+            k_m=k_f*kf_km_ratio, # yaw torque coefficient, scaled off k_f
             max_rpm=max_rpm,
             motor_tau=motor_tau,
         ))
@@ -110,16 +114,18 @@ def create_quad_config(
     drag_coeff: float,
     max_rpm: float,
     motor_tau: float,
-    k_f: float = 1.0,
-    k_m: float = 1.0,
+    hover_rpm_fraction: float = 0.5,
+    kf_km_ratio: float =0.02,
+
 ) -> QuadConfig:
 
     rotors = create_quad_rotors(
         arm_length=arm_length,
         max_rpm=max_rpm,
         motor_tau=motor_tau,
-        k_f=k_f,
-        k_m=k_m,
+        kf_km_ratio=kf_km_ratio,
+        hover_rpm_fraction=hover_rpm_fraction,
+        mass=mass
     )
 
     return QuadConfig(
