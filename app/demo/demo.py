@@ -82,7 +82,7 @@ def simulation():
     p.resetDebugVisualizerCamera(cameraDistance=10, cameraYaw=45, cameraPitch=-30,
                                   cameraTargetPosition=[0, 0, 5])
 
-    wind_vector, mass_scale = sample_wind_conditions()
+    wind_vector, mass_scale = sample_wind_conditions(np.random)
 
     config = create_quad_config(
         mass=1.5 * mass_scale,
