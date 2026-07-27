@@ -51,7 +51,7 @@ we have the method that will give us by multiplication the desried [thrust, roll
 but the drone dosent undertand waht to do with it so we do inversion on the smae method to get the insturcions.
 in other words what w,rpm,inertia,cw/ccw etc to set the SPECIFIC rotor
 """
-def mixer_inversion(config: QuadConfig, desired_params : list[float]):
+def mixer_inversion(config: QuadConfig, desired_params : list[float]) -> list[float]:
     M = np.zeros((4, 4))
     for i in range(0, 4):
         for j in range(0, 4):
@@ -206,14 +206,26 @@ def wind(wind: list[float] , mass: float , k_wind_coeff : float):
 
 
 def timestamp_update(state: QuadState, config: QuadConfig , rl_action: list[float] , wind_vector : list[float] ,dt: float):
-    w_target = mixer_inversion(config, rl_action)
+
+    # print(f"=====================================================================")
+
+    w_target : list[float] = mixer_inversion(config, rl_action)
+
+    # print(f"w_target: {w_target}")
+
+
 
     w_actual = np.zeros(4)
     for i in range(0,4):
         w_actual[i] = motor_lag(state.rotor_rpm[i], w_target[i], config.rotors[i].motor_tau, dt)
 
+    # print(f"w_actual: {w_actual}")
+
     net_thrust = net_combining_thrust(config, w_actual)  # scalar
     net_torque = net_combining_torque(config, w_actual)  # 3-element vector
+
+    # print(f"net_thrust: {net_thrust}")
+    # print(f"net_torque: {net_torque}")
 
     drag = drag_force(
         velocity=[state.velocity.x, state.velocity.y, state.velocity.z],
@@ -222,36 +234,80 @@ def timestamp_update(state: QuadState, config: QuadConfig , rl_action: list[floa
         air_dens=1.225,
     )
 
+    # print(f"drag: {drag}")
+
     wind_force = wind(
         wind=wind_vector,  # the function parameter you already receive
         mass=config.mass,
         k_wind_coeff=0.1,  # tunable constant
     )
 
+    # print(f"wind_force: {wind_force}")
+
     gravity_force = np.array([0, 0, -config.mass * 9.81])
+
+    # print(f"gravity_force: {gravity_force}")
 
     current_rot = Rotation.from_quat(
         [state.orientation.x, state.orientation.y, state.orientation.z, state.orientation.w])
+
+    # print(f"current_rot: {current_rot}")
+
     thrust_body_frame = np.array([0, 0, net_thrust])
+
+    # print(f"thrust_body_frame: {thrust_body_frame}")
+
     thrust_world_frame = current_rot.apply(thrust_body_frame)
 
+    # print(f"thrust_world_frame: {thrust_world_frame}")
+
     total_force = thrust_world_frame + drag + wind_force + gravity_force
+
+    # print(f"total_force: {total_force}")
+
     linear_accel = total_force / config.mass
 
+    # print(f"linear_accel: {linear_accel}")
+
     new_velocity = np.array([state.velocity.x, state.velocity.y, state.velocity.z]) + linear_accel * dt
+
+    # print(f"new_velocity: {new_velocity}")
+
+
     new_position = np.array([state.position.x, state.position.y, state.position.z]) + new_velocity * dt
 
+    # print(f"new_position: {new_position}")
+
     alpha = angular_acceleration(config, net_torque)
+
+    # print(f"alpha: {alpha}")
+
     new_angular_velocity = update_angular_velocity(state, alpha, dt)
 
+    # print(f"new_angular_velocity: {new_angular_velocity}")
 
     delta_rot = Rotation.from_rotvec(new_angular_velocity * dt)
+
+    # print(f"delta_rot: {delta_rot}")
+
     new_rot = delta_rot * current_rot
+
+    # print(f"new_rot: {new_rot}")
+
+
+
+
     new_quat = new_rot.as_quat()  # returns [x, y, z, w]
-    return QuadState(
+
+
+    # print(f"new_quat value: {new_quat}")
+
+    quad_state=QuadState(
         position=Vector3D(*new_position),
         velocity=Vector3D(*new_velocity),
         orientation=Quaternion(*new_quat),
         angular_velocity=Vector3D(*new_angular_velocity),
         rotor_rpm=list(w_actual),
     )
+
+    return quad_state

@@ -8,6 +8,7 @@ from gymnasium import spaces
 from gymnasium.core import ActType, ObsType
 from gymnasium.envs.registration import register
 from gymnasium.utils.env_checker import check_env
+from scipy.spatial.transform import Rotation
 
 from app.dynamics.drone import create_quad_config, QuadState, Vector3D, Quaternion, QuadConfig
 from app.dynamics.methods import mixer_inversion, timestamp_update
@@ -45,7 +46,36 @@ class InterceptorDroneEnv(gym.Env):
         return build_observation(self.drone_state, self.target_pos)
 
     def _compute_reward(self):
-        return 1,True
+        pos= np.array([self.drone_state.position.x, self.drone_state.position.y, self.drone_state.position.z])
+        target= self.target_pos
+
+        dist= np.linalg.norm(target - pos)
+
+        # checking if out of bounds isnan checking if object is even there , pos[2] is z so checking if its not on the ground, and that the drone not too far
+        if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) >30:
+            return -10.0, True
+
+
+        # calculation the new rotation in 3d (!! NEED TO IMPLEMENT THE METHOD AND NOT USE READY)
+        # calculation by the same concept as object rotation in 2d but now 4d where z stays the same always and x,y work the same as in 2d and w work like...
+        rot= Rotation.from_quat([self.drone_state.orientation.x, self.drone_state.orientation.y, self.drone_state.orientation.z, self.drone_state.orientation.w])
+
+        roll,pitch,yaw=rot.as_euler("xyz")
+
+
+        # checking if roll or pitch exceeds 80 degrees,
+        if abs(roll) > np.radians(80) or abs(pitch) > np.radians(80):
+            return -5.0 , True
+
+        # success!! the drone hit the target
+        if dist <0.3:
+            return 15.0 , True
+
+        progress=(self.prev_distance - dist) - 0.01
+
+        self.prev_distance = dist
+        return progress, False
+
 
     def __init__(self,render_mode=None):
 
@@ -159,5 +189,30 @@ def my_check_env():
 
 
 
+def my_test():
+    env = InterceptorDroneEnv()
+    obs, _ = env.reset()
+    for i in range(5000):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, _ = env.step(action)
+        if i % 500 == 0:
+            print(i, reward, terminated, truncated)
+        if terminated or truncated:
+            obs, _ = env.reset()
+
+
 if __name__ == "__main__":
-    my_check_env()
+    print(f"Running RL|INTERCEPTOR DRONE|")
+    inp = 0
+
+    while inp not in (1, 2, 3):
+        print(f"==========================\n"
+              f"Enter 1 to start test \n"
+              f"Enter 2 to start env check \n"
+              f"==========================\n")
+        inp = int(input("Please enter your choice: "))
+
+    if inp == 1:
+        my_test()
+    elif inp == 2:
+        my_check_env()

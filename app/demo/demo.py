@@ -57,16 +57,21 @@ def attitude_torque(state, target_roll, target_pitch, target_yaw_rate=0.0,
     return roll_t, pitch_t, yaw_t
 
 
-def position_to_attitude(state, target_x, target_y, kp=0.12, kd=0.22, max_tilt=0.35):
+def position_to_attitude(state, target_x, target_y,current_yaw=0.0, kp=0.12, kd=0.22, max_tilt=0.35):
     ex = target_x - state.position.x
     ey = target_y - state.position.y
     vx, vy = state.velocity.x, state.velocity.y
 
-    accel_x_desired = kp * ex - kd * vx
-    accel_y_desired = kp * ey - kd * vy
+    accel_x_world = kp * ex - kd * vx
+    accel_y_world = kp * ey - kd * vy
 
-    target_pitch = np.clip(accel_x_desired, -max_tilt, max_tilt)
-    target_roll  = np.clip(-accel_y_desired, -max_tilt, max_tilt)
+    # rotate desired WORLD-frame acceleration into BODY-frame using current yaw
+    cos_y, sin_y = np.cos(current_yaw), np.sin(current_yaw)
+    accel_x_body = accel_x_world * cos_y + accel_y_world * sin_y
+    accel_y_body = -accel_x_world * sin_y + accel_y_world * cos_y
+
+    target_pitch = np.clip(accel_x_body, -max_tilt, max_tilt)
+    target_roll  = np.clip(-accel_y_body, -max_tilt, max_tilt)
     return target_roll, target_pitch
 
 
@@ -92,6 +97,7 @@ def simulation():
         max_rpm=12000,
         motor_tau=0.05,
     )
+    print(f"config: {config}")
 
     start_z = 5.0
     start_position = Vector3D(0, 0, start_z)
@@ -113,7 +119,7 @@ def simulation():
     steps_per_control = max(1, round((1 / control_hz) / physics_dt))
 
     BANK_ANGLE = 0.25
-    YAW_SPIN_RATE = 2 * np.pi / 3.0
+    YAW_SPIN_RATE = (2 * np.pi / 3.0 ) *2.5
 
     flight_plan = [
         dict(name="1. Descend 2m",            mode="altitude", target_z=start_z - 2, duration=3.0),
@@ -164,16 +170,16 @@ def simulation():
 
             rot_now = Rotation.from_quat([state.orientation.x, state.orientation.y,
                                           state.orientation.z, state.orientation.w])
-            cur_roll, cur_pitch, _ = rot_now.as_euler('xyz')
+            cur_roll, cur_pitch,cur_yaw  = rot_now.as_euler('xyz')
 
             if phase["mode"] == "altitude":
                 thrust = altitude_thrust(state, phase["target_z"], hover_thrust, cur_roll, cur_pitch)
-                target_roll, target_pitch = position_to_attitude(state, 0.0, 0.0)
+                target_roll, target_pitch = position_to_attitude(state, 0.0, 0.0, current_yaw=cur_yaw)
                 roll_t, pitch_t, yaw_t = attitude_torque(state, target_roll, target_pitch)
 
             elif phase["mode"] == "wait":
                 thrust = altitude_thrust(state, start_z, hover_thrust, cur_roll, cur_pitch)
-                target_roll, target_pitch = position_to_attitude(state, wait_x, wait_y)
+                target_roll, target_pitch = position_to_attitude(state, wait_x, wait_y, current_yaw=cur_yaw)
                 roll_t, pitch_t, yaw_t = attitude_torque(state, target_roll, target_pitch)
 
             elif phase["mode"] == "tilt_hold":
@@ -183,20 +189,20 @@ def simulation():
             elif phase["mode"] == "translate":
                 thrust = altitude_thrust(state, start_z, hover_thrust, cur_roll, cur_pitch)
                 target_roll, target_pitch = position_to_attitude(
-                    state, phase["target_x"], phase["target_y"])
+                    state, phase["target_x"], phase["target_y"], current_yaw=cur_yaw)
                 roll_t, pitch_t, yaw_t = attitude_torque(state, target_roll, target_pitch)
 
             elif phase["mode"] == "circle":
                 omega_orbit = 2 * np.pi / phase["period"]
                 tx = phase["radius"] * np.cos(omega_orbit * t)
                 ty = phase["radius"] * np.sin(omega_orbit * t)
-                thrust = altitude_thrust(state, start_z, hover_thrust, cur_roll, cur_pitch)
-                target_roll, target_pitch = position_to_attitude(state, tx, ty, kp=0.20, kd=0.28)
+                thrust = altitude_thrust(state, start_z, hover_thrust, cur_roll, cur_pitch,)
+                target_roll, target_pitch = position_to_attitude(state, tx, ty, kp=0.20, kd=0.28, current_yaw=cur_yaw )
                 roll_t, pitch_t, yaw_t = attitude_torque(state, target_roll, target_pitch)
 
             elif phase["mode"] == "yaw_spin":
                 thrust = altitude_thrust(state, start_z, hover_thrust, cur_roll, cur_pitch)
-                target_roll, target_pitch = position_to_attitude(state, spin_x, spin_y)
+                target_roll, target_pitch = position_to_attitude(state, spin_x, spin_y, current_yaw=cur_yaw,)
                 roll_t, pitch_t, yaw_t = attitude_torque(
                     state, target_roll, target_pitch, target_yaw_rate=phase["yaw_rate"])
 
