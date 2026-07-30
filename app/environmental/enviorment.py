@@ -3,7 +3,6 @@ PyBullet-specific glue code — connects pure dynamics (entity.py, methods.py)
 to the actual PyBullet simulation. No physics math lives here, only
 PyBullet API calls and translation between our data structures and PyBullet's.
 """
-import numpy as np
 import pybullet as p
 
 from app.dynamics.drone import QuadConfig, Vector3D
@@ -83,7 +82,8 @@ def sample_wind_conditions(np_rand):
     wind_vector = rng.uniform(-2.0, 2.0, size=3)
     mass_scale = rng.uniform(0.92, 1.08)
     return wind_vector, mass_scale
-    return wind_vector, mass_scale
+
+
 """
 Will be used in the RL connection update
 """

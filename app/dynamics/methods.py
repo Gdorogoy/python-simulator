@@ -2,8 +2,6 @@
 mixer inversion, motor lag, thrust/torque integration.
 """
 import numpy as np
-import pybullet
-from numpy.f2py.rules import rout_rules
 from scipy.spatial.transform import Rotation
 
 from app.dynamics.drone import QuadConfig, Vector3D, QuadState, Quaternion
@@ -48,7 +46,7 @@ def mixer(config: QuadConfig, rotors_speed : list[float]):
 
 """
 we have the method that will give us by multiplication the desried [thrust, roll, pitch, yaw] ,
-but the drone dosent undertand waht to do with it so we do inversion on the smae method to get the insturcions.
+but the drone dosent undertand waht to do with it so we do inversion on the same method to get the instructions.
 in other words what w,rpm,inertia,cw/ccw etc to set the SPECIFIC rotor
 """
 def mixer_inversion(config: QuadConfig, desired_params : list[float]) -> list[float]:
