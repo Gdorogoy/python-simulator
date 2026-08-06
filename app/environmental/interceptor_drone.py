@@ -8,10 +8,15 @@ from gymnasium.core import ActType, ObsType
 from gymnasium.envs.registration import register
 from gymnasium.utils.env_checker import check_env
 from scipy.spatial.transform import Rotation
+from sympy.codegen.ast import none
 
 from app.dynamics.drone import create_quad_config, QuadState, Vector3D, Quaternion, QuadConfig
 from app.dynamics.methods import mixer_inversion, timestamp_update
 from app.environmental.enviorment import sample_wind_conditions, spawn_drone
+
+import time
+import pybullet as p
+import pybullet_data
 
 
 
@@ -44,36 +49,40 @@ class InterceptorDroneEnv(gym.Env):
     def _get_obs(self):
         return build_observation(self.drone_state, self.target_pos)
 
-    def _compute_reward(self):
-        pos= np.array([self.drone_state.position.x, self.drone_state.position.y, self.drone_state.position.z])
-        target= self.target_pos
+    def _compute_reward(self, reward=5, penalty=-5):
+        pos = np.array([self.drone_state.position.x, self.drone_state.position.y, self.drone_state.position.z])
+        dist = np.linalg.norm(self.target_pos - pos)
 
-        dist= np.linalg.norm(target - pos)
+        if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) > 30:
+            return penalty*2, True
 
-        # checking if out of bounds isnan checking if object is even there , pos[2] is z so checking if its not on the ground, and that the drone not too far
-        if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) >30:
-            return -10.0, True
+        rot = Rotation.from_quat([self.drone_state.orientation.x, self.drone_state.orientation.y,
+                                self.drone_state.orientation.z, self.drone_state.orientation.w])
+        roll, pitch, yaw = rot.as_euler("xyz")
+        if abs(roll) > np.radians(65) or abs(pitch) > np.radians(80):
+            return penalty*2, True
 
+        if dist < 0.3:
+            return reward, True
 
-        # calculation the new rotation in 3d (!! NEED TO IMPLEMENT THE METHOD AND NOT USE READY)
-        # calculation by the same concept as object rotation in 2d but now 4d where z stays the same always and x,y work the same as in 2d and w work like...
-        rot= Rotation.from_quat([self.drone_state.orientation.x, self.drone_state.orientation.y, self.drone_state.orientation.z, self.drone_state.orientation.w])
+        diff = self.prev_distance - dist
 
-        roll,pitch,yaw=rot.as_euler("xyz")
+        if diff < 0:
+            self.moving_away_streak += 1
+            progress = diff * 1.25 - 0.01
+        else:
+            self.moving_away_streak = 0
+            progress = diff - 0.01
 
-
-        # checking if roll or pitch exceeds 80 degrees,
-        if abs(roll) > np.radians(80) or abs(pitch) > np.radians(80):
-            return -5.0 , True
-
-        # success!! the drone hit the target
-        if dist <0.3:
-            return 15.0 , True
-
-        progress=(self.prev_distance - dist) - 0.01
+        streak_penalty = -0.02 * self.moving_away_streak
+        closer_bonus = 0.01 if diff > 0 else 0.0
 
         self.prev_distance = dist
-        return progress, False
+
+        if self.moving_away_streak >= 60:
+            return penalty, True
+
+        return progress + streak_penalty + closer_bonus, False
 
 
     def __init__(self,render_mode=None):
@@ -86,7 +95,7 @@ class InterceptorDroneEnv(gym.Env):
 
         self.render_mode=render_mode
 
-
+        self._init_render()
 
         self.reset()
 
@@ -110,6 +119,7 @@ class InterceptorDroneEnv(gym.Env):
     def reset(self,seed=None,options=None):
         super().reset(seed=seed,options=options)
 
+        self.moving_away_streak = 0 # added
 
         self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
 
@@ -123,7 +133,7 @@ class InterceptorDroneEnv(gym.Env):
             motor_tau=0.05,
         )
 
-        start_z = 5.0
+        start_z = 0.5 # change back later to 5
         start_position = Vector3D(0, 0, start_z)
         # drone_id = spawn_drone(self.config, start_position)
 
@@ -140,9 +150,11 @@ class InterceptorDroneEnv(gym.Env):
 
         self.target_pos = np.array([5.0,0.0,5.0], dtype=np.float32)
 
+        self._spawn_visuals()
 
         self.steps_elapsed = 0
         self.prev_distance = float(np.linalg.norm(self.target_pos - np.array([0, 0, start_z])))
+
 
         obs = self._get_obs()
         return obs, {}
@@ -161,17 +173,49 @@ class InterceptorDroneEnv(gym.Env):
         reward,terminated= self._compute_reward()
         truncated= self.steps_elapsed >= self.max_steps
 
+        self.render()
+
         return obs, reward, terminated,truncated, {}
 
-
-
     def render(self):
-        pass
+        if self.render_mode != "human":
+            return
+        p.resetBasePositionAndOrientation(
+            self.drone_id,
+            [self.drone_state.position.x, self.drone_state.position.y, self.drone_state.position.z],
+            [self.drone_state.orientation.x, self.drone_state.orientation.y,
+             self.drone_state.orientation.z, self.drone_state.orientation.w],
+        )
+        p.stepSimulation()
+        time.sleep(self.dt)
 
 
 
 
+    def _init_render(self):
+        if self.render_mode == "human":
+            p.connect(p.GUI)
+            p.setAdditionalSearchPath(pybullet_data.getDataPath())
+            p.setGravity(0, 0, 0)
+            p.loadURDF("plane.urdf")
+            p.resetDebugVisualizerCamera(cameraDistance=10, cameraYaw=45, cameraPitch=-30,
+                                         cameraTargetPosition=[0, 0, 5])
+            self.drone_id = None
+            self.target_marker_id = None
 
+    def _spawn_visuals(self):
+        if self.render_mode == "human":
+            if self.drone_id is not None:
+                p.removeBody(self.drone_id)
+            self.drone_id = spawn_drone(self.config, self.drone_state.position)
+
+            if self.target_marker_id is not None:
+                p.removeBody(self.target_marker_id)
+            vis_shape = p.createVisualShape(p.GEOM_SPHERE, radius=0.3, rgbaColor=[1, 0, 0, 0.6])
+            self.target_marker_id = p.createMultiBody(
+                baseMass=0, baseVisualShapeIndex=vis_shape,
+                basePosition=self.target_pos.tolist(),
+            )
 
 def my_check_env():
 

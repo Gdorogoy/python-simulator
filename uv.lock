@@ -172,11 +172,11 @@ wheels = [
 
 [[package]]
 name = "filelock"
-version = "3.32.0"
+version = "3.32.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c0/80/8232b582c4b318b817cf1274ba74976b07b34d35ef439b3eb948f98645a1/filelock-3.32.0.tar.gz", hash = "sha256:7be2ad23a14607ccc71808e68fe30848aeace7058ace17852f68e2a68e310402", size = 213757, upload-time = "2026-07-21T13:17:42.898Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/57/3ba6e6cb097f85b855b00163d169f35365f44277df044dcf96d55b8f62a3/filelock-3.32.2.tar.gz", hash = "sha256:c33351e1f49cae33414acbc6d56784e6ecee82514ec90795da1161fc4836b5b8", size = 217172, upload-time = "2026-07-29T22:46:04.895Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/79/b4c714bef36bc4ec2beeae1e0c124f0223888cd8c6feb1cdc56038116920/filelock-3.32.0-py3-none-any.whl", hash = "sha256:d396bea984af47333ef05e50eae7eff88c84256de6112aea0ec48a233c064fe3", size = 97732, upload-time = "2026-07-21T13:17:41.55Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/e8/72f8cef9fdfeffe06213fe8508039396ee48daa0e3259457ed766173bfd6/filelock-3.32.2-py3-none-any.whl", hash = "sha256:87dd94cf281e586d135fa51132b8e3d9a598b316e90377a288663c9321036c82", size = 98830, upload-time = "2026-07-29T22:46:03.52Z" },
 ]
 
 [[package]]
@@ -222,11 +222,11 @@ wheels = [
 
 [[package]]
 name = "fsspec"
-version = "2026.6.0"
+version = "2026.7.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/10/a1/ae4e3e5003468d6391d2c77b6fa1cd73bd5d13511d81c642d7b28ac90ed4/fsspec-2026.6.0.tar.gz", hash = "sha256:f5bac145310fe30e16e1471bd6840b2d990d609e872251d7e674241822abf01a", size = 313646, upload-time = "2026-06-16T01:57:28.105Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/78/f34251dadb8f3921264a1d9b8946f5e542014ee2614b285261b4e40e6775/fsspec-2026.7.0.tar.gz", hash = "sha256:c803c40f4cf860b49dea58ee3e1c33cb9c790520e233537e1340049f89b82a88", size = 317040, upload-time = "2026-07-28T16:34:51.052Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/22/4222d7ddf3da30f363edaa98e329c2bce6c65497c9cb2810931c8b2c0fbc/fsspec-2026.6.0-py3-none-any.whl", hash = "sha256:02e0b71817df9b2169dc30a16832045764def1191b43dcff5bb85bdee212d2a1", size = 203949, upload-time = "2026-06-16T01:57:26.358Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/3c/6a2bf344106328fd04963664a60b9bb6496fc25df8e962fcdc1367285fb9/fsspec-2026.7.0-py3-none-any.whl", hash = "sha256:b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279", size = 206583, upload-time = "2026-07-28T16:34:49.538Z" },
 ]
 
 [[package]]
@@ -751,11 +751,11 @@ numpy = [
 
 [[package]]
 name = "packaging"
-version = "26.2"
+version = "26.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d7/f1/e7a6dd94a8d4a5626c03e4e99c87f241ba9e350cd9e6d75123f992427270/packaging-26.2.tar.gz", hash = "sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661", size = 228134, upload-time = "2026-04-24T20:15:23.917Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl", hash = "sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e", size = 100195, upload-time = "2026-04-24T20:15:22.081Z" },
+    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
 ]
 
 [[package]]
@@ -768,7 +768,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pybullet-arm64" },
+    { name = "pybullet" },
     { name = "scipy" },
     { name = "scipy-stubs" },
     { name = "torch" },
@@ -781,7 +781,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=2.5.1" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },
-    { name = "pybullet-arm64", specifier = "==3.2.8" },
+    { name = "pybullet" },
     { name = "scipy", specifier = ">=1.18.0" },
     { name = "scipy-stubs", specifier = "~=1.18.0" },
     { name = "torch", specifier = ">=2.13.0" },
@@ -859,18 +859,10 @@ wheels = [
 ]
 
 [[package]]
-name = "pybullet-arm64"
-version = "3.2.8"
+name = "pybullet"
+version = "3.2.7"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/91/54/489e6b053744c1793e89f8a0d92aae64937745da10ba3d9df51d2417db8b/pybullet_arm64-3.2.8.tar.gz", hash = "sha256:243027bc8805233ea2a85be507a90570183d4237aed3eb3334cb55c2174de4ca", size = 80516556, upload-time = "2026-03-13T19:32:52.308Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/12/7d6d4803737ac40c061e512ecfb29ec8474245ccded18d277abb917d53b1/pybullet_arm64-3.2.8-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:30e02035e2907aa7f9aa8d5c16d0f9fb67b57ff979f4eb3e34abb464409a98f7", size = 71371792, upload-time = "2026-03-13T19:30:55.071Z" },
-    { url = "https://files.pythonhosted.org/packages/c5/ea/222f5ffbe2cfe199a5385e802893220e21fb129cb17b903c4e09b57cf6f6/pybullet_arm64-3.2.8-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7ee48f1b472e732e40010dc4dfefb76acc3f27015a2cc9faf23d954e83c63839", size = 103140045, upload-time = "2026-03-13T19:31:18.286Z" },
-    { url = "https://files.pythonhosted.org/packages/06/e3/8888d551c7498297962c43686697ca162bd37ad384f773bfe8970617be9c/pybullet_arm64-3.2.8-cp312-cp312-win_amd64.whl", hash = "sha256:19c5658ce4099b67c990e041bd8473ddbefda435a31ffa0a51dd3a4debfb33d5", size = 67570132, upload-time = "2026-03-13T19:31:35.68Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/5a/42163e357cf0532630ebaa2e1d89cf003e9837898f01807b66380cd8cbf4/pybullet_arm64-3.2.8-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:99ca404653def609b8b420fb8b486a2bf6d4685ff0ad6c0be9f782d7e5c00ae9", size = 68172597, upload-time = "2026-03-13T19:31:52.232Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/77/4e07d31304826e3ff74def9ce7688e4a9d741f4b02dd34bd03b2b6e28c8b/pybullet_arm64-3.2.8-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:93b9b9888084a354990c709514d94565693a9e3c9ef5d534a776e54880e35bc0", size = 103139889, upload-time = "2026-03-13T19:32:15.766Z" },
-    { url = "https://files.pythonhosted.org/packages/8a/fe/879bfcb0a06789dc1e30b9f934f0fc7dbeaa8c352805b768c5266f5648e8/pybullet_arm64-3.2.8-cp313-cp313-win_amd64.whl", hash = "sha256:6d4156d037b6f55bc8b12548af7a3b4a3ee6377421f68f534ffd839c65d8643c", size = 67570184, upload-time = "2026-03-13T19:32:32.51Z" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/de/95/b9a98cd4ed948d4f25a7d0b13cb0c1f87e58dc6d113be9e18940641eb25f/pybullet-3.2.7.tar.gz", hash = "sha256:042879db8d101ac7590dee475fc6aded508b85fe1273fdbbfde1d88bd200e14f", size = 80508379, upload-time = "2025-01-30T00:34:00.527Z" }
 
 [[package]]
 name = "pyparsing"

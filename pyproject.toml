@@ -9,7 +9,7 @@ dependencies = [
     "matplotlib>=3.11.1",
     "numpy>=2.5.1",
     "opencv-python>=5.0.0.93",
-    "pybullet-arm64==3.2.8",
+    "pybullet",
     "scipy>=1.18.0",
     "scipy-stubs~=1.18.0",
     "torch>=2.13.0",
