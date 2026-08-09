@@ -19,7 +19,12 @@ import pybullet as p
 import pybullet_data
 
 
-
+# norm vals
+POS_SCALE = 15.0     
+VEL_SCALE = 10.0
+ANG_VEL_SCALE = 20.0
+MAX_RPM = 12000.0
+DIST_SCALE = 15.0
 
 
 def build_observation(state: QuadState, target_pos: np.ndarray) -> np.ndarray:
@@ -27,13 +32,13 @@ def build_observation(state: QuadState, target_pos: np.ndarray) -> np.ndarray:
     dist = np.linalg.norm(rel)
 
     return np.concatenate([
-        [state.position.x, state.position.y, state.position.z],
-        [state.velocity.x, state.velocity.y, state.velocity.z],
+        np.array([state.position.x, state.position.y, state.position.z]) / POS_SCALE,
+        np.array([state.velocity.x, state.velocity.y, state.velocity.z]) / VEL_SCALE,
         [state.orientation.x, state.orientation.y, state.orientation.z, state.orientation.w],
-        [state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z],
-        state.rotor_rpm,
-        rel,
-        [dist],
+        np.array([state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z]) / ANG_VEL_SCALE,
+        np.array(state.rotor_rpm) / MAX_RPM,
+        rel / DIST_SCALE,
+        [dist / DIST_SCALE],
     ]).astype(np.float32)
 
 
@@ -53,17 +58,18 @@ class InterceptorDroneEnv(gym.Env):
         pos = np.array([self.drone_state.position.x, self.drone_state.position.y, self.drone_state.position.z])
         dist = np.linalg.norm(self.target_pos - pos)
 
+
         if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) > 30:
-            return penalty*2, True
+            return penalty*2, True, "oob"
 
         rot = Rotation.from_quat([self.drone_state.orientation.x, self.drone_state.orientation.y,
                                 self.drone_state.orientation.z, self.drone_state.orientation.w])
         roll, pitch, yaw = rot.as_euler("xyz")
         if abs(roll) > np.radians(65) or abs(pitch) > np.radians(80):
-            return penalty*2, True
+            return penalty*2, True, "attitude"
 
         if dist < 0.3:
-            return reward, True
+            return reward, True, "hit"
 
         diff = self.prev_distance - dist
 
@@ -79,11 +85,10 @@ class InterceptorDroneEnv(gym.Env):
 
         self.prev_distance = dist
 
-        if self.moving_away_streak >= 60:
-            return penalty, True
+        if self.moving_away_streak >= 30:
+            return penalty, True, "moving_away_cap"
 
-        return progress + streak_penalty + closer_bonus, False
-
+        return progress + streak_penalty + closer_bonus, False, "running"
 
     def __init__(self,render_mode=None):
 
@@ -99,11 +104,11 @@ class InterceptorDroneEnv(gym.Env):
 
         self.reset()
 
-
+        hover_thrust=self.config.mass*9.81
         #What to puty there? maybe an box for training 250m x 250m x 150m
         self.action_space= spaces.Box(
-            low=np.array([0.0, -0.5, -0.5, -0.5], dtype=np.float32),
-            high=np.array([40.0, 0.5, 0.5, 0.5], dtype=np.float32),
+            low=np.array([-hover_thrust, -0.5, -0.5, -0.5], dtype=np.float32),
+            high=np.array([40.0-hover_thrust,0.5, 0.5, 0.5], dtype=np.float32),
         )
 
         self.observation_space= spaces.Box(
@@ -121,8 +126,9 @@ class InterceptorDroneEnv(gym.Env):
 
         self.moving_away_streak = 0 # added
 
-        self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
-
+        # self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
+        self.wind_vector=[0,0,0]
+        self.mass_scale=1
 
         self.config = create_quad_config(
             mass=1.5 * self.mass_scale,
@@ -148,7 +154,7 @@ class InterceptorDroneEnv(gym.Env):
             rotor_rpm=list(hover_omega),
         )
 
-        self.target_pos = np.array([5.0,0.0,5.0], dtype=np.float32)
+        self.target_pos = np.array([1,1,1])
 
         self._spawn_visuals()
 
@@ -161,21 +167,24 @@ class InterceptorDroneEnv(gym.Env):
 
 
 
-    def step(
-        self, action: ActType
-    ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+    def step(self, action: ActType) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+        action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        action= np.clip( action, self.action_space.low, self.action_space.high )
-        self.drone_state= timestamp_update(self.drone_state,self.config,list(action),self.wind_vector,self.dt)
+        
+        hover_thrust = self.config.mass * 9.81
+        real_action = action.copy()
+        real_action[0] = action[0] + hover_thrust 
+
+        self.drone_state = timestamp_update(self.drone_state, self.config, list(real_action), self.wind_vector, self.dt)
         self.steps_elapsed += 1
 
-        obs=self._get_obs()
-        reward,terminated= self._compute_reward()
-        truncated= self.steps_elapsed >= self.max_steps
+        obs = self._get_obs()
+        reward, terminated, reason = self._compute_reward()
+        truncated = self.steps_elapsed >= self.max_steps
 
         self.render()
 
-        return obs, reward, terminated,truncated, {}
+        return obs, reward, terminated, truncated, {"reason": reason}
 
     def render(self):
         if self.render_mode != "human":

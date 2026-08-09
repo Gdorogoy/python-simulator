@@ -1,10 +1,6 @@
 """
-Phase 1 training: basic navigation toward a constant static target.
-
-
-### no relevatnt now its [1,1,1]
-Object placed 5m from the drone at 45 deg, with a +1m y-offset baked in
-(to also teach some off-axis correction, not just a pure planar approach).
+###!!! 
+Only teaching the drone how to hover so it wont fall 
 
 """
 from datetime import datetime
@@ -13,14 +9,15 @@ import numpy as np
 import torch
 import os
 
-
+import matplotlib as plt
 from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.guidance.train import ActorCritic, ppo_train, evaluate
 
 import logging
+plt.use("Agg") 
 
-os.makedirs("logs", exist_ok=True)
-log_filename = f"logs/phase2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+os.makedirs("prod_logs", exist_ok=True)
+log_filename = f"prod_logs/phase2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +40,7 @@ class TrainConfig:
     TARGET_Y_OFFSET = 1.0
 
     TOTAL_TIMESTEPS = 2_000_000
-    NUM_STEPS = 5000                   # rollout length per PPO update
+    NUM_STEPS = 7500                   # rollout length per PPO update
     GAMMA = 0.97
     LAM = 0.95
     LR = 3e-4 # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
@@ -70,43 +67,37 @@ def compute_target_pos(start_position, distance, angle_deg, y_offset):
 # ---------------------------------------------------------------------------
 # Outcome-distribution diagnostic (trained-model version)
 # ---------------------------------------------------------------------------
-def diagnose_with_model(model, env, n_episodes,):
-    outcomes = {"crash_or_oob": 0, "tilt": 0, "hit": 0, "timeout": 0}
+def diagnose_with_model(model, env, n_episodes):
+    outcomes = {"oob": 0, "attitude": 0, "hit": 0, "moving_away_cap": 0, "timeout": 0}
     steps_survived = []
 
     for ep in range(n_episodes):
         obs, _ = env.reset()
         done = False
         step_count = 0
-        final_reward = 0.0
+        last_reason = None
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 mean, std, _ = model.forward(obs_t)
-            action = mean.squeeze(0).numpy()
-            action = np.clip(action, env.action_space.low, env.action_space.high)
+            action = np.clip(mean.squeeze(0).numpy(), env.action_space.low, env.action_space.high)
 
-            obs, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             step_count += 1
             done = terminated or truncated
-            final_reward = reward
+            last_reason = info["reason"]
 
         steps_survived.append(step_count)
 
-        # classify by the terminal reward value -- matches _compute_reward's
-        # known terminal values (-10 crash/oob, -5 tilt, +15 hit)
         if truncated and not terminated:
             outcomes["timeout"] += 1
-        elif final_reward >= 15.0:
-            outcomes["hit"] += 1
-        elif final_reward == -5.0:
-            outcomes["tilt"] += 1
-        elif final_reward == -10.0:
-            outcomes["crash_or_oob"] += 1
+        else:
+            outcomes[last_reason] += 1
 
     print(f"[diagnostic] outcomes over {n_episodes} eps:", outcomes)
     print(f"[diagnostic] avg steps survived: {np.mean(steps_survived):.1f}")
+    print(f"step {step_count}: raw_mean={mean.squeeze(0).numpy()}")
     return outcomes
 
 
@@ -128,40 +119,96 @@ def save_checkpoint(model, timesteps_done, cfg: TrainConfig):
 # Helper method helping to display the drone state in the last 10 eps
 # ---------------------------------------------------------------------------
 def calc_drone_state(drone_state_arr, n=10):
-    if len(drone_state_arr) < n:
+    if len(drone_state_arr) < 0:
         return
 
-    recent = drone_state_arr[-n:]
-    count = len(recent)
 
-    avg_pos = [
-        sum(s.position.x for s in recent) / count,
-        sum(s.position.y for s in recent) / count,
-        sum(s.position.z for s in recent) / count,
-    ]
-    avg_vel = [
-        sum(s.velocity.x for s in recent) / count,
-        sum(s.velocity.y for s in recent) / count,
-        sum(s.velocity.z for s in recent) / count,
-    ]
-    avg_orient = [
-        sum(s.orientation.x for s in recent) / count,
-        sum(s.orientation.y for s in recent) / count,
-        sum(s.orientation.z for s in recent) / count,
-        sum(s.orientation.w for s in recent) / count,
-    ]
-    avg_rotor_rpm = [
-        sum(s.rotor_rpm[i] for s in recent) / count
-        for i in range(len(recent[0].rotor_rpm))
-    ]
+    elif len(drone_state_arr)< n: 
 
-    return {
-        "position": avg_pos,
-        "velocity": avg_vel,
-        "orientation": avg_orient,
-        "rotor_rpm": avg_rotor_rpm,
-        "n_averaged": count,
-    }
+        
+        recent = drone_state_arr[-len(drone_state_arr)-1:]
+        count = len(recent)
+
+
+        avg_pos = [
+                sum(s.position.x for s in recent) / count,
+                sum(s.position.y for s in recent) / count,
+                sum(s.position.z for s in recent) / count,
+            ]
+        avg_vel = [
+            sum(s.velocity.x for s in recent) / count,
+            sum(s.velocity.y for s in recent) / count,
+            sum(s.velocity.z for s in recent) / count,
+        ]
+        avg_orient = [
+            sum(s.orientation.x for s in recent) / count,
+            sum(s.orientation.y for s in recent) / count,
+            sum(s.orientation.z for s in recent) / count,
+            sum(s.orientation.w for s in recent) / count,
+        ]
+        avg_rotor_rpm = [
+            sum(s.rotor_rpm[i] for s in recent) / count
+            for i in range(len(recent[0].rotor_rpm))
+        ]
+        
+        return {
+            "position": avg_pos,
+            "velocity": avg_vel,
+            "orientation": avg_orient,
+            "rotor_rpm": avg_rotor_rpm,
+            "n_averaged": count,
+        }
+
+    else:
+
+
+        recent = drone_state_arr[-n:]
+        count = len(recent)
+
+        avg_pos = [
+            sum(s.position.x for s in recent) / count,
+            sum(s.position.y for s in recent) / count,
+            sum(s.position.z for s in recent) / count,
+        ]
+        avg_vel = [
+            sum(s.velocity.x for s in recent) / count,
+            sum(s.velocity.y for s in recent) / count,
+            sum(s.velocity.z for s in recent) / count,
+        ]
+        avg_orient = [
+            sum(s.orientation.x for s in recent) / count,
+            sum(s.orientation.y for s in recent) / count,
+            sum(s.orientation.z for s in recent) / count,
+            sum(s.orientation.w for s in recent) / count,
+        ]
+        avg_rotor_rpm = [
+            sum(s.rotor_rpm[i] for s in recent) / count
+            for i in range(len(recent[0].rotor_rpm))
+        ]
+
+        return {
+            "position": avg_pos,
+            "velocity": avg_vel,
+            "orientation": avg_orient,
+            "rotor_rpm": avg_rotor_rpm,
+            "n_averaged": count,
+        }
+
+
+
+#----------------------------------------------------------------------------
+# Graph for the distance
+#----------------------------------------------------------------------------
+def show_graph(dist_history):
+    plt.figure(figsize=(8, 4))
+    plt.plot(dist_history)
+    plt.xlabel("Step")
+    plt.ylabel("Distance to target (m)")
+    plt.title("Drone distance from target over one episode")
+    plt.axhline(y=0.3, color='r', linestyle='--', label='hit threshold (0.3m)')
+    plt.legend()
+    plt.savefig("distance_trace.png")
+    plt.close()
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +234,7 @@ def train(cfg: TrainConfig):
     timesteps_done = 0
     all_episode_rewards = []
     drone_state_arr = []
+    dist_history=[]
 
     while timesteps_done < cfg.TOTAL_TIMESTEPS:
 
@@ -204,7 +252,7 @@ def train(cfg: TrainConfig):
 
         recent = all_episode_rewards[-10:] if all_episode_rewards else [0]
 
-
+        
 
 
         log.info(f"timesteps={timesteps_done}  avg_reward(last 10 eps)={sum(recent)/len(recent):.5f}")
@@ -215,6 +263,8 @@ def train(cfg: TrainConfig):
 
         save_checkpoint(model, timesteps_done, cfg)
         diagnose_with_model(model, env, cfg.N_DIAGNOSTIC_EPISODES)
+
+    show_graph(dist_history)
 
     return model
 

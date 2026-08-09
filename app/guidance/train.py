@@ -4,11 +4,17 @@ from torch.distributions import Normal
 
 LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
 
-
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, hidden: int = 64):
         super().__init__()
-        self.shared = nn.Linear(obs_dim, hidden)
+        self.shared = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+
+        )
         self.actor_mean = nn.Linear(hidden, action_dim)
         self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
         self.critic_head = nn.Linear(hidden, 1)
@@ -121,6 +127,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
     episode_reward = 0.0
     timesteps_done = 0
     episode_rewards = []
+    episode_end_states = []
 
     while timesteps_done < total_timesteps:
         buffer = RolloutBuffer(num_steps, env.observation_space.shape[0], env.action_space.shape[0])
@@ -140,7 +147,21 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
             obs = next_obs
             if done:
                 episode_rewards.append(episode_reward)
+
+                episode_end_states.append({               # <- NEW, captured BEFORE reset()
+                    "position": env.drone_state.position,
+                    "velocity": env.drone_state.velocity,
+                    "orientation": env.drone_state.orientation,
+                    "rotor_rpm": env.drone_state.rotor_rpm,
+                    "final_dist": env.prev_distance,        # note: env.prev_distance, not self.prev_distance
+                })
+
+
+
+
                 episode_reward = 0.0
+
+
                 obs, _ = env.reset()
 
         with torch.no_grad():
@@ -149,7 +170,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
 
         advantages, returns = compute_gae(buffer.rewards, buffer.values, buffer.dones, last_value, gamma, lam)
         ppo_update(model, optimizer, buffer, advantages, returns,
-                   clip_eps=0.2, vf_coef=0.5, ent_coef=0.001, num_epochs=10, batch_size=64)
+                   clip_eps=0.2, vf_coef=0.5, ent_coef=0.01, num_epochs=50, batch_size=64)
                     #ent_coef was 0.01
 
         timesteps_done += num_steps
