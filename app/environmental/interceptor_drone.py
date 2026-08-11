@@ -110,6 +110,7 @@ class InterceptorDroneEnv(gym.Env):
 
         self.moving_away_streak = 0
         self.hover_steps_in_zone = 0
+        self.hover_success_achieved = False
 
         # self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
         self.wind_vector=[0,0,0]

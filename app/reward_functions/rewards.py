@@ -11,8 +11,8 @@ class RewardConfig:
                  streak_cap=30, attitude_roll_deg=65, attitude_pitch_deg=80,
                  hit_reward=5, attitude_penalty=-5, oob_penalty=-6,
                  streak_penalty_coef=-0.02,hover_success_steps=None,
-
-
+                 inner_dist=0.15,
+                 outer_dist=0.3
                  ):
 
         self.oob_radius = oob_radius
@@ -27,6 +27,8 @@ class RewardConfig:
         self.streak_penalty_coef = streak_penalty_coef
         self.hover_success_steps = hover_success_steps
         self.hover_steps_in_zone = 0
+        self.inner_dist=inner_dist
+        self.outer_dist=outer_dist
 
 
 def make_reward_fn(cfg: RewardConfig):
@@ -53,30 +55,29 @@ def make_reward_fn(cfg: RewardConfig):
 
         # ----- single in-zone / outside-zone branch -----
 
-        if dist < cfg.hit_threshold:
+        
+        if dist < cfg.outer_dist:
+            env.moving_away_streak=0
+            env.hover_steps_in_zone+=1
+
+            if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
+                env.hover_success_achieved = True   # telemetry only, no reward bonus
 
 
-            env.moving_away_streak = 0
+            vel=np.array([env.drone_state.velocity.x,env.drone_state.velocity.y,env.drone_state.velocity.z,])
+            stability_term= 0.2 - 0.1 * min (np.linalg.norm(vel),4.0) - 0.5 *dist
 
-            if cfg.hover_success_steps is not None:
-                env.hover_steps_in_zone += 1
-                if env.hover_steps_in_zone >= cfg.hover_success_steps:
-                    env.prev_distance = dist
-                    return cfg.hit_reward , True, "hover_success"
+            diff= env.prev_distance- dist
+            approach_term= diff * 1.25-0.01 if diff < 0 else diff - 0.01
 
-                # stability-aware in-zone reward: reward being STILL and CENTERED,
-                # not just slow -- without the dist term a slow outward drift that
-                # stays under hit_threshold scores almost the same as true hovering
-                vel = np.array([env.drone_state.velocity.x, env.drone_state.velocity.y, env.drone_state.velocity.z])
-                progress = 0.2 - 0.1 * min(np.linalg.norm(vel), 4.0) - 0.5 * dist
-                closer_bonus = 0.0
-            else:
-                # single-touch mode — no duration requirement
-                env.prev_distance = dist
-                return cfg.hit_reward, True, "hit"
+            blend = np.clip((cfg.outer_dist - dist ) / (cfg.outer_dist - cfg.inner_dist), 0.0,1.0)
+
+            progress= blend* stability_term + ( 1 - blend) * approach_term
+
+            closer_bonus =0.01 if diff > 0 else 0.0
+
         else:
-            env.hover_steps_in_zone = 0
-            zone= False
+            env.hover_steps_in_zone=0
             diff = env.prev_distance - dist
             if diff < 0:
                 env.moving_away_streak += 1
@@ -93,6 +94,6 @@ def make_reward_fn(cfg: RewardConfig):
             return cfg.oob_penalty, True, "moving_away_cap"
 
 
-        return progress + streak_penalty + closer_bonus, False, "running"
+        return progress + streak_penalty + closer_bonus,  False, "running"
 
     return reward_fn

@@ -52,8 +52,8 @@ class TrainConfig:
     LR = 3e-5 # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
 
     CHECKPOINT_EVERY_TIMESTEPS = 15_000   # coarse enough that diagnostics
-    CHECKPOINT_DIR = "runs/1m_10epochs_v5"
-    METRICS_CSV = "runs/1m_10epochs_v5/metrics.csv"
+    CHECKPOINT_DIR = "runs/1m_10epochs_v7"
+    METRICS_CSV = "runs/1m_10epochs_v7/metrics.csv"
     N_DIAGNOSTIC_EPISODES = 20
 
 
@@ -75,7 +75,8 @@ def compute_target_pos(start_position, distance, angle_deg, y_offset):
 # Outcome-distribution diagnostic (trained-model version)
 # ---------------------------------------------------------------------------
 def diagnose_with_model(model, env, n_episodes):
-    outcomes = {"oob": 0, "attitude": 0, "hit": 0, "moving_away_cap": 0, "timeout": 0}
+    outcomes = {"oob": 0, "attitude-ROLL": 0, "attitude-PITCH": 0, "hit": 0,
+                "hover_success": 0, "moving_away_cap": 0, "drift": 0, "timeout": 0}
     steps_survived = []
 
     for ep in range(n_episodes):
@@ -98,7 +99,9 @@ def diagnose_with_model(model, env, n_episodes):
 
         steps_survived.append(step_count)
 
-        if truncated and not terminated:
+        if env.hover_success_achieved:
+            outcomes["hover_success"] += 1
+        elif truncated and not terminated:
             outcomes["timeout"] += 1
         else:
             outcomes[last_reason] += 1
@@ -136,6 +139,7 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
         done = False
         step_count = 0
         last_reason = None
+        episode_max_hover_streak = 0
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -148,12 +152,15 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
             step_count += 1
             done = terminated or truncated
             last_reason = info["reason"]
+            episode_max_hover_streak = max(episode_max_hover_streak, getattr(env, "hover_steps_in_zone", 0))
 
         steps_survived.append(step_count)
         final_dists.append(env.prev_distance)
-        max_hover_streak = max(max_hover_streak, getattr(env, "hover_steps_in_zone", 0))
+        max_hover_streak = max(max_hover_streak, episode_max_hover_streak)
 
-        if truncated and not terminated:
+        if getattr(env, "hover_success_achieved", False):
+            outcomes["hover_success"] += 1
+        elif truncated and not terminated:
             outcomes["timeout"] += 1
         else:
             outcomes[last_reason] = outcomes.get(last_reason, 0) + 1
