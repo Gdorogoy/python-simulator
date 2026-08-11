@@ -18,13 +18,16 @@ import time
 import pybullet as p
 import pybullet_data
 
+from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-# norm vals
-POS_SCALE = 15.0     
-VEL_SCALE = 10.0
-ANG_VEL_SCALE = 20.0
-MAX_RPM = 12000.0
-DIST_SCALE = 15.0
+# norm vals TODO:FIX AFTER DUBUG
+POS_SCALE = 15.0 #15.0
+VEL_SCALE = 10.0 #10.0
+ANG_VEL_SCALE =20.0 #20.0
+MAX_RPM = 12000.0 #12000.0
+DIST_SCALE = 15.0 #15.0
+
+
 
 
 def build_observation(state: QuadState, target_pos: np.ndarray) -> np.ndarray:
@@ -47,55 +50,32 @@ register(
     entry_point='app.environmental.interceptor_drone:InterceptorDroneEnv',
 )
 
+"""
+step is lowest unit - 1/240
+episode full run of the steps  all steps done and the env.reset is called 
+rollout spawn the number of steps (can be 0-n) until all steps are collected and then resets
+epoch runs full one rollout
 
+batch_size chop the steps into n batches and do gradient on them 
+check point- total time stamps / check point every 
+"""
 class InterceptorDroneEnv(gym.Env):
     metadata = {'render_modes': ['human'], 'render_fps': 30}
 
     def _get_obs(self):
         return build_observation(self.drone_state, self.target_pos)
 
-    def _compute_reward(self, reward=5, penalty=-5):
-        pos = np.array([self.drone_state.position.x, self.drone_state.position.y, self.drone_state.position.z])
-        dist = np.linalg.norm(self.target_pos - pos)
 
-
-        if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) > 30:
-            return penalty*2, True, "oob"
-
-        rot = Rotation.from_quat([self.drone_state.orientation.x, self.drone_state.orientation.y,
-                                self.drone_state.orientation.z, self.drone_state.orientation.w])
-        roll, pitch, yaw = rot.as_euler("xyz")
-        if abs(roll) > np.radians(65) or abs(pitch) > np.radians(80):
-            return penalty*2, True, "attitude"
-
-        if dist < 0.3:
-            return reward, True, "hit"
-
-        diff = self.prev_distance - dist
-
-        if diff < 0:
-            self.moving_away_streak += 1
-            progress = diff * 1.25 - 0.01
-        else:
-            self.moving_away_streak = 0
-            progress = diff - 0.01
-
-        streak_penalty = -0.02 * self.moving_away_streak
-        closer_bonus = 0.01 if diff > 0 else 0.0
-
-        self.prev_distance = dist
-
-        if self.moving_away_streak >= 30:
-            return penalty, True, "moving_away_cap"
-
-        return progress + streak_penalty + closer_bonus, False, "running"
-
-    def __init__(self,render_mode=None):
+    def __init__(self,custom_reward,render_mode=None,):
 
         self.dt=1/240
         self.max_steps=5000
 
 
+        if custom_reward is None:
+            raise ValueError("No custom_reward provided")
+
+        self.reward_method= custom_reward
 
 
         self.render_mode=render_mode
@@ -119,12 +99,17 @@ class InterceptorDroneEnv(gym.Env):
 
         )
 
+    def reset(self, start_pos=None, target_pos=None, seed=None, options=None):
+        super().reset(seed=seed, options=options)
+        if start_pos is None:
+            start_pos = np.array([0, 0, 5], dtype=np.float32)
+        if target_pos is None:
+            target_pos = np.array([0, 0,5], dtype=np.float32)
 
+        self.target_pos = target_pos
 
-    def reset(self,seed=None,options=None):
-        super().reset(seed=seed,options=options)
-
-        self.moving_away_streak = 0 # added
+        self.moving_away_streak = 0
+        self.hover_steps_in_zone = 0
 
         # self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
         self.wind_vector=[0,0,0]
@@ -139,8 +124,7 @@ class InterceptorDroneEnv(gym.Env):
             motor_tau=0.05,
         )
 
-        start_z = 0.5 # change back later to 5
-        start_position = Vector3D(0, 0, start_z)
+        start_position = Vector3D(start_pos[0],start_pos[1],start_pos[2])
         # drone_id = spawn_drone(self.config, start_position)
 
         hover_thrust = self.config.mass * 9.81
@@ -154,12 +138,11 @@ class InterceptorDroneEnv(gym.Env):
             rotor_rpm=list(hover_omega),
         )
 
-        self.target_pos = np.array([1,1,1])
-
         self._spawn_visuals()
 
         self.steps_elapsed = 0
-        self.prev_distance = float(np.linalg.norm(self.target_pos - np.array([0, 0, start_z])))
+
+        self.prev_distance = float(np.linalg.norm(self.target_pos - start_pos))
 
 
         obs = self._get_obs()
@@ -170,16 +153,16 @@ class InterceptorDroneEnv(gym.Env):
     def step(self, action: ActType) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        
+
         hover_thrust = self.config.mass * 9.81
         real_action = action.copy()
-        real_action[0] = action[0] + hover_thrust 
+        real_action[0] = action[0] + hover_thrust
 
         self.drone_state = timestamp_update(self.drone_state, self.config, list(real_action), self.wind_vector, self.dt)
         self.steps_elapsed += 1
 
         obs = self._get_obs()
-        reward, terminated, reason = self._compute_reward()
+        reward, terminated, reason = self.reward_method(self)
         truncated = self.steps_elapsed >= self.max_steps
 
         self.render()
@@ -227,8 +210,11 @@ class InterceptorDroneEnv(gym.Env):
             )
 
 def my_check_env():
+    reward_cfg = RewardConfig(oob_radius=7, hit_reward=10, attitude_penalty=-7, oob_penalty=-10,
+                              streak_penalty_coef=-0.05)
+    reward_fn = make_reward_fn(reward_cfg)
 
-    env1 = InterceptorDroneEnv()
+    env1 = InterceptorDroneEnv(reward_fn)
     obs1, _ = env1.reset(seed=42)
     print("run1:", env1.wind_vector, env1.mass_scale)
 
@@ -242,7 +228,11 @@ def my_check_env():
 
 
 def my_test():
-    env = InterceptorDroneEnv()
+    reward_cfg = RewardConfig(oob_radius=7, hit_reward=10, attitude_penalty=-7, oob_penalty=-10,
+                              streak_penalty_coef=-0.05)
+    reward_fn = make_reward_fn(reward_cfg)
+
+    env = InterceptorDroneEnv(reward_fn)
     obs, _ = env.reset()
     for i in range(5000):
         action = env.action_space.sample()
