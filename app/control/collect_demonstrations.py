@@ -44,8 +44,14 @@ def collect_demonstrations(pid, n_episodes=50, n_steps=600,
 
 
 if __name__ == "__main__":
-    with open("app/control/best_pid_gains.json") as f:
-        gains = json.load(f)
+    best_params={
+        "kp_pos": 2.6046151722604542,
+        "kd_pos": 4.904934767415454,
+        "kp_att": 7.840438616994562,
+        "kd_att": 0.19504323460221928,
+        "kp_yaw": 0.15567772197587013,
+        "kd_yaw": 0.18916334442052507,
+    }
 
-    pid = PIDHoverController(**gains)
+    pid = PIDHoverController(**best_params)
     collect_demonstrations(pid, n_episodes=50, n_steps=600)

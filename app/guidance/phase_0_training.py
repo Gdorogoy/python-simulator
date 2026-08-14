@@ -49,11 +49,11 @@ class TrainConfig:
     NUM_STEPS = 4096                  # rollout length per PPO update
     GAMMA = 0.98 # was 0.97
     LAM = 0.95
-    LR = 3e-5 # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
+    LR = 3e-4 # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
 
     CHECKPOINT_EVERY_TIMESTEPS = 15_000   # coarse enough that diagnostics
-    CHECKPOINT_DIR = "runs/1m_10epochs_v7"
-    METRICS_CSV = "runs/1m_10epochs_v7/metrics.csv"
+    CHECKPOINT_DIR = "runs/1m_10epochs_v2"
+    METRICS_CSV = "runs/1m_10epochs_v2/metrics.csv"
     N_DIAGNOSTIC_EPISODES = 20
 
 
@@ -236,7 +236,11 @@ def train(cfg: TrainConfig):
         oob_penalty=-1.5,
         streak_penalty_coef=-0.05,
         hover_success_steps=200,
-        streak_cap=15
+        streak_cap=30,
+        phase0_pos_coef=0.5,           
+        imitation_coef=0.25,           
+        imitation_duration_steps=20_000,   
+        phase0_duration_steps=20_000,      
     )
 
     reward_fn= make_reward_fn(reward_cfg)
@@ -262,6 +266,9 @@ def train(cfg: TrainConfig):
     all_episode_rewards = []
     drone_state_arr = []
     dist_history=[]
+
+    model.load_state_dict(torch.load("app/control/pretrained_bc.pt"))
+
 
     while timesteps_done < cfg.TOTAL_TIMESTEPS:
 

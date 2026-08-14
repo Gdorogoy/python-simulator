@@ -1,3 +1,4 @@
+import json
 from math import inf
 from typing import SupportsFloat, Any
 
@@ -10,6 +11,7 @@ from gymnasium.utils.env_checker import check_env
 from scipy.spatial.transform import Rotation
 from sympy.codegen.ast import none
 
+from app.control.pid_hover import PIDHoverController
 from app.dynamics.drone import create_quad_config, QuadState, Vector3D, Quaternion, QuadConfig
 from app.dynamics.methods import mixer_inversion, timestamp_update
 from app.environmental.enviorment import sample_wind_conditions, spawn_drone
@@ -66,7 +68,8 @@ class InterceptorDroneEnv(gym.Env):
         return build_observation(self.drone_state, self.target_pos)
 
 
-    def __init__(self,custom_reward,render_mode=None,):
+    def __init__(self, custom_reward, render_mode=None, pid_gains_path="app/control/best_pid_gains.json"):
+
 
         self.dt=1/240
         self.max_steps=5000
@@ -99,6 +102,16 @@ class InterceptorDroneEnv(gym.Env):
 
         )
 
+        self.pid_teacher=None
+
+        if pid_gains_path  is not None:
+            try:
+                with open(pid_gains_path) as f:
+                    gains = json.load(f)
+                self.pid_teacher = PIDHoverController(**gains)
+            except (FileNotFoundError, json.JSONDecodeError):
+                print(f"[warn] could not load PID gains from {pid_gains_path} — pid_teacher unavailable")
+
     def reset(self, start_pos=None, target_pos=None, seed=None, options=None):
         super().reset(seed=seed, options=options)
         if start_pos is None:
@@ -110,6 +123,7 @@ class InterceptorDroneEnv(gym.Env):
 
         self.moving_away_streak = 0
         self.hover_steps_in_zone = 0
+        self.last_raw_action = np.zeros(4, dtype=np.float32)
         self.hover_success_achieved = False
 
         # self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
@@ -130,6 +144,8 @@ class InterceptorDroneEnv(gym.Env):
 
         hover_thrust = self.config.mass * 9.81
         hover_omega = mixer_inversion(self.config, [hover_thrust, 0.0, 0.0, 0.0])
+
+        self.hover_rpm_target = np.array(hover_omega)
 
         self.drone_state =QuadState(
             position=start_position,
@@ -154,6 +170,7 @@ class InterceptorDroneEnv(gym.Env):
     def step(self, action: ActType) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
+        self.last_raw_action = action.copy()
 
         hover_thrust = self.config.mass * 9.81
         real_action = action.copy()

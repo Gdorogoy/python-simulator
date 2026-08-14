@@ -19,7 +19,7 @@ class ActorCritic(nn.Module):
         self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
         self.critic_head = nn.Linear(hidden, 1)
 
-        # action_low/action_high define the env's action_space box. The actor
+        # action_low/action_high define the envs action_space box. The actor
         # head outputs unbounded numbers; we squash them through tanh and
         # rescale into this box (see scale_action / get_action_and_value)
         # instead of relying on env.step's np.clip to do it for us.
@@ -268,14 +268,14 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
         advantages, returns = compute_gae(buffer.rewards, buffer.values, buffer.dones, last_value, gamma, lam)
         timesteps_done += num_steps
         last_losses = ppo_update(model, optimizer, buffer, advantages, returns,
-                   clip_eps=0.2, vf_coef=0.5, ent_coef=ent_coef, num_epochs=10, batch_size=64,
+                   clip_eps=0.2, vf_coef=0.5, ent_coef=ent_coef, num_epochs=10, batch_size=32,
                    global_timesteps_done=global_timesteps_offset + timesteps_done,
                    global_total_timesteps=global_total_timesteps)
                     #was  vf_coef=0.5
 
 
         with torch.no_grad():
-            model.actor_log_std.clamp_(-2.0, 0.5)
+            model.actor_log_std.clamp_(-2.0, 0.15)
 
     return model, optimizer, episode_rewards, last_losses
 

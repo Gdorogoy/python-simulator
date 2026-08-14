@@ -23,7 +23,7 @@ from app.guidance.train import ActorCritic
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
 RUNS_DIR = Path(__file__).parent / "runs"
-DEFAULT_CHECKPOINT = RUNS_DIR / "1m_10epochs_v9" / "ppo_stage1_990000.pt"
+DEFAULT_CHECKPOINT = RUNS_DIR / "ppo_stage1_885000.pt"
 
 
 def main():
@@ -36,11 +36,12 @@ def main():
         attitude_penalty=-1.0,
         oob_penalty=-1.5,
         streak_penalty_coef=-0.05,
+        attitude_roll_deg=90,
         hover_success_steps=10 ** 9,  # effectively disables the early "success" exit
-        streak_cap=1500,
+        streak_cap=15000,
     )
     reward_fn = make_reward_fn(reward_cfg)
-
+    
     env = InterceptorDroneEnv(reward_fn, render_mode=None)
 
     model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],

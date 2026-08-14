@@ -42,7 +42,11 @@ if __name__ == "__main__":
     from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
     env = InterceptorDroneEnv(make_reward_fn(RewardConfig(oob_radius=7)))
-    model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0])
+    model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
+                        env.action_space.low,
+                        env.action_space.high,
+
+                        )
 
     model = pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
                                        epochs=20, batch_size=256, lr=1e-3)

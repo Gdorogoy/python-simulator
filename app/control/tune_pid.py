@@ -5,6 +5,7 @@ import numpy as np
 from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.control.pid_hover import PIDHoverController
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
+from app.dynamics.drone import Vector3D
 
 def evaluate_pid(pid, n_episodes=5, n_steps=600):
     reward_cfg = RewardConfig(
@@ -13,8 +14,8 @@ def evaluate_pid(pid, n_episodes=5, n_steps=600):
         attitude_penalty=-1.0,
         oob_penalty=-1.5,
         streak_penalty_coef=-0.05,
-        hover_success_steps=200,
-        streak_cap=120,
+        hover_success_steps=None,
+        streak_cap=30,
     )
     reward_fn=make_reward_fn(reward_cfg)
 
@@ -40,6 +41,10 @@ def evaluate_pid(pid, n_episodes=5, n_steps=600):
                 break
 
         episode_scores.append(tot_reward)
+        pos = np.array([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
+        dist = np.linalg.norm(env.target_pos - pos)
+        print(f"  ep {i}: reward={tot_reward:.2f}, final_dist={dist}, reason={info['reason']}, steps_survived={s}")
+
 
 
     print(pid.compute_action(env.drone_state,env.target_pos))
@@ -70,7 +75,7 @@ def objective(trial):
 
 if __name__ == "__main__":
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=100_000)
+    study.optimize(objective, n_trials=300)
     print(study.best_params)
-    with open("app/control/best_pid_gains.json", "w") as f:
+    with open("/control/best_pid_gains.json", "w") as f:
         json.dump(study.best_params, f, indent=2)
