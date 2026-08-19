@@ -1,5 +1,6 @@
 import os
 import csv
+import json
 
 import numpy as np
 import matplotlib
@@ -12,134 +13,74 @@ def _read_csv(csv_path):
         return list(csv.DictReader(f))
 
 
-def plot_training_run(csv_path, output_dir="plots",
-                       hover_success_steps=480, n_diag_episodes=20,
-                       hit_threshold=0.3, streak_cap=30, max_steps=5000):
+# ---------------------------------------------------------------------------
+# PID baseline -- what would a classical controller score on the same task?
+# ---------------------------------------------------------------------------
+def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
+                          n_episodes=20, n_steps=600,
+                          oob_radius=7, hit_reward=10, attitude_penalty=-1.0,
+                          oob_penalty=-1.5, streak_penalty_coef=-0.05,
+                          hover_success_steps=200, streak_cap=30):
     """
-    hover_success_steps, n_diag_episodes, hit_threshold, streak_cap, max_steps
-    should match whatever RewardConfig / env / diagnostic loop you actually
-    trained with -- they're only used to draw target reference lines, not
-    to recompute anything, so pass the real values in from your TrainConfig
-    if they differ from these defaults.
+    Runs the tuned PID controller through the same env/reward machinery
+    used to score the RL policy, over n_episodes, and returns the same
+    summary stats diagnose_with_model would -- so the RL run's final
+    checkpoint can be compared against it apples-to-apples.
+
+    Returns None (with a printed reason) if the gains file is missing,
+    rather than raising -- this plot is a nice-to-have, not required to
+    see the rest of the training dashboard.
     """
-    rows = _read_csv(csv_path)
-    if not rows:
-        print(f"[plot_training_run] no rows found in {csv_path}")
-        return
+    if not os.path.isfile(pid_gains_path):
+        print(f"[pid_baseline] no gains file at {pid_gains_path}, skipping PID comparison")
+        return None
 
-    os.makedirs(output_dir, exist_ok=True)
-    timesteps = np.array([float(r["timesteps"]) for r in rows])
+    from app.environmental.interceptor_drone import InterceptorDroneEnv
+    from app.control.pid_hover import PIDHoverController
+    from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-    def col(name, default=0.0):
-        return np.array([float(r.get(name, default) or default) for r in rows])
+    with open(pid_gains_path) as f:
+        gains = json.load(f)
+    pid = PIDHoverController(**gains)
 
-    # --- reward ---
-    reward_mean, reward_std = col("reward_mean"), col("reward_std")
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, reward_mean, label="reward_mean")
-    plt.fill_between(timesteps, reward_mean - reward_std, reward_mean + reward_std, alpha=0.2)
-    plt.xlabel("timesteps"); plt.ylabel("reward")
-    plt.title("Episode reward (mean +/- std, last 10 eps)")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "reward.png")); plt.close()
+    reward_cfg = RewardConfig(
+        oob_radius=oob_radius, hit_reward=hit_reward, attitude_penalty=attitude_penalty,
+        oob_penalty=oob_penalty, streak_penalty_coef=streak_penalty_coef,
+        hover_success_steps=hover_success_steps, streak_cap=streak_cap,
+    )
+    env = InterceptorDroneEnv(make_reward_fn(reward_cfg), pid_gains_path=None)
 
-    # --- final distance: target = 0 ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, col("avg_final_dist"), label="avg_final_dist")
-    plt.plot(timesteps, col("min_final_dist"), label="min_final_dist")
-    plt.axhline(y=hit_threshold, color="g", linestyle="--", label=f"hit_threshold={hit_threshold}")
-    plt.axhline(y=0.0, color="k", linestyle=":", alpha=0.5, label="target = 0")
-    plt.xlabel("timesteps"); plt.ylabel("distance (m)")
-    plt.title("Final distance to target (success = converges to 0)")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "final_distance.png")); plt.close()
+    final_dists, steps_survived, episode_rewards = [], [], []
+    n_success = 0
 
-    # --- avg steps survived: target = max_steps ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, col("avg_steps_survived"))
-    plt.axhline(y=max_steps, color="g", linestyle="--", label=f"max_steps={max_steps}")
-    plt.xlabel("timesteps"); plt.ylabel("avg steps survived")
-    plt.title("Average episode length (success = approaches max_steps)")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "avg_steps_survived.png")); plt.close()
+    for _ in range(n_episodes):
+        obs, _ = env.reset()
+        done = False
+        step_count = 0
+        ep_reward = 0.0
+        while not done and step_count < n_steps:
+            action = pid.compute_action(env.drone_state, env.target_pos)
+            obs, reward, terminated, truncated, info = env.step(action)
+            ep_reward += reward
+            step_count += 1
+            done = terminated or truncated
+        steps_survived.append(step_count)
+        episode_rewards.append(ep_reward)
+        final_dists.append(env.prev_distance)
+        if getattr(env, "hover_success_achieved", False):
+            n_success += 1
 
-    # --- max hover streak: target = hover_success_steps ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, col("max_hover_streak"))
-    plt.axhline(y=hover_success_steps, color="g", linestyle="--",
-                label=f"hover_success_steps={hover_success_steps}")
-    plt.xlabel("timesteps"); plt.ylabel("max hover streak (steps)")
-    plt.title("Max hover streak (success = reaches hover_success_steps)")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "max_hover_streak.png")); plt.close()
-
-    # --- effective std: target -> low (policy confident, not exploring) ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, col("effective_std_mean"))
-    plt.axhline(y=0.0, color="k", linestyle=":", alpha=0.5, label="target: trending -> low")
-    plt.xlabel("timesteps"); plt.ylabel("effective_std_mean")
-    plt.title("Policy action std (success = decaying, not climbing)")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "effective_std.png")); plt.close()
-
-    # --- approx KL ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, col("approx_kl"), label="approx_kl")
-    plt.axhline(y=0.02, color="r", linestyle="--", label="target_kl=0.02")
-    plt.xlabel("timesteps"); plt.ylabel("approx_kl")
-    plt.title("Approximate KL divergence per update")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "approx_kl.png")); plt.close()
-
-    # --- grad_norm: log scale, this is what actually caught the additional=3 blowup ---
-    plt.figure(figsize=(8, 4))
-    plt.semilogy(timesteps, col("grad_norm"))
-    plt.xlabel("timesteps"); plt.ylabel("grad_norm (log scale)")
-    plt.title("Pre-clip gradient norm (success = stays low & flat, not spiking)")
-    plt.savefig(os.path.join(output_dir, "grad_norm.png")); plt.close()
-
-    # --- value_loss: log scale, same reasoning as grad_norm ---
-    plt.figure(figsize=(8, 4))
-    plt.semilogy(timesteps, col("value_loss"))
-    plt.xlabel("timesteps"); plt.ylabel("value_loss (log scale)")
-    plt.title("Value function loss (success = stays low & flat)")
-    plt.savefig(os.path.join(output_dir, "value_loss.png")); plt.close()
-
-    # --- policy_loss / entropy_loss: can go negative, so linear/symlog not log ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, col("policy_loss"), label="policy_loss")
-    plt.plot(timesteps, col("entropy_loss"), label="entropy_loss")
-    plt.axhline(y=0.0, color="k", linestyle=":", alpha=0.5)
-    plt.xlabel("timesteps"); plt.ylabel("loss")
-    plt.title("Policy & entropy loss")
-    plt.legend(); plt.savefig(os.path.join(output_dir, "policy_entropy_loss.png")); plt.close()
-
-    # --- outcome distribution: target = hover_success -> n_diag_episodes, rest -> 0 ---
-    outcome_keys = [k for k in rows[0].keys() if k.startswith("outcome_")]
-    outcome_series = [col(k) for k in outcome_keys]
-    plt.figure(figsize=(9, 5))
-    plt.stackplot(timesteps, *outcome_series, labels=[k.replace("outcome_", "") for k in outcome_keys])
-    plt.axhline(y=n_diag_episodes, color="g", linestyle="--",
-                label=f"all {n_diag_episodes} eps -> hover_success")
-    plt.xlabel("timesteps"); plt.ylabel("count (per checkpoint diagnostic batch)")
-    plt.title("Outcome distribution (success = stack fills with hover_success only)")
-    plt.legend(loc="upper left")
-    _shade_streak_windows(plt.gca(), timesteps, rows, n_diag_episodes)
-    plt.savefig(os.path.join(output_dir, "outcome_distribution.png")); plt.close()
-
-    # --- hover_success ratio: the single clearest convergence signal ---
-    hover_ratio = col("outcome_hover_success") / n_diag_episodes
-    plt.figure(figsize=(8, 4))
-    plt.plot(timesteps, hover_ratio, marker=".")
-    for tier, style in ((0.25, ":"), (0.50, "--"), (0.75, "-."), (1.00, "-")):
-        plt.axhline(y=tier, color="g", linestyle=style, alpha=0.5, label=f"{int(tier*100)}%")
-    plt.ylim(-0.05, 1.05)
-    plt.xlabel("timesteps"); plt.ylabel("hover_success / n_diag_episodes")
-    plt.title("Hover success rate per checkpoint")
-    _shade_streak_windows(plt.gca(), timesteps, rows, n_diag_episodes)
-    plt.legend(loc="lower right")
-    plt.savefig(os.path.join(output_dir, "hover_success_rate.png")); plt.close()
-
-    print(f"[plot_training_run] wrote plots to {output_dir}/")
-
-    _print_convergence_summary(rows, hover_success_steps, n_diag_episodes,
-                                hit_threshold, max_steps)
+    return {
+        "success_rate": n_success / n_episodes,
+        "avg_final_dist": float(np.mean(final_dists)),
+        "avg_reward": float(np.mean(episode_rewards)),
+        "avg_steps_survived": float(np.mean(steps_survived)),
+    }
 
 
+# ---------------------------------------------------------------------------
+# Streak analysis -- is a good checkpoint a fluke or sustained?
+# ---------------------------------------------------------------------------
 STREAK_TIERS = (0.25, 0.50, 0.75, 1.00)
 STREAK_LEN = 5  # consecutive checkpoints required at a given tier
 
@@ -151,9 +92,9 @@ def _hover_ratios(rows, n_diag_episodes):
 def _streak_windows(values, threshold, min_len=STREAK_LEN):
     """
     Indices [start, end] (inclusive) of every run where value >= threshold
-    for at least min_len consecutive checkpoints in a row -- this is what
-    "5 global consecutive 20-streaks" means: not one lucky checkpoint, but
-    the diagnostic batch clearing the bar min_len times back to back.
+    for at least min_len consecutive checkpoints in a row -- not one lucky
+    checkpoint, but the diagnostic batch clearing the bar min_len times
+    back to back.
     """
     windows = []
     start = None
@@ -170,13 +111,6 @@ def _streak_windows(values, threshold, min_len=STREAK_LEN):
     return windows
 
 
-def _best_streak_window(rows, n_diag_episodes, tier=1.00):
-    """Latest streak window at the given tier, or None if it never happened."""
-    ratios = _hover_ratios(rows, n_diag_episodes)
-    windows = _streak_windows(ratios, tier)
-    return windows[-1] if windows else None
-
-
 def _shade_streak_windows(ax, timesteps, rows, n_diag_episodes):
     """Overlay the highest tier's streak window(s) as shaded spans on a plot."""
     ratios = _hover_ratios(rows, n_diag_episodes)
@@ -189,8 +123,136 @@ def _shade_streak_windows(ax, timesteps, rows, n_diag_episodes):
             break  # only shade the highest tier actually achieved
 
 
-def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes,
-                                hit_threshold, max_steps):
+# ---------------------------------------------------------------------------
+# Plots -- 5 figures total (down from 11), each covering one question:
+#   1) training_error     -- is the optimization itself behaving?
+#   2) policy_std          -- is exploration decaying as expected?
+#   3) distance_distribution -- how close/consistent is the drone to target?
+#   4) success_and_outcomes -- is it succeeding, and why does it fail when it does?
+#   5) vs_pid_baseline      -- did RL actually beat the classical controller?
+# ---------------------------------------------------------------------------
+def plot_training_run(csv_path, output_dir="plots_final",
+                       hover_success_steps=480, n_diag_episodes=20,
+                       hit_threshold=0.3, streak_cap=30, max_steps=5000,
+                       oob_radius=7, hit_reward=10, attitude_penalty=-1.0,
+                       oob_penalty=-1.5, streak_penalty_coef=-0.05,
+                       pid_gains_path="app/control/best_pid_gains.json",
+                       pid_baseline_episodes=20):
+    """
+    hover_success_steps, n_diag_episodes, hit_threshold, streak_cap, max_steps
+    should match whatever RewardConfig / env / diagnostic loop you actually
+    trained with -- they're only used to draw target reference lines and
+    (for the reward-related ones) to rebuild an equivalent RewardConfig for
+    the PID baseline comparison, not to recompute anything from the CSV.
+    """
+    rows = _read_csv(csv_path)
+    if not rows:
+        print(f"[plot_training_run] no rows found in {csv_path}")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    timesteps = np.array([float(r["timesteps"]) for r in rows])
+
+    def col(name, default=0.0):
+        return np.array([float(r.get(name, default) or default) for r in rows])
+
+    # --- 1) training_error: policy/entropy loss + value_loss/grad_norm (log) ---
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7))
+    ax1.plot(timesteps, col("policy_loss"), label="policy_loss")
+    ax1.plot(timesteps, col("entropy_loss"), label="entropy_loss")
+    ax1.axhline(y=0.0, color="k", linestyle=":", alpha=0.5)
+    ax1.set_ylabel("loss"); ax1.set_title("Policy & entropy loss"); ax1.legend()
+
+    ax2.semilogy(timesteps, col("value_loss"), label="value_loss")
+    ax2.semilogy(timesteps, np.maximum(col("grad_norm"), 1e-8), label="grad_norm (pre-clip)")
+    ax2.set_xlabel("timesteps"); ax2.set_ylabel("log scale")
+    ax2.set_title("Value loss & gradient norm (success = low & flat, not spiking)")
+    ax2.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, "training_error.png")); plt.close(fig)
+
+    # --- 2) policy_std: exploration decay ---
+    plt.figure(figsize=(8, 4))
+    plt.semilogy(timesteps, np.maximum(col("effective_std_mean"), 1e-8))
+    plt.xlabel("timesteps"); plt.ylabel("effective_std_mean (log scale)")
+    plt.title("Policy action std (success = decaying, not climbing or flat-high)")
+    plt.savefig(os.path.join(output_dir, "policy_std.png")); plt.close()
+
+    # --- 3) distance_distribution: mean +/- std band, min, target=0 ---
+    avg_dist, std_dist, min_dist = col("avg_final_dist"), col("std_final_dist"), col("min_final_dist")
+    plt.figure(figsize=(8, 4))
+    plt.plot(timesteps, avg_dist, label="avg_final_dist")
+    plt.fill_between(timesteps, avg_dist - std_dist, avg_dist + std_dist, alpha=0.2,
+                      label="+/- 1 std across diagnostic episodes")
+    plt.plot(timesteps, min_dist, label="min_final_dist", linestyle="--")
+    plt.axhline(y=hit_threshold, color="g", linestyle="--", label=f"hit_threshold={hit_threshold}")
+    plt.axhline(y=0.0, color="k", linestyle=":", alpha=0.5)
+    plt.xlabel("timesteps"); plt.ylabel("distance (m)")
+    plt.title("Final distance to target (success = converges to 0, band narrows)")
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "distance_distribution.png")); plt.close()
+
+    # --- 4) success_and_outcomes: hover-success rate + outcome breakdown ---
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 8))
+    hover_ratio = col("outcome_hover_success") / n_diag_episodes
+    ax1.plot(timesteps, hover_ratio, marker=".")
+    for tier, style in ((0.25, ":"), (0.50, "--"), (0.75, "-."), (1.00, "-")):
+        ax1.axhline(y=tier, color="g", linestyle=style, alpha=0.5, label=f"{int(tier*100)}%")
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.set_ylabel("hover_success / n_diag_episodes")
+    ax1.set_title("Hover success rate per checkpoint")
+    _shade_streak_windows(ax1, timesteps, rows, n_diag_episodes)
+    ax1.legend(loc="lower right")
+
+    outcome_keys = [k for k in rows[0].keys() if k.startswith("outcome_")]
+    outcome_series = [col(k) for k in outcome_keys]
+    ax2.stackplot(timesteps, *outcome_series, labels=[k.replace("outcome_", "") for k in outcome_keys])
+    ax2.axhline(y=n_diag_episodes, color="g", linestyle="--",
+                label=f"all {n_diag_episodes} eps -> hover_success")
+    ax2.set_xlabel("timesteps"); ax2.set_ylabel("count")
+    ax2.set_title("Outcome distribution (success = stack fills with hover_success only)")
+    ax2.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, "success_and_outcomes.png")); plt.close(fig)
+
+    print(f"[plot_training_run] wrote plots_final to {output_dir}/")
+    _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold)
+
+    # --- 5) vs_pid_baseline: RL final checkpoint vs classical PID controller ---
+    baseline = compute_pid_baseline(
+        pid_gains_path=pid_gains_path, n_episodes=pid_baseline_episodes,
+        oob_radius=oob_radius, hit_reward=hit_reward, attitude_penalty=attitude_penalty,
+        oob_penalty=oob_penalty, streak_penalty_coef=streak_penalty_coef,
+        hover_success_steps=hover_success_steps, streak_cap=streak_cap,
+    )
+    if baseline is not None:
+        last = rows[-1]
+        rl_stats = {
+            "success_rate": float(last.get("outcome_hover_success", 0)) / n_diag_episodes,
+            "avg_final_dist": float(last.get("avg_final_dist", 0.0)),
+            "avg_reward": float(last.get("reward_mean", 0.0)),
+            "avg_steps_survived": float(last.get("avg_steps_survived", 0.0)),
+        }
+        metrics = [
+            ("success_rate", "higher is better"),
+            ("avg_final_dist", "lower is better"),
+            ("avg_reward", "higher is better"),
+            ("avg_steps_survived", "higher is better"),
+        ]
+        fig, axes = plt.subplots(2, 2, figsize=(9, 7))
+        for ax, (key, direction) in zip(axes.flat, metrics):
+            ax.bar(["RL (final ckpt)", "PID baseline"],
+                   [rl_stats[key], baseline[key]],
+                   color=["#2b6cb0", "#a0aec0"])
+            ax.set_title(f"{key}\n({direction})")
+        fig.suptitle("RL policy vs. tuned PID controller, same task/reward")
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, "vs_pid_baseline.png")); plt.close(fig)
+        print(f"[plot_training_run] wrote {output_dir}/vs_pid_baseline.png "
+              f"(RL {rl_stats}, PID {baseline})")
+
+
+def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold):
     """
     Two-part check:
       1) per-checkpoint sanity table for the LAST row (quick snapshot --
@@ -198,8 +260,8 @@ def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes,
       2) the real signal -- for each hover-success-rate tier (25/50/75/100%),
          has the diagnostic batch stayed at or above that rate for
          STREAK_LEN consecutive checkpoints? A single good checkpoint isn't
-         convergence; oscillating good/moving_away_cap checkpoints (as seen
-         in earlier runs) will fail this even if the last row looks great.
+         convergence; oscillating good/moving_away_cap checkpoints will fail
+         this even if the last row looks great.
     """
     last = rows[-1]
 
@@ -268,5 +330,5 @@ def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes,
 if __name__ == "__main__":
     import sys
     csv_arg = sys.argv[1] if len(sys.argv) > 1 else "runs/1m_10epochs_v2/metrics.csv"
-    out_arg = sys.argv[2] if len(sys.argv) > 2 else "plots"
+    out_arg = sys.argv[2] if len(sys.argv) > 2 else "plots_final"
     plot_training_run(csv_arg, out_arg)

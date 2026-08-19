@@ -5,10 +5,18 @@
 
 
 **Phase 0** 
+
+status: **!`DONE`!**
+
 description: teaching the drone how to hover in place without falling or drifting
 goal: the drone can stay within 0.3m of spawn point `(0,0,0.5)` for the full episode length, velocity near 0
 why: every later phase assumes the drone can already resist gravity — without this, all movement rewards get drowned out by free-fall, like you saw with the flat 165k-step plateau
 additional info: target = spawn position exactly. No `moving_away_cap` needed really — replace with a "drift radius" termination (e.g. `dist > 1.0` = fail). Wind=0, mass fixed.
+
+RESULTS: the drone is able to hover in the bounded distance sphere , and after >100K steps it normalized to average distance of 0.2m ,
+which is fine beacuse the drone is able to stay in close space to the area of effect (0.3m) and it dosent get roll pitch or yaw penalties
+
+
 
 ---
 

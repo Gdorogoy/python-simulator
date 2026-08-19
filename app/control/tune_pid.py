@@ -25,7 +25,8 @@ def evaluate_pid(pid, n_episodes=5, n_steps=600):
 
     for i in range(n_episodes):
         target = np.array([0, 0, 5])
-        env.reset(start_pos=target.copy(), target_pos=target.copy())
+        offset = np.random.uniform(-0.2, 0.2, size=3)
+        env.reset(start_pos=(target + offset).astype(np.float32), target_pos=target.copy())
 
         tot_reward = 0
         for s in range(n_steps):
@@ -77,5 +78,5 @@ if __name__ == "__main__":
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=300)
     print(study.best_params)
-    with open("/control/best_pid_gains.json", "w") as f:
+    with open("app/control/best_pid_gains.json", "w") as f:
         json.dump(study.best_params, f, indent=2)

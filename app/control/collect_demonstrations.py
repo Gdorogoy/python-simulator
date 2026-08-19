@@ -16,8 +16,10 @@ def collect_demonstrations(pid, n_episodes=50, n_steps=600,
     all_actions = []
 
     for ep in range(n_episodes):
+        offset = np.random.uniform(-0.2, 0.2, size=3)  # random small displacement from target
+        start = np.array([0, 0, 5], dtype=np.float32) + offset
         target = np.array([0, 0, 5], dtype=np.float32)
-        obs, _ = env.reset(start_pos=target.copy(), target_pos=target.copy())
+        obs, _ = env.reset(start_pos=start, target_pos=target)
 
         for s in range(n_steps):
             action = pid.compute_action(env.drone_state, env.target_pos)
@@ -45,13 +47,15 @@ def collect_demonstrations(pid, n_episodes=50, n_steps=600,
 
 if __name__ == "__main__":
     best_params={
-        "kp_pos": 2.6046151722604542,
-        "kd_pos": 4.904934767415454,
-        "kp_att": 7.840438616994562,
-        "kd_att": 0.19504323460221928,
-        "kp_yaw": 0.15567772197587013,
-        "kd_yaw": 0.18916334442052507,
-    }
+                'kp_pos': 2.3348549042980946,
+                 'kd_pos': 1.0978513647624821,
+                 'kp_att': 7.882461182173537,
+                 'kd_att': 1.0936341247316574,
+                 'kp_yaw': 0.048930591736932,
+                 'kd_yaw': 0.20306927726482113
+
+                 }
+
 
     pid = PIDHoverController(**best_params)
     collect_demonstrations(pid, n_episodes=50, n_steps=600)

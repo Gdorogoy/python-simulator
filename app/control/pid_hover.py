@@ -38,15 +38,15 @@ class PIDHoverController:
         # 2 outer loop
         accel_cmd= self.kp_pos* pos_err - self.kd_pos* vel
 
-        des_roll=np.clip(accel_cmd[0]/9.81,-self.max_tilt_rad,self.max_tilt_rad)
-        des_pitch=np.clip(accel_cmd[1]/9.81,-self.max_tilt_rad,self.max_tilt_rad)
+        des_roll=np.clip(-accel_cmd[1]/9.81,-self.max_tilt_rad,self.max_tilt_rad)
+        des_pitch=np.clip(accel_cmd[0]/9.81,-self.max_tilt_rad,self.max_tilt_rad)
 
         # 3 inner loop
         roll_torque= self.kp_att* (des_roll - roll) - self.kd_att* ang_vel[0]
         pitch_torque= self.kp_att* (des_pitch - pitch) - self.kd_att* ang_vel[1]
 
         yaw_torque= self.kp_yaw*(0- yaw) - self.kd_yaw* ang_vel[2]
-        thrust_delta= self.kp_pos*pos_err[2] - self.kd_yaw* vel[2]
+        thrust_delta= self.kp_pos*pos_err[2] - self.kd_pos* vel[2]
 
         # 4 output action
 

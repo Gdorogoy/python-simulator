@@ -22,13 +22,14 @@ from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.guidance.train import ActorCritic
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-RUNS_DIR = Path(__file__).parent / "runs"
-DEFAULT_CHECKPOINT = RUNS_DIR / "ppo_stage1_885000.pt"
+# RUNS_DIR = Path(__file__).parent / "runs"
+# DEFAULT_CHECKPOINT = RUNS_DIR / "ppo_stage2_510000.pt"
 
 
+DEFAULT_CHECKPOINT = "runs/1m_10epochs_v2/ppo_stage2_660000.pt"
 def main():
     checkpoint = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CHECKPOINT
-    max_steps = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
+    max_steps =  10000000
 
     reward_cfg = RewardConfig(
         oob_radius=7000,
@@ -37,12 +38,13 @@ def main():
         oob_penalty=-1.5,
         streak_penalty_coef=-0.05,
         attitude_roll_deg=90,
-        hover_success_steps=10 ** 9,  # effectively disables the early "success" exit
-        streak_cap=15000,
+        hover_success_steps=10000 ** 9,  # effectively disables the early "success" exit
+        streak_cap=10000,
+
     )
     reward_fn = make_reward_fn(reward_cfg)
     
-    env = InterceptorDroneEnv(reward_fn, render_mode=None)
+    env = InterceptorDroneEnv(reward_fn, render_mode="human")
 
     model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
                          env.action_space.low, env.action_space.high)

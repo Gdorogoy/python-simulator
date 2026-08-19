@@ -91,7 +91,7 @@ class InterceptorDroneEnv(gym.Env):
         #What to puty there? maybe an box for training 250m x 250m x 150m
         self.action_space= spaces.Box(
             low=np.array([-hover_thrust, -0.5, -0.5, -0.5], dtype=np.float32),
-            high=np.array([40.0-hover_thrust,0.5, 0.5, 0.5], dtype=np.float32),
+            high=np.array([hover_thrust,0.5, 0.5, 0.5], dtype=np.float32),
         )
 
         self.observation_space= spaces.Box(

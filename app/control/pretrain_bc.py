@@ -2,14 +2,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from app.guidance.train import ActorCritic
+from app.guidance.train import ActorCritic, device
 
 
 def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
-                               epochs=20, batch_size=256, lr=1e-3):
+                               epochs=50, batch_size=256, lr=1e-3):
     data = np.load(demo_path)
-    obs = torch.as_tensor(data["obs"], dtype=torch.float32)
-    actions = torch.as_tensor(data["actions"], dtype=torch.float32)
+    obs = torch.as_tensor(data["obs"], dtype=torch.float32, device=device)
+    actions = torch.as_tensor(data["actions"], dtype=torch.float32, device=device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     n = len(obs)
@@ -46,10 +46,10 @@ if __name__ == "__main__":
                         env.action_space.low,
                         env.action_space.high,
 
-                        )
+                        ).to(device)
 
     model = pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
-                                       epochs=20, batch_size=256, lr=1e-3)
+                                       epochs=50, batch_size=256, lr=1e-3)
 
     torch.save(model.state_dict(), "app/control/pretrained_bc.pt")
     print("saved pretrained weights to app/control/pretrained_bc.pt")

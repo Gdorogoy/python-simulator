@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
+device ="cpu" #torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
 
 class ActorCritic(nn.Module):
@@ -70,17 +72,17 @@ class ActorCritic(nn.Module):
 
 class RolloutBuffer:
     def __init__(self, num_steps: int, obs_dim: int, action_dim: int):
-        self.obs = torch.zeros(num_steps, obs_dim)
-        self.actions = torch.zeros(num_steps, action_dim)
-        self.log_probs = torch.zeros(num_steps)
-        self.rewards = torch.zeros(num_steps)
-        self.values = torch.zeros(num_steps)
-        self.dones = torch.zeros(num_steps)
+        self.obs = torch.zeros(num_steps, obs_dim, device=device)
+        self.actions = torch.zeros(num_steps, action_dim, device=device)
+        self.log_probs = torch.zeros(num_steps, device=device)
+        self.rewards = torch.zeros(num_steps, device=device)
+        self.values = torch.zeros(num_steps, device=device)
+        self.dones = torch.zeros(num_steps, device=device)
         self.ptr = 0
 
     def add(self, obs, action, log_prob, reward, value, done):
         i = self.ptr
-        self.obs[i] = torch.as_tensor(obs)
+        self.obs[i] = torch.as_tensor(obs, device=device)
         self.actions[i] = action
         self.log_probs[i] = log_prob
         self.rewards[i] = reward
@@ -91,7 +93,7 @@ class RolloutBuffer:
 
 def compute_gae(rewards, values, dones, last_value, gamma: float, lam: float):
     n = len(rewards)
-    advantages = torch.zeros(n)
+    advantages = torch.zeros(n, device=device)
     last_gae = 0.0
 
     for t in reversed(range(n)):
@@ -183,8 +185,10 @@ def ppo_update(model, optimizer, buffer, advantages, returns,
 
 def ppo_train(env, total_timesteps: int, num_steps: int,
               gamma: float, lam: float, lr: float,
+              target_kl: float,
               model=None, optimizer=None, ent_coef: float = 0.015,
-              global_timesteps_offset: int = 0, global_total_timesteps: int = None):
+              global_timesteps_offset: int = 0, global_total_timesteps: int = None,
+              ):
     """
     Runs PPO for `total_timesteps`.
 
@@ -211,7 +215,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
     """
     if model is None:
         model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
-                             env.action_space.low, env.action_space.high)
+                             env.action_space.low, env.action_space.high).to(device)
     if optimizer is None:
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if global_total_timesteps is None:
@@ -228,11 +232,11 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
         buffer = RolloutBuffer(num_steps, env.observation_space.shape[0], env.action_space.shape[0])
 
         for step in range(num_steps):
-            obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             with torch.no_grad():
                 action, raw_action, log_prob, _, value = model.get_action_and_value(obs_t)
 
-            action_np = action.squeeze(0).numpy()
+            action_np = action.squeeze(0).cpu().numpy()
             next_obs, reward, terminated, truncated, _ = env.step(action_np)
             done = terminated or truncated
 
@@ -262,7 +266,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
                 obs, _ = env.reset()
 
         with torch.no_grad():
-            last_obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+            last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             last_value = model.get_action_and_value(last_obs_t)[4].item()
 
         advantages, returns = compute_gae(buffer.rewards, buffer.values, buffer.dones, last_value, gamma, lam)
@@ -270,12 +274,12 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
         last_losses = ppo_update(model, optimizer, buffer, advantages, returns,
                    clip_eps=0.2, vf_coef=0.5, ent_coef=ent_coef, num_epochs=10, batch_size=32,
                    global_timesteps_done=global_timesteps_offset + timesteps_done,
-                   global_total_timesteps=global_total_timesteps)
+                   global_total_timesteps=global_total_timesteps, target_kl=target_kl)
                     #was  vf_coef=0.5
 
 
         with torch.no_grad():
-            model.actor_log_std.clamp_(-2.0, 0.15)
+            model.actor_log_std.clamp_(-2.0, -0.5)
 
     return model, optimizer, episode_rewards, last_losses
 
@@ -286,11 +290,11 @@ def evaluate(model, env, n_episodes: int):
         obs, _ = env.reset()
         done = False
         while not done:
-            obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             with torch.no_grad():
                 mean, std, _ = model.forward(obs_t)
                 action = model.scale_action(mean)
-            action = action.squeeze(0).numpy()
+            action = action.squeeze(0).cpu().numpy()
             obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             if reward >= 15.0:

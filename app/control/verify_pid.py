@@ -5,14 +5,12 @@ from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.control.pid_hover import PIDHoverController
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-best_params = {
-    "kp_pos": 2.6046151722604542,
-    "kd_pos": 4.904934767415454,
-    "kp_att": 7.840438616994562,
-    "kd_att": 0.19504323460221928,
-    "kp_yaw": 0.15567772197587013,
-    "kd_yaw": 0.18916334442052507,
-}
+best_params = {'kp_pos': 10.971886223833621,
+               'kd_pos': 6.495006787354487,
+               'kp_att': 4.447496977009914,
+               'kd_att': 0.612783390615077,
+               'kp_yaw': 0.12108129474700983,
+               'kd_yaw': 0.1988043435629733}
 
 pid = PIDHoverController(**best_params)
 

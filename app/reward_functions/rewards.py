@@ -21,7 +21,7 @@ class RewardConfig:
                  phase0_pos_coef=0.5,
                  phase0_duration_steps=None,
                  rpm_penalty_coef=0.3,
-                 imitation_coef=0.5, 
+                 imitation_coef=0.5,
                  imitation_duration_steps=None
                  ):
 
@@ -116,12 +116,15 @@ def make_reward_fn(cfg: RewardConfig):
     def base_fn(env):
         pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)
 
+        bonus=0.0
+
         terminal = _terminal_checks(cfg, env, pos, roll, pitch)
         if terminal is not None:
             return terminal
 
-        if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
-            return cfg.hit_reward, True, "hover_success"
+        # if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
+        #     return cfg.hit_reward, True, "hover_success"
+
         # ----- single in-zone / outside-zone branch -----
 
         if dist < cfg.outer_dist:
@@ -129,8 +132,12 @@ def make_reward_fn(cfg: RewardConfig):
             env.moving_away_streak = 0
             env.hover_steps_in_zone += 1
 
-            if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
-                env.hover_success_achieved = True   # telemetry only no reward bonus
+            if cfg.hover_success_steps is not None and env.hover_steps_in_zone == cfg.hover_success_steps:
+                env.hover_success_achieved = True
+                bonus = cfg.hit_reward  # one-time bonus, doesn't terminate
+            else:
+                bonus = 0.0
+
 
 
             # calculating tilt to find the stable state
@@ -185,7 +192,7 @@ def make_reward_fn(cfg: RewardConfig):
         if env.moving_away_streak >= cfg.streak_cap:
             return cfg.oob_penalty, True, "moving_away_cap"
 
-        return progress + streak_penalty + closer_bonus , False, "running"
+        return progress + streak_penalty + closer_bonus+bonus , False, "running"
 
     def phase_0_fn(env):
         pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)
