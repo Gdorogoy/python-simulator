@@ -21,7 +21,8 @@ import torch
 
 from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.guidance.train import ActorCritic, ppo_train, device
-from app.training import diagnose_with_model
+from app.reward_functions.phase1_rewards import Phase1Config, make_phase1_reward_fn
+from app.training.phase_0_training import diagnose_with_model
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
 N_TRIALS = 7
@@ -33,24 +34,23 @@ RESULTS_DIR = "runs/optuna"
 
 
 def build_env(trial: optuna.Trial) -> InterceptorDroneEnv:
-    reward_cfg = RewardConfig(
+    reward_cfg = Phase1Config(
         oob_radius=7,
         hit_reward=10,
         attitude_penalty=-1.0,
         oob_penalty=-1.5,
         streak_penalty_coef=trial.suggest_float("streak_penalty_coef", -0.1, -0.01),
-        hover_success_steps=200,
         streak_cap=trial.suggest_int("streak_cap", 15, 40),
-        phase0_pos_coef=trial.suggest_float("phase0_pos_coef", 0.2, 1.0),
-        tilt_penalty_coef=trial.suggest_float("tilt_penalty_coef", 0.02, 0.3),
-        ang_vel_penalty_coef=trial.suggest_float("ang_vel_penalty_coef", 0.02, 0.3),
-        imitation_coef=trial.suggest_float("imitation_coef", 0.0, 0.5),
-        imitation_duration_steps=20_000,
-        phase0_duration_steps=20_000,
+        axis_pos_coef=trial.suggest_float("axis_pos_coef", 0.2, 2.0),
+        axis_penalty_coef=trial.suggest_float("axis_penalty_coef", 0.02, 0.5),
+        hit_streak_target=200,
+        hit_streak_bonus=trial.suggest_float("hit_streak_bonus", 0.1, 4.0),
+        hit_threshold=trial.suggest_float("hit_threshold", 0.01, 0.07)
+
     )
 
-    env = InterceptorDroneEnv(make_reward_fn(reward_cfg))
-    env.target_pos = np.array([0, 0, 5], dtype=np.float32)
+    env = InterceptorDroneEnv(make_phase1_reward_fn(reward_cfg))
+    env.target_pos = np.array([3, 0, 5], dtype=np.float32)
     return env
 
 
@@ -78,7 +78,9 @@ def objective(trial: optuna.Trial) -> float:
     )
 
     outcomes = diagnose_with_model(model, env, N_EVAL_EPISODES)
-    success_rate = outcomes["hover_success"] / N_EVAL_EPISODES
+    # phase 1's axis_fn terminates on "target_hit", not hover_success (that flag is
+    # only ever set by base_fn's hover-in-zone logic in rewards.py)
+    success_rate = outcomes["target_hit"] / N_EVAL_EPISODES
     mean_reward = float(np.mean(episode_rewards[-10:])) if episode_rewards else 0.0
 
     trial.set_user_attr("mean_reward", mean_reward)

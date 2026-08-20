@@ -11,7 +11,7 @@ curriculum-style training phases (phase_0 -> base).
 
 class RewardConfig:
     def __init__(self, oob_radius, drift_radius=None, hit_threshold=0.3,
-                 streak_cap=30, attitude_roll_deg=65, attitude_pitch_deg=80,
+                 streak_cap=30, attitude_roll_deg=120, attitude_pitch_deg=120,
                  hit_reward=5, attitude_penalty=-5, oob_penalty=-6,
                  streak_penalty_coef=-0.02, hover_success_steps=None,
                  inner_dist=0.15,
@@ -22,7 +22,7 @@ class RewardConfig:
                  phase0_duration_steps=None,
                  rpm_penalty_coef=0.3,
                  imitation_coef=0.5,
-                 imitation_duration_steps=None
+                 imitation_duration_steps=None,
                  ):
 
         self.oob_radius = oob_radius
@@ -47,6 +47,7 @@ class RewardConfig:
 
         self.imitation_coef=imitation_coef
         self.imitation_duration_steps=imitation_duration_steps
+
 
 
 

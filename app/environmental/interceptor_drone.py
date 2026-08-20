@@ -117,7 +117,9 @@ class InterceptorDroneEnv(gym.Env):
         if start_pos is None:
             start_pos = np.array([0, 0, 5], dtype=np.float32)
         if target_pos is None:
-            target_pos = np.array([0, 0,5], dtype=np.float32)
+            # preserve a target_pos set directly on the env (e.g. by a training/search
+            # script right after construction) across resets that don't pass one explicitly
+            target_pos = getattr(self, "target_pos", np.array([0, 0, 5], dtype=np.float32))
 
         self.target_pos = target_pos
 

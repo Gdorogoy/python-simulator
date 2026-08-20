@@ -90,7 +90,8 @@ def compute_target_pos(start_position, distance, angle_deg, y_offset):
 # ---------------------------------------------------------------------------
 def diagnose_with_model(model, env, n_episodes):
     outcomes = {"oob": 0, "attitude-ROLL": 0, "attitude-PITCH": 0, "hit": 0,
-                "hover_success": 0, "moving_away_cap": 0, "drift": 0, "timeout": 0}
+                "hover_success": 0, "moving_away_cap": 0, "drift": 0, "timeout": 0,
+                "target_hit": 0}
     steps_survived = []
 
     for ep in range(n_episodes):
@@ -213,7 +214,7 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
         "effective_std_mean": effective_std_mean,
         "total_param_norm": total_param_norm,
     }
-    for key in ("oob", "attitude-ROLL","attitude-PITCH", "hit", "hover_success", "moving_away_cap", "drift", "timeout"):
+    for key in ("oob", "attitude-ROLL","attitude-PITCH", "hit", "hover_success", "moving_away_cap", "drift", "timeout", "target_hit"):
         row[f"outcome_{key}"] = outcomes.get(key, 0)
 
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
