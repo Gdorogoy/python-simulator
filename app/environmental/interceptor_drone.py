@@ -126,6 +126,9 @@ class InterceptorDroneEnv(gym.Env):
         self.last_raw_action = np.zeros(4, dtype=np.float32)
         self.hover_success_achieved = False
 
+        if getattr(self, "pid_teacher", None) is not None:
+            self.pid_teacher.reset()
+
         # self.wind_vector , self.mass_scale = sample_wind_conditions(np_rand=self.np_random)
         self.wind_vector=[0,0,0]
         self.mass_scale=1

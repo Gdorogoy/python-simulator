@@ -27,6 +27,7 @@ def evaluate_pid(pid, n_episodes=5, n_steps=600):
         target = np.array([0, 0, 5])
         offset = np.random.uniform(-0.2, 0.2, size=3)
         env.reset(start_pos=(target + offset).astype(np.float32), target_pos=target.copy())
+        pid.reset()
 
         tot_reward = 0
         for s in range(n_steps):
@@ -60,6 +61,10 @@ def objective(trial):
     kp_yaw = trial.suggest_float("kp_yaw", 0.02, 0.2)
     kd_yaw = trial.suggest_float("kd_yaw", 0.02, 0.22)
 
+    ki_pos = trial.suggest_float("ki_pos", 0.0, 3.0)
+    ki_att = trial.suggest_float("ki_att", 0.0, 1.5)
+    ki_yaw = trial.suggest_float("ki_yaw", 0.0, 0.05)
+
 
     pid=PIDHoverController(
         kp_pos=kp_pos,
@@ -68,6 +73,9 @@ def objective(trial):
         kd_att=kd_att,
         kp_yaw=kp_yaw,
         kd_yaw=kd_yaw,
+        ki_pos=ki_pos,
+        ki_att=ki_att,
+        ki_yaw=ki_yaw,
 
     )
 

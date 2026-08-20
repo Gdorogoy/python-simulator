@@ -54,21 +54,31 @@ best_params={'streak_penalty_coef': -0.04983211032477406,
 # Config
 # ---------------------------------------------------------------------------
 class TrainConfig:
-    TARGET_DISTANCE = 1
-    TARGET_ANGLE_DEG = 45.0
-    TARGET_Y_OFFSET = 1.0
-
-    TOTAL_TIMESTEPS = 5_000_000 # was 2_000_000
-    NUM_STEPS = 4096                  # rollout length per PPO update
-    GAMMA = 0.98 # was 0.97
-    LAM = 0.95
-
-    LR =best_params["lr"] # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
-
-    CHECKPOINT_EVERY_TIMESTEPS = 15_000   # coarse enough that diagnostics
-    CHECKPOINT_DIR = "runs/1m_10epochs_v2"
-    METRICS_CSV = "runs/1m_10epochs_v2/metrics.csv"
-    N_DIAGNOSTIC_EPISODES = 20
+    def __init__(self,
+                 TARGET_DISTANCE=1,
+                 TARGET_ANGLE_DEG=45.0,
+                 TARGET_Y_OFFSET=1.0,
+                 TOTAL_TIMESTEPS=5_000_000,  # was 2_000_000
+                 NUM_STEPS=4096,                  # rollout length per PPO update
+                 GAMMA=0.98,  # was 0.97
+                 LAM=0.95,
+                 LR=best_params["lr"],  # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
+                 CHECKPOINT_EVERY_TIMESTEPS=15_000,   # coarse enough that diagnostics
+                 CHECKPOINT_DIR="runs/1m_10epochs_v2",
+                 METRICS_CSV="runs/1m_10epochs_v2/metrics.csv",
+                 N_DIAGNOSTIC_EPISODES=20):
+        self.TARGET_DISTANCE = TARGET_DISTANCE
+        self.TARGET_ANGLE_DEG = TARGET_ANGLE_DEG
+        self.TARGET_Y_OFFSET = TARGET_Y_OFFSET
+        self.TOTAL_TIMESTEPS = TOTAL_TIMESTEPS
+        self.NUM_STEPS = NUM_STEPS
+        self.GAMMA = GAMMA
+        self.LAM = LAM
+        self.LR = LR
+        self.CHECKPOINT_EVERY_TIMESTEPS = CHECKPOINT_EVERY_TIMESTEPS
+        self.CHECKPOINT_DIR = CHECKPOINT_DIR
+        self.METRICS_CSV = METRICS_CSV
+        self.N_DIAGNOSTIC_EPISODES = N_DIAGNOSTIC_EPISODES
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +320,6 @@ def train(cfg: TrainConfig):
         drone_state_arr.append(env.drone_state)
         timesteps_done += cfg.CHECKPOINT_EVERY_TIMESTEPS
 
-        recent = all_episode_rewards[-10:] if all_episode_rewards else [0]
 
         print()  # move off the in-place epoch/step progress line
         save_checkpoint(model, timesteps_done, cfg)

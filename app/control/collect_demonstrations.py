@@ -20,6 +20,7 @@ def collect_demonstrations(pid, n_episodes=50, n_steps=600,
         start = np.array([0, 0, 5], dtype=np.float32) + offset
         target = np.array([0, 0, 5], dtype=np.float32)
         obs, _ = env.reset(start_pos=start, target_pos=target)
+        pid.reset()
 
         for s in range(n_steps):
             action = pid.compute_action(env.drone_state, env.target_pos)
@@ -43,6 +44,20 @@ def collect_demonstrations(pid, n_episodes=50, n_steps=600,
     np.savez(save_path, obs=all_obs, actions=all_actions)
     print(f"saved {len(all_obs)} (state, action) pairs to {save_path}")
     print(f"obs shape: {all_obs.shape}, actions shape: {all_actions.shape}")
+
+
+
+
+
+
+def collect_demonstrations_x(pid, n_epidsodes=50, n_steps=600,
+                             save_path="app/control/demonstrations_x.npz"):
+    
+    reward_cfg = RewardConfig(oob_radius=7, hover_success_steps=None)
+    reward_fn = make_reward_fn(reward_cfg)
+    env = InterceptorDroneEnv(reward_fn)
+
+
 
 
 if __name__ == "__main__":

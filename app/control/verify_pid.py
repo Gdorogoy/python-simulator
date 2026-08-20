@@ -19,6 +19,7 @@ env = InterceptorDroneEnv(make_reward_fn(reward_cfg))
 
 target = np.array([0, 0, 5], dtype=np.float32)
 obs, _ = env.reset(start_pos=target.copy(), target_pos=target.copy())
+pid.reset()
 
 for step in range(750):
     action = pid.compute_action(env.drone_state, env.target_pos)

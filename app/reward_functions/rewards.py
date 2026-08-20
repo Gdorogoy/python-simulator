@@ -110,89 +110,96 @@ def chain_reward_fns(phases:list[object]):
     return chained_fn
 
 
+def base_reward_fn(cfg, env):
+    """
+    Base hover/approach reward, factored out of make_reward_fn so it can also be
+    used as the terminal stage of other curricula (e.g. RewardFnPhase1.as_curriculum).
+    """
+    pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)
+
+    bonus=0.0
+
+    terminal = _terminal_checks(cfg, env, pos, roll, pitch)
+    if terminal is not None:
+        return terminal
+
+    # if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
+    #     return cfg.hit_reward, True, "hover_success"
+
+    # ----- single in-zone / outside-zone branch -----
+
+    if dist < cfg.outer_dist:
+        # resetting the moving away streak each time the drone is back in the zone and adding to the in zone streak
+        env.moving_away_streak = 0
+        env.hover_steps_in_zone += 1
+
+        if cfg.hover_success_steps is not None and env.hover_steps_in_zone == cfg.hover_success_steps:
+            env.hover_success_achieved = True
+            bonus = cfg.hit_reward  # one-time bonus, doesn't terminate
+        else:
+            bonus = 0.0
+
+
+
+        # calculating tilt to find the stable state
+        tilt = abs(roll) + abs(pitch)
+
+        """
+            per step reward that scores how well the drone is hovering
+            0.2 - reward for begin in the zone
+            -0.1 * min(||vel||) , 4.0) - penalizes speed because we need no speed to hover , set to min of the vel and 4 to not get the model in too much negative reward
+            -1.15 * dist - penalizes the distance from target the until 0.3 (because then the calculation isnt reached)
+            -cfg.tilt_penalty_coef * tilt - penalizes the tilt so the drone wont hover at an angle
+            -cfg.ang_vel_penatly * min(||ang_vel||,4.0) - same as tilt and speed penalty discourages the drone from spinning
+
+        """
+
+        stability_term = (0.2 - 0.1 * min(np.linalg.norm(vel), 4.0) - 1.15 * dist
+                           - cfg.tilt_penalty_coef * tilt
+                           - cfg.ang_vel_penalty_coef * min(np.linalg.norm(ang_vel), 4.0))
+
+        pos_term=0.2-0.5*dist
+
+        diff = env.prev_distance - dist
+        approach_term = diff * 1.25 - 0.01 if diff < 0 else diff - 0.01
+
+        """
+            blend is just an wighted average between two formulas of approach term and stability term and they always add up to 1
+            and it dosent work so well because it dosent get more stability handed because it only understands stability when its deep in the zone
+        """
+
+
+        blend = np.clip((cfg.outer_dist - dist) / (cfg.outer_dist - cfg.inner_dist), 0.0, 1.0)
+
+        # progress = blend * stability_term + (1 - blend) * approach_term
+        progress= blend* pos_term + (1-blend) * approach_term + stability_term
+
+        closer_bonus = 0.01 if diff > 0 else 0.0
+
+    else:
+        env.hover_steps_in_zone = 0
+        diff = env.prev_distance - dist
+        if diff < 0:
+            env.moving_away_streak += 1
+            progress = diff * 1.25 - 0.01
+        else:
+            env.moving_away_streak = 0
+            progress = diff - 0.01
+        closer_bonus = 0.01 if diff > 0 else 0.0
+
+    streak_penalty = cfg.streak_penalty_coef * env.moving_away_streak
+    env.prev_distance = dist
+
+    if env.moving_away_streak >= cfg.streak_cap:
+        return cfg.oob_penalty, True, "moving_away_cap"
+
+    return progress + streak_penalty + closer_bonus+bonus , False, "running"
+
+
 def make_reward_fn(cfg: RewardConfig):
 
-    # base reward function check the basic things
     def base_fn(env):
-        pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)
-
-        bonus=0.0
-
-        terminal = _terminal_checks(cfg, env, pos, roll, pitch)
-        if terminal is not None:
-            return terminal
-
-        # if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
-        #     return cfg.hit_reward, True, "hover_success"
-
-        # ----- single in-zone / outside-zone branch -----
-
-        if dist < cfg.outer_dist:
-            # resetting the moving away streak each time the drone is back in the zone and adding to the in zone streak
-            env.moving_away_streak = 0
-            env.hover_steps_in_zone += 1
-
-            if cfg.hover_success_steps is not None and env.hover_steps_in_zone == cfg.hover_success_steps:
-                env.hover_success_achieved = True
-                bonus = cfg.hit_reward  # one-time bonus, doesn't terminate
-            else:
-                bonus = 0.0
-
-
-
-            # calculating tilt to find the stable state
-            tilt = abs(roll) + abs(pitch)
-
-            """
-                per step reward that scores how well the drone is hovering 
-                0.2 - reward for begin in the zone
-                -0.1 * min(||vel||) , 4.0) - penalizes speed because we need no speed to hover , set to min of the vel and 4 to not get the model in too much negative reward
-                -1.15 * dist - penalizes the distance from target the until 0.3 (because then the calculation isnt reached) 
-                -cfg.tilt_penalty_coef * tilt - penalizes the tilt so the drone wont hover at an angle
-                -cfg.ang_vel_penatly * min(||ang_vel||,4.0) - same as tilt and speed penalty discourages the drone from spinning 
-                
-            """
-
-            stability_term = (0.2 - 0.1 * min(np.linalg.norm(vel), 4.0) - 1.15 * dist
-                               - cfg.tilt_penalty_coef * tilt
-                               - cfg.ang_vel_penalty_coef * min(np.linalg.norm(ang_vel), 4.0))
-
-            pos_term=0.2-0.5*dist
-
-            diff = env.prev_distance - dist
-            approach_term = diff * 1.25 - 0.01 if diff < 0 else diff - 0.01
-
-            """
-                blend is just an wighted average between two formulas of approach term and stability term and they always add up to 1
-                and it dosent work so well because it dosent get more stability handed because it only understands stability when its deep in the zone
-            """
-
-
-            blend = np.clip((cfg.outer_dist - dist) / (cfg.outer_dist - cfg.inner_dist), 0.0, 1.0)
-
-            # progress = blend * stability_term + (1 - blend) * approach_term
-            progress= blend* pos_term + (1-blend) * approach_term + stability_term
-
-            closer_bonus = 0.01 if diff > 0 else 0.0
-
-        else:
-            env.hover_steps_in_zone = 0
-            diff = env.prev_distance - dist
-            if diff < 0:
-                env.moving_away_streak += 1
-                progress = diff * 1.25 - 0.01
-            else:
-                env.moving_away_streak = 0
-                progress = diff - 0.01
-            closer_bonus = 0.01 if diff > 0 else 0.0
-
-        streak_penalty = cfg.streak_penalty_coef * env.moving_away_streak
-        env.prev_distance = dist
-
-        if env.moving_away_streak >= cfg.streak_cap:
-            return cfg.oob_penalty, True, "moving_away_cap"
-
-        return progress + streak_penalty + closer_bonus+bonus , False, "running"
+        return base_reward_fn(cfg, env)
 
     def phase_0_fn(env):
         pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)

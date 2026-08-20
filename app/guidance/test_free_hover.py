@@ -10,12 +10,14 @@ if the policy only learned to survive exactly ~200 steps and then falls
 apart, this is what will show it.
 
 Usage:
-    python -m app.guidance.test_free_hover [checkpoint_path] [max_steps]
+    python -m app.guidance.test_free_hover [checkpoint_path] [--save-video [path.mp4]]
 """
-import sys
+import argparse
 from pathlib import Path
 
+import cv2
 import numpy as np
+import pybullet as p
 import torch
 
 from app.environmental.interceptor_drone import InterceptorDroneEnv
@@ -26,9 +28,29 @@ from app.reward_functions.rewards import RewardConfig, make_reward_fn
 # DEFAULT_CHECKPOINT = RUNS_DIR / "ppo_stage2_510000.pt"
 
 
-DEFAULT_CHECKPOINT = "runs/1m_10epochs_v2/ppo_stage2_660000.pt"
+DEFAULT_CHECKPOINT = "z_final_version_1m_10epoch/ppo_stage2_660000.pt"
+MAX_VIDEO_SECONDS = 10
+
+
+def _capture_frame():
+    width, height, view_matrix, proj_matrix = p.getDebugVisualizerCamera()[:4]
+    _, _, rgba, _, _ = p.getCameraImage(
+        width, height, view_matrix, proj_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL,
+    )
+    rgb = np.reshape(np.array(rgba, dtype=np.uint8), (height, width, 4))[:, :, :3]
+    return width, height, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
 def main():
-    checkpoint = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CHECKPOINT
+    parser = argparse.ArgumentParser()
+    parser.add_argument("checkpoint", nargs="?", default=DEFAULT_CHECKPOINT)
+    parser.add_argument(
+        "--save-video", nargs="?", const="hover_flight.mp4", default=None, metavar="PATH",
+        help=f"save a video of the run (max {MAX_VIDEO_SECONDS}s) to PATH",
+    )
+    args = parser.parse_args()
+
+    checkpoint = Path(args.checkpoint)
     max_steps =  10000000
 
     reward_cfg = RewardConfig(
@@ -58,6 +80,21 @@ def main():
     step = 0
     info = {"reason": None}
 
+    video_writer = None
+    frame_interval = None
+    max_frames = None
+    frames_written = 0
+    fps = env.metadata.get("render_fps", 30)
+    if args.save_video:
+        frame_interval = max(1, round((1 / fps) / env.dt))
+        max_frames = fps * MAX_VIDEO_SECONDS
+        width, height, first_frame = _capture_frame()
+        video_writer = cv2.VideoWriter(
+            args.save_video, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height),
+        )
+        video_writer.write(first_frame)
+        frames_written += 1
+
     while not done and step < max_steps:
         obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
@@ -69,8 +106,22 @@ def main():
         step += 1
         done = terminated or truncated
 
+        if video_writer is not None and frames_written < max_frames and step % frame_interval == 0:
+            _, _, frame = _capture_frame()
+            video_writer.write(frame)
+            frames_written += 1
+
         if step % 20 == 0 or done:
             print(f"step {step:4d}  dist={env.prev_distance:.4f}  reason={info['reason']}")
+
+        if video_writer is not None and frames_written >= max_frames:
+            video_writer.release()
+            print(f"Saved {frames_written / fps:.1f}s video to {args.save_video}")
+            video_writer = None
+
+    if video_writer is not None:
+        video_writer.release()
+        print(f"Saved {frames_written / fps:.1f}s video to {args.save_video}")
 
     if not done:
         print(f"reached max_steps={max_steps} without terminating -- "

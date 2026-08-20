@@ -55,6 +55,7 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
 
     for _ in range(n_episodes):
         obs, _ = env.reset()
+        pid.reset()
         done = False
         step_count = 0
         ep_reward = 0.0
