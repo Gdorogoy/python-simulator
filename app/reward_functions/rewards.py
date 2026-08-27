@@ -48,6 +48,10 @@ class RewardConfig:
         self.imitation_coef=imitation_coef
         self.imitation_duration_steps=imitation_duration_steps
 
+        self.hit_streak=0
+
+
+
 
 
 
@@ -67,6 +71,19 @@ def _kinematics(env):
     dist = np.linalg.norm(env.target_pos - pos)
 
     return pos, vel, ang_vel, roll, pitch, yaw, dist
+
+
+def _check_hit(cfg, dist):
+    """Returns (hit_reward, True, "Hit") once dist closes under cfg.hit_threshold, else None.
+
+    Shared by RewardFnPhase1's stages AND base_reward_fn -- base_reward_fn is the
+    terminal, indefinite-duration stage of RewardFnPhase1's roadmap (and phase 0's
+    make_reward_fn), so without this call here "Hit" becomes unreachable for the
+    entire rest of a run once the curriculum advances past its earlier stages.
+    """
+    if cfg.hit_threshold is not None and dist < cfg.hit_threshold:
+        return cfg.hit_reward, True, "Hit"
+    return None
 
 
 def _terminal_checks(cfg, env, pos, roll, pitch):
@@ -123,8 +140,9 @@ def base_reward_fn(cfg, env):
     if terminal is not None:
         return terminal
 
-    # if cfg.hover_success_steps is not None and env.hover_steps_in_zone >= cfg.hover_success_steps:
-    #     return cfg.hit_reward, True, "hover_success"
+    hit = _check_hit(cfg, dist)
+    if hit is not None:
+        return hit
 
     # ----- single in-zone / outside-zone branch -----
 

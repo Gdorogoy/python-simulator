@@ -32,18 +32,34 @@ DIST_SCALE = 15.0 #15.0
 
 
 
+def _symlog_scale(x, linthresh):
+    """
+    Linear for |x| <= linthresh (identical to the old x/linthresh scaling at
+    close range), logarithmic beyond it. A fixed linear divisor forces a
+    tradeoff between "reasonable magnitude at 3m" and "not exploding at
+    250m" -- e.g. rel/15 is 0.2 at 3m but ~16.7 at 250m, way outside anything
+    the network sees at short range. Symlog keeps short-range behavior
+    unchanged while compressing long range into a bounded, learnable scale.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    ax = np.abs(x)
+    linear = x / linthresh
+    log_part = np.sign(x) * (1.0 + np.log(np.maximum(ax / linthresh, 1e-8)))
+    return np.where(ax <= linthresh, linear, log_part)
+
+
 def build_observation(state: QuadState, target_pos: np.ndarray) -> np.ndarray:
     rel = target_pos - np.array([state.position.x, state.position.y, state.position.z])
     dist = np.linalg.norm(rel)
 
     return np.concatenate([
-        np.array([state.position.x, state.position.y, state.position.z]) / POS_SCALE,
+        _symlog_scale([state.position.x, state.position.y, state.position.z], POS_SCALE),
         np.array([state.velocity.x, state.velocity.y, state.velocity.z]) / VEL_SCALE,
         [state.orientation.x, state.orientation.y, state.orientation.z, state.orientation.w],
         np.array([state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z]) / ANG_VEL_SCALE,
         np.array(state.rotor_rpm) / MAX_RPM,
-        rel / DIST_SCALE,
-        [dist / DIST_SCALE],
+        _symlog_scale(rel, DIST_SCALE),
+        [_symlog_scale(dist, DIST_SCALE)],
     ]).astype(np.float32)
 
 
@@ -68,11 +84,26 @@ class InterceptorDroneEnv(gym.Env):
         return build_observation(self.drone_state, self.target_pos)
 
 
-    def __init__(self, custom_reward, render_mode=None, pid_gains_path="app/control/best_pid_gains.json"):
+    def __init__(self, custom_reward, render_mode=None, pid_gains_path="app/control/best_pid_gains.json",
+                 spawn_offset_range=None, target_offset_range=None, target_pairs=None):
+        """
+        spawn_offset_range / target_offset_range: (low, high) tuples applied as an
+        independent random x-offset from (0,0,5) to the drone spawn and target
+        respectively, sampled fresh each reset() when start_pos/target_pos aren't
+        passed explicitly. None on either keeps that one fixed at (0,0,5) (old
+        behavior). Keep these small relative to oob_radius.
 
+        target_pairs: optional list of (start_pos, target_pos) arrays (e.g. from
+        app.training.eval_matrix.build_eval_pairs) -- when set, reset() picks one
+        uniformly at random each episode instead of using spawn/target_offset_range.
+        Takes priority over those when start_pos/target_pos aren't passed explicitly.
+        """
 
         self.dt=1/240
-        self.max_steps=5000
+        self.max_steps=15_000
+        self.spawn_offset_range = spawn_offset_range
+        self.target_offset_range = target_offset_range
+        self.target_pairs = target_pairs
 
 
         if custom_reward is None:
@@ -114,10 +145,21 @@ class InterceptorDroneEnv(gym.Env):
 
     def reset(self, start_pos=None, target_pos=None, seed=None, options=None):
         super().reset(seed=seed, options=options)
+        if start_pos is None and target_pos is None and self.target_pairs:
+            idx = self.np_random.integers(len(self.target_pairs))
+            pair_start, pair_target = self.target_pairs[idx]
+            start_pos = pair_start.copy()
+            target_pos = pair_target.copy()
         if start_pos is None:
             start_pos = np.array([0, 0, 5], dtype=np.float32)
+            if self.spawn_offset_range is not None:
+                low, high = self.spawn_offset_range
+                start_pos[0] += self.np_random.uniform(low, high)
         if target_pos is None:
-            target_pos = np.array([0, 0,5], dtype=np.float32)
+            target_pos = np.array([0, 0, 5], dtype=np.float32)
+            if self.target_offset_range is not None:
+                low, high = self.target_offset_range
+                target_pos[0] += self.np_random.uniform(low, high)
 
         self.target_pos = target_pos
 
@@ -184,6 +226,14 @@ class InterceptorDroneEnv(gym.Env):
 
         obs = self._get_obs()
         reward, terminated, reason = self.reward_method(self)
+        # positive-only r^2/2: shrinks small per-step shaping bonuses (r<2, e.g.
+        # a ~0.2 approach term -> 0.02) while growing large sparse ones (hit_reward
+        # -> hit_reward^2/2), so a hit stands out clearly against accumulated small
+        # positives instead of being just one more term of similar scale. Negative
+        # reward passes through untouched -- this is about making success salient,
+        # not about penalty scale.
+        if reward > 0:
+            reward = reward ** 2 / 2
         truncated = self.steps_elapsed >= self.max_steps
 
         self.render()

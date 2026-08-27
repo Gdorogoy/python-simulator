@@ -1,3 +1,5 @@
 */logs
 .venv/
 /runs
+plots_final
+demonstrations_dagger.npz

@@ -1,4 +1,4 @@
-from app.reward_functions.rewards import RewardConfig, _kinematics, _terminal_checks, chain_reward_fns, base_reward_fn
+from app.reward_functions.rewards import RewardConfig, _kinematics, _terminal_checks, _check_hit, chain_reward_fns, base_reward_fn
 import numpy as np
 """
 Phase-1 curriculum reward. Inherits RewardConfig for all the shared tuning knobs
@@ -18,13 +18,18 @@ class RewardFnPhase1(RewardConfig):
     def __init__(self,hit_steps_streak,phase1_pos_coef,hit_reward,
                  warmup_duration_steps=10_000,phase1_duration_steps=200_000,**kwargs):
         super().__init__(**kwargs)
-        self.hit_streak=0
         self.hit_steps_streak=hit_steps_streak
         self.phase1_pos_coef=phase1_pos_coef
         self.hit_reward=hit_reward
         self.warmup_duration_steps=warmup_duration_steps
         self.phase1_duration_steps=phase1_duration_steps
 
+
+    # shared hit check so every stage of the roadmap stops the instant the drone
+    # gets within hit_threshold of the target, not just the stages that happen
+    # to be active when it does
+    def _check_hit(self, dist):
+        return _check_hit(self, dist)
 
     # helper method to claculate the approach term and its bonus/penalty
     def _approach_shaping(self, env, dist, pos_coef):
@@ -54,6 +59,10 @@ class RewardFnPhase1(RewardConfig):
         if terminal is not None:
             return terminal
 
+        hit = self._check_hit(dist)
+        if hit is not None:
+            return hit
+
         approach_term, closer_bonus, streak_penalty = self._approach_shaping(env, dist, self.phase1_pos_coef)
 
         if env.moving_away_streak >= self.streak_cap:
@@ -72,11 +81,11 @@ class RewardFnPhase1(RewardConfig):
         if terminal is not None:
             return terminal
 
-        if dist < self.hit_threshold:
+        hit = self._check_hit(dist)
+        if hit is not None:
             env.moving_away_streak = 0
-            return self.hit_reward, True, "hit"
+            return hit
 
-        
         approach_term, closer_bonus, streak_penalty = self._approach_shaping(env, dist, self.phase1_pos_coef)
 
         if env.moving_away_streak >= self.streak_cap:
@@ -102,16 +111,10 @@ class RewardFnPhase1(RewardConfig):
         if terminal is not None:
             return terminal
 
-        hit_dist = 0.05
-        bonus = 0.0
-
-        if dist < hit_dist:
+        hit = self._check_hit(dist)
+        if hit is not None:
             env.moving_away_streak = 0
-            self.hit_streak += 1
-            if self.hit_streak == self.hit_steps_streak:
-                bonus = self.hit_reward  # one-time bonus doesnt terminate
-        else:
-            self.hit_streak = 0
+            return hit
 
         approach_term, closer_bonus, streak_penalty = self._approach_shaping(env, dist, self.phase1_pos_coef)
 
@@ -123,7 +126,7 @@ class RewardFnPhase1(RewardConfig):
         if env.moving_away_streak >= self.streak_cap:
             return self.oob_penalty, True, "moving_away_cap"
 
-        return approach_term + streak_penalty + closer_bonus + velocity_term + bonus, False, "running"
+        return approach_term + streak_penalty + closer_bonus + velocity_term, False, "running"
 
 
     def as_roadmap(self):

@@ -6,7 +6,7 @@ from scipy.spatial.transform import Rotation
 class PIDHoverController:
     def __init__(self, kp_pos, kd_pos, kp_att, kd_att, kp_yaw, kd_yaw, max_tilt_rad=0.3,
                  ki_pos=0.0, ki_att=0.0, ki_yaw=0.0,
-                 integral_limit_pos=1.0, integral_limit_att=0.3):
+                 integral_limit_pos=0.3, integral_limit_att=0.3):
 
         #p - proportional gain, how hard to react to current error (how far rn)
         #d - derivative gain, how hard to react to rate of change (prevents overshoot)

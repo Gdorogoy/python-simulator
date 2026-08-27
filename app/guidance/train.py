@@ -1,10 +1,18 @@
+import math
+
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
-device ="cpu" #torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
+
+
+def cosine_lr(base_lr, progress, min_ratio=0.01):
+    """Cosine decay from base_lr down to base_lr*min_ratio as progress goes 0 -> 1."""
+    factor = min_ratio + 0.5 * (1 - min_ratio) * (1 + math.cos(math.pi * progress))
+    return base_lr * factor
 
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, action_low, action_high, hidden: int = 64):
@@ -188,6 +196,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
               target_kl: float,
               model=None, optimizer=None, ent_coef: float = 0.015,
               global_timesteps_offset: int = 0, global_total_timesteps: int = None,
+              num_epochs: int = 10,
               ):
     """
     Runs PPO for `total_timesteps`.
@@ -240,6 +249,20 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
             next_obs, reward, terminated, truncated, _ = env.step(action_np)
             done = terminated or truncated
 
+            if truncated and not terminated:
+                # time-limit cutoff (env.max_steps), not a real terminal state --
+                # bootstrap the missing future value into THIS step's reward
+                # using the true next_obs (before env.reset() below overwrites
+                # it), instead of letting GAE implicitly treat it as zero-value.
+                # dones[t] still needs to be True for this step (see buffer.add
+                # below) -- after reset, values[t+1] in the buffer belongs to a
+                # DIFFERENT episode, so GAE must not chain through it here; the
+                # correction below is what carries the missing future value.
+                with torch.no_grad():
+                    next_obs_t = torch.as_tensor(next_obs, dtype=torch.float32, device=device).unsqueeze(0)
+                    bootstrap_value = model.forward(next_obs_t)[2].item()
+                reward = reward + gamma * bootstrap_value
+
             # store the PRE-squash raw action -- ppo_update recomputes the
             # squashed action/log_prob from this during the policy update.
             buffer.add(obs, raw_action.squeeze(0), log_prob.squeeze(0), reward, value.squeeze(0), done)
@@ -272,16 +295,107 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
         advantages, returns = compute_gae(buffer.rewards, buffer.values, buffer.dones, last_value, gamma, lam)
         timesteps_done += num_steps
         last_losses = ppo_update(model, optimizer, buffer, advantages, returns,
-                   clip_eps=0.2, vf_coef=0.5, ent_coef=ent_coef, num_epochs=10, batch_size=32,
+                   clip_eps=0.2, vf_coef=0.5, ent_coef=ent_coef, num_epochs=num_epochs, batch_size=32,
                    global_timesteps_done=global_timesteps_offset + timesteps_done,
                    global_total_timesteps=global_total_timesteps, target_kl=target_kl)
                     #was  vf_coef=0.5
 
 
         with torch.no_grad():
-            model.actor_log_std.clamp_(-2.0, -0.5)
+            # ceiling raised the std floor to ~0.11 regardless of where training
+            # started -- fine for phase 0 (always starts from scratch at max std
+            # anyway), but for a run resuming a low-std BC/DAgger-pretrained
+            # checkpoint, the entropy bonus races std up to this ceiling and pins
+            # it there for the rest of training, destroying the precision the
+            # warm start brought in. Lowered ceiling to ~0.064 and widened the
+            # floor to ~0.05 (the transform's natural minimum) so a warm-started
+            # policy can actually stay/get precise instead of being forced back
+            # toward near-max noise.
+            model.actor_log_std.clamp_(-3.0, -1.2)
 
     return model, optimizer, episode_rewards, last_losses
+
+
+def warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam: float, lr: float = 3e-5):
+    """
+    Collects rollouts with the CURRENT actor (untouched) and updates ONLY
+    critic_head for num_rounds rounds before real PPO updates start.
+
+    BC/DAgger's imitation loss (pretrain_bc.py) never uses model.forward()'s
+    state_value output, so critic_head is still at its original random init
+    when a BC/DAgger checkpoint is loaded into PPO -- the very first PPO
+    updates would otherwise compute advantages from a critic with no idea
+    what states are actually good/bad, producing noisy/wrong policy
+    gradients that can corrupt an otherwise-good warm-started actor before
+    it gets a chance to build on what it already knows.
+
+    Only model.critic_head.parameters() are in the optimizer here, so even
+    though value_loss.backward() also populates .grad on the shared trunk
+    (unavoidable, it's part of the same forward pass), those gradients are
+    never applied -- the actor (actor_mean, actor_log_std) and shared trunk
+    are left exactly as loaded.
+
+    lr is cosine-decayed across num_rounds (see cosine_lr): each round's
+    full-batch regression target is bootstrapped off the critic's OWN
+    (still-settling) value estimates over whatever mix of task distances
+    that round's random target_pairs draw happened to sample, so the
+    target is genuinely non-stationary round to round -- a flat lr held
+    at its round-0 value stayed large enough that later rounds could
+    still knock value_loss into the hundreds instead of settling
+    (observed: 3-15 through round 6, then 287/92/238/107 for rounds 7-10).
+    Decaying it means a bad late-round draw can't move the critic nearly
+    as far as it could early on.
+    """
+    critic_optimizer = torch.optim.Adam(model.critic_head.parameters(), lr=lr)
+    obs, _ = env.reset()
+
+    for round_idx in range(num_rounds):
+        round_lr = cosine_lr(lr, round_idx / max(1, num_rounds - 1))
+        for param_group in critic_optimizer.param_groups:
+            param_group['lr'] = round_lr
+
+        buffer = RolloutBuffer(num_steps, env.observation_space.shape[0], env.action_space.shape[0])
+
+        for step in range(num_steps):
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            with torch.no_grad():
+                action, raw_action, log_prob, _, value = model.get_action_and_value(obs_t)
+
+            action_np = action.squeeze(0).cpu().numpy()
+            next_obs, reward, terminated, truncated, _ = env.step(action_np)
+            done = terminated or truncated
+
+            if truncated and not terminated:
+                with torch.no_grad():
+                    next_obs_t = torch.as_tensor(next_obs, dtype=torch.float32, device=device).unsqueeze(0)
+                    bootstrap_value = model.forward(next_obs_t)[2].item()
+                reward = reward + gamma * bootstrap_value
+
+            buffer.add(obs, raw_action.squeeze(0), log_prob.squeeze(0), reward, value.squeeze(0), done)
+
+            obs = next_obs
+            if done:
+                obs, _ = env.reset()
+
+        with torch.no_grad():
+            last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            last_value = model.get_action_and_value(last_obs_t)[4].item()
+
+        _, returns = compute_gae(buffer.rewards, buffer.values, buffer.dones, last_value, gamma, lam)
+
+        value_loss = None
+        for _ in range(4):
+            _, _, _, _, values = model.get_action_and_value(buffer.obs, buffer.actions)
+            value_loss = ((values - returns) ** 2).mean()
+
+            model.zero_grad()
+            value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.critic_head.parameters(), max_norm=0.5)
+            critic_optimizer.step()
+
+        print(f"[critic warmup] round {round_idx + 1}/{num_rounds}  lr={round_lr:.2e}  value_loss={value_loss.item():.4f}")
+
+    return model
 
 
 def evaluate(model, env, n_episodes: int):

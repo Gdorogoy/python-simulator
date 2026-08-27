@@ -1,38 +1,71 @@
 import json
-import numpy as np
 
 from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.control.pid_hover import PIDHoverController
-from app.reward_functions.rewards import RewardConfig, make_reward_fn
+from app.control.tune_pid import DISTANCES, steps_for_dist
+from app.reward_functions.reward_fn_phase1 import RewardFnPhase1
+from app.training.eval_matrix import build_eval_pairs, run_eval_matrix, make_pid_action_fn
+from app.guidance.plotting import plot_eval_matrix_distance, plot_eval_matrix_pairs
 
-best_params = {'kp_pos': 10.971886223833621,
-               'kd_pos': 6.495006787354487,
-               'kp_att': 4.447496977009914,
-               'kd_att': 0.612783390615077,
-               'kp_yaw': 0.12108129474700983,
-               'kd_yaw': 0.1988043435629733}
 
-pid = PIDHoverController(**best_params)
+def _make_env(oob_radius):
+    # warmup_duration_steps=0, phase1_duration_steps=None -> phase_1_fn (which
+    # DOES check for "Hit") is the only stage, active from step 1, forever.
+    # Leaving warmup_duration_steps at its default (10_000) is a real bug here:
+    # chain_reward_fns' stage counter is shared/cumulative across the WHOLE
+    # eval run, not per-episode, so it silently falls through to base_fn (no
+    # hit-check at all) partway through the run and every pair after that
+    # can never register a "Hit" regardless of how well the PID flies.
+    reward_fn = RewardFnPhase1(
+        hit_steps_streak=1500,
+        phase1_pos_coef=0.25,
+        hit_reward=5,
+        oob_radius=oob_radius,
+        hover_success_steps=None,
+        streak_cap=60,
+        outer_dist=1.0,
+        inner_dist=0.3,
+        hit_threshold=0.05,
+        warmup_duration_steps=0,
+        imitation_duration_steps=0,
+        phase1_duration_steps=None,
+    ).as_roadmap()
+    return InterceptorDroneEnv(reward_fn)
 
-reward_cfg = RewardConfig(oob_radius=70, hover_success_steps=None)
-env = InterceptorDroneEnv(make_reward_fn(reward_cfg))
 
-target = np.array([0, 0, 5], dtype=np.float32)
-obs, _ = env.reset(start_pos=target.copy(), target_pos=target.copy())
-pid.reset()
+with open("app/control/best_pid_gains_per_dist.json") as f:
+    gains_by_dist = json.load(f)
 
-for step in range(750):
-    action = pid.compute_action(env.drone_state, env.target_pos)
-    obs, reward, terminated, truncated, info = env.step(action)
+all_results = []
+all_passed = True
 
-    pos = np.array([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
-    dist = np.linalg.norm(env.target_pos - pos)
+for dist in DISTANCES:
+    pid = PIDHoverController(**gains_by_dist[str(dist)])
+    oob_radius = max(20.0, dist * 3.0)
+    env = _make_env(oob_radius)
 
-    if step % 30 == 0 or terminated:
-        print(f"step={step} dist={dist:.4f} reason={info['reason']}")
+    # Same fixed (start,target) pairs used to score RL checkpoints
+    # (app/training/eval_matrix.py) -- lets the PID baseline be compared
+    # against RL on identical, non-random configs.
+    results = run_eval_matrix(
+        env, make_pid_action_fn(pid), pairs=build_eval_pairs(oob_radius=oob_radius, distances=(dist,)),
+        n_repeats=3, max_steps=steps_for_dist(dist), on_episode_reset=pid.reset,
+    )
 
-    if terminated:
-        print(f"FAILED at step {step}: {info['reason']}")
-        break
+    for r in results:
+        status = "HIT" if r["hit_rate"] > 0 else "FAILED"
+        if r["hit_rate"] == 0:
+            all_passed = False
+        print(f"dist={dist}m start={r['start']} -> target={r['target']}  "
+              f"mean_final_dist={r['mean_final_dist']:.4f} (+/-{r['std_final_dist']:.4f})  "
+              f"hit_rate={r['hit_rate']:.2f}  mean_steps={r['mean_steps']:.0f}  [{status}]")
+
+    all_results.extend(results)
+
+plot_eval_matrix_distance({"PID": all_results})
+plot_eval_matrix_pairs({"PID": all_results})
+
+if all_passed:
+    print("all pairs hit at least once — proceed to collect_demonstrations.py")
 else:
-    print("held hover for the full 750 steps — good, proceed to collect_demonstrations.py")
+    print("some pairs never hit — tune the PID gains before collecting demonstrations")

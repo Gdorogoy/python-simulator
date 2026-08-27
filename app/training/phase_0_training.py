@@ -60,6 +60,7 @@ class TrainConfig:
                  TARGET_Y_OFFSET=1.0,
                  TOTAL_TIMESTEPS=5_000_000,  # was 2_000_000
                  NUM_STEPS=4096,                  # rollout length per PPO update
+                 NUM_EPOCHS=10,                   # PPO epochs per rollout batch
                  GAMMA=0.98,  # was 0.97
                  LAM=0.95,
                  LR=best_params["lr"],  # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
@@ -72,6 +73,7 @@ class TrainConfig:
         self.TARGET_Y_OFFSET = TARGET_Y_OFFSET
         self.TOTAL_TIMESTEPS = TOTAL_TIMESTEPS
         self.NUM_STEPS = NUM_STEPS
+        self.NUM_EPOCHS = NUM_EPOCHS
         self.GAMMA = GAMMA
         self.LAM = LAM
         self.LR = LR
@@ -149,13 +151,19 @@ def save_checkpoint(model, timesteps_done, cfg: TrainConfig):
 # ---------------------------------------------------------------------------
 # Structured per-checkpoint metrics -> CSV (one flat row per checkpoint)
 # ---------------------------------------------------------------------------
-def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
+def log_metrics(env, model, timesteps_done, ent_coef,
                  policy_loss, value_loss, entropy_loss, approx_kl, early_stopped,
                  grad_norm, csv_path, n_diag_episodes=20):
-    outcomes = {"oob": 0, "attitude": 0, "hit": 0, "hover_success": 0,
+    # keys must match the EXACT reason strings the reward fns return (_check_hit
+    # returns "Hit", capital H) -- outcomes[last_reason] below creates/increments
+    # by that literal string, so a mismatched case here silently eats the count
+    # into an unread key (outcome_columns below maps this back to the lowercase
+    # outcome_hit CSV column).
+    outcomes = {"oob": 0, "Hit": 0, "hover_success": 0,
                 "moving_away_cap": 0, "drift": 0, "timeout": 0}
     steps_survived = []
     final_dists = []
+    diag_episode_rewards = []
     max_hover_streak = 0
 
     for _ in range(n_diag_episodes):
@@ -164,6 +172,7 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
         step_count = 0
         last_reason = None
         episode_max_hover_streak = 0
+        episode_reward = 0.0
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
@@ -174,12 +183,14 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
 
             obs, reward, terminated, truncated, info = env.step(action)
             step_count += 1
+            episode_reward += reward
             done = terminated or truncated
             last_reason = info["reason"]
             episode_max_hover_streak = max(episode_max_hover_streak, getattr(env, "hover_steps_in_zone", 0))
 
         steps_survived.append(step_count)
         final_dists.append(env.prev_distance)
+        diag_episode_rewards.append(episode_reward)
         max_hover_streak = max(max_hover_streak, episode_max_hover_streak)
 
         if getattr(env, "hover_success_achieved", False):
@@ -200,9 +211,13 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
     effective_std_mean = float(np.mean(effective_std))
     total_param_norm = sum(p.data.norm().item() for p in model.parameters())
 
-    recent = episode_rewards[-10:] if episode_rewards else [0.0]
-    reward_mean = float(np.mean(recent))
-    reward_std = float(np.std(recent))
+    # from the diagnostic episodes themselves (deterministic policy, same 20
+    # episodes as avg_final_dist/outcome_*/avg_steps_survived below), NOT the
+    # last 10 TRAINING rollout episodes (stochastic, a different sample
+    # entirely) -- that mismatch was silently making vs_pid_baseline's
+    # avg_reward describe different episodes than its other 3 stats.
+    reward_mean = float(np.mean(diag_episode_rewards)) if diag_episode_rewards else 0.0
+    reward_std = float(np.std(diag_episode_rewards)) if diag_episode_rewards else 0.0
 
     row = {
         "timesteps": timesteps_done,
@@ -223,8 +238,17 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
         "effective_std_mean": effective_std_mean,
         "total_param_norm": total_param_norm,
     }
-    for key in ("oob", "attitude-ROLL","attitude-PITCH", "hit", "hover_success", "moving_away_cap", "drift", "timeout"):
-        row[f"outcome_{key}"] = outcomes.get(key, 0)
+    # (lookup key in `outcomes`, CSV column suffix) -- only "Hit" needs the
+    # case fixed up (column stays outcome_hit); everything else already
+    # matches its own reason string exactly, including attitude-ROLL/PITCH's
+    # capitalization, so don't blanket-lowercase these.
+    outcome_columns = [
+        ("oob", "oob"), ("attitude-ROLL", "attitude-ROLL"), ("attitude-PITCH", "attitude-PITCH"),
+        ("Hit", "hit"), ("hover_success", "hover_success"), ("moving_away_cap", "moving_away_cap"),
+        ("drift", "drift"), ("timeout", "timeout"),
+    ]
+    for lookup_key, col_suffix in outcome_columns:
+        row[f"outcome_{col_suffix}"] = outcomes.get(lookup_key, 0)
 
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
     file_exists = os.path.isfile(csv_path)
@@ -233,6 +257,10 @@ def log_metrics(env, model, episode_rewards, timesteps_done, ent_coef,
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+    return row
+
+    return row
 
 
 
@@ -315,6 +343,7 @@ def train(cfg: TrainConfig):
             global_timesteps_offset=timesteps_done,
             global_total_timesteps=cfg.TOTAL_TIMESTEPS,
             target_kl=current_target_kl,
+            num_epochs=cfg.NUM_EPOCHS,
         )
         all_episode_rewards.extend(episode_rewards)
         drone_state_arr.append(env.drone_state)
@@ -324,7 +353,7 @@ def train(cfg: TrainConfig):
         print()  # move off the in-place epoch/step progress line
         save_checkpoint(model, timesteps_done, cfg)
         log_metrics(
-            env, model, all_episode_rewards, timesteps_done, current_ent_coef,
+            env, model, timesteps_done, current_ent_coef,
             last_losses.get("policy_loss", 0.0), last_losses.get("value_loss", 0.0),
             last_losses.get("entropy_loss", 0.0), last_losses.get("approx_kl", 0.0),
             last_losses.get("early_stopped", False), last_losses.get("grad_norm", 0.0),
