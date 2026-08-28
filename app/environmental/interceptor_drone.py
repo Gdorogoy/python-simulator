@@ -22,25 +22,18 @@ import pybullet_data
 
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-# norm vals TODO:FIX AFTER DUBUG
-POS_SCALE = 15.0 #15.0
-VEL_SCALE = 10.0 #10.0
-ANG_VEL_SCALE =20.0 #20.0
-MAX_RPM = 12000.0 #12000.0
-DIST_SCALE = 15.0 #15.0
+
+POS_SCALE = 15.0 
+VEL_SCALE = 10.0 
+ANG_VEL_SCALE =20.0
+MAX_RPM = 12000.0 
+DIST_SCALE = 15.0 
 
 
 
 
 def _symlog_scale(x, linthresh):
-    """
-    Linear for |x| <= linthresh (identical to the old x/linthresh scaling at
-    close range), logarithmic beyond it. A fixed linear divisor forces a
-    tradeoff between "reasonable magnitude at 3m" and "not exploding at
-    250m" -- e.g. rel/15 is 0.2 at 3m but ~16.7 at 250m, way outside anything
-    the network sees at short range. Symlog keeps short-range behavior
-    unchanged while compressing long range into a bounded, learnable scale.
-    """
+    """Symmetric log scaling: linear near zero, logarithmic beyond linthresh."""
     x = np.asarray(x, dtype=np.float64)
     ax = np.abs(x)
     linear = x / linthresh
@@ -68,15 +61,6 @@ register(
     entry_point='app.environmental.interceptor_drone:InterceptorDroneEnv',
 )
 
-"""
-step is lowest unit - 1/240
-episode full run of the steps  all steps done and the env.reset is called 
-rollout spawn the number of steps (can be 0-n) until all steps are collected and then resets
-epoch runs full one rollout
-
-batch_size chop the steps into n batches and do gradient on them 
-check point- total time stamps / check point every 
-"""
 class InterceptorDroneEnv(gym.Env):
     metadata = {'render_modes': ['human'], 'render_fps': 30}
 
@@ -85,22 +69,15 @@ class InterceptorDroneEnv(gym.Env):
 
 
     def __init__(self, custom_reward, render_mode=None, pid_gains_path="app/control/best_pid_gains.json",
-                 spawn_offset_range=None, target_offset_range=None, target_pairs=None):
-        """
-        spawn_offset_range / target_offset_range: (low, high) tuples applied as an
-        independent random x-offset from (0,0,5) to the drone spawn and target
-        respectively, sampled fresh each reset() when start_pos/target_pos aren't
-        passed explicitly. None on either keeps that one fixed at (0,0,5) (old
-        behavior). Keep these small relative to oob_radius.
+                 spawn_offset_range=None, target_offset_range=None, target_pairs=None,
+                 max_steps=15_000, dt=1 / 240):
+        """spawn_offset_range/target_offset_range: (low, high) random x-offset from
+        (0,0,5) applied to spawn/target on reset() when not passed explicitly (keep
+        small relative to oob_radius). target_pairs: optional list of (start, target)
+        pairs reset() samples from instead, taking priority over the offset ranges."""
 
-        target_pairs: optional list of (start_pos, target_pos) arrays (e.g. from
-        app.training.eval_matrix.build_eval_pairs) -- when set, reset() picks one
-        uniformly at random each episode instead of using spawn/target_offset_range.
-        Takes priority over those when start_pos/target_pos aren't passed explicitly.
-        """
-
-        self.dt=1/240
-        self.max_steps=15_000
+        self.dt = dt
+        self.max_steps = max_steps
         self.spawn_offset_range = spawn_offset_range
         self.target_offset_range = target_offset_range
         self.target_pairs = target_pairs
@@ -167,6 +144,7 @@ class InterceptorDroneEnv(gym.Env):
         self.hover_steps_in_zone = 0
         self.last_raw_action = np.zeros(4, dtype=np.float32)
         self.hover_success_achieved = False
+        self.hit_time_sec = None
 
         if getattr(self, "pid_teacher", None) is not None:
             self.pid_teacher.reset()
@@ -226,19 +204,19 @@ class InterceptorDroneEnv(gym.Env):
 
         obs = self._get_obs()
         reward, terminated, reason = self.reward_method(self)
-        # positive-only r^2/2: shrinks small per-step shaping bonuses (r<2, e.g.
-        # a ~0.2 approach term -> 0.02) while growing large sparse ones (hit_reward
-        # -> hit_reward^2/2), so a hit stands out clearly against accumulated small
-        # positives instead of being just one more term of similar scale. Negative
-        # reward passes through untouched -- this is about making success salient,
-        # not about penalty scale.
+
+        if self.hit_time_sec is None and (reason == "Hit" or self.hover_success_achieved):
+            self.hit_time_sec = self.steps_elapsed * self.dt
+
+        # Squaring positive rewards makes a hit/success stand out against
+        # accumulated small per-step shaping bonuses; negatives pass through untouched.
         if reward > 0:
             reward = reward ** 2 / 2
         truncated = self.steps_elapsed >= self.max_steps
 
         self.render()
 
-        return obs, reward, terminated, truncated, {"reason": reason}
+        return obs, reward, terminated, truncated, {"reason": reason, "hit_time_sec": self.hit_time_sec}
 
     def render(self):
         if self.render_mode != "human":

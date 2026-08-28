@@ -23,25 +23,11 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
                           hover_success_steps=200, streak_cap=30,
                           distances=None, gains_by_dist_path=None):
     """
-    Runs the tuned PID controller through the same env/reward machinery
-    used to score the RL policy, and returns the same summary stats
-    diagnose_with_model would -- so the RL run's final checkpoint can be
-    compared against it apples-to-apples.
-
-    Two modes:
-      - distances=None (default): old single-target behavior, using the one
-        gains file at pid_gains_path against env's default target.
-      - distances=(3, 10, 50, 150, ...): multi-distance mode -- loads
-        gains_by_dist_path (a {dist: gains} json, e.g. best_pid_gains_per_dist.json)
-        and runs each distance x all 4 cardinal directions with ITS OWN
-        tuned gains and oob_radius (via build_eval_pairs), pooling results
-        across the whole curriculum -- matches what phase_1_training.py
-        actually trains/evaluates the RL policy on, instead of comparing
-        against a single fixed-distance baseline.
-
-    Returns None (with a printed reason) if the relevant gains file is
-    missing, rather than raising -- this plot is a nice-to-have, not
-    required to see the rest of the training dashboard.
+    Runs the tuned PID controller through the same env/reward machinery used to score
+    the RL policy, so the final checkpoint can be compared apples-to-apples. With
+    `distances` set, loads per-distance gains from gains_by_dist_path and pools results
+    across the whole curriculum instead of one fixed-distance baseline. Returns None
+    (with a printed reason) if the gains file is missing, since this plot is optional.
     """
     from app.environmental.interceptor_drone import InterceptorDroneEnv
     from app.control.pid_hover import PIDHoverController
@@ -153,10 +139,8 @@ def _hit_ratios(rows, n_diag_episodes):
 
 def _streak_windows(values, threshold, min_len=STREAK_LEN):
     """
-    Indices [start, end] (inclusive) of every run where value >= threshold
-    for at least min_len consecutive checkpoints in a row -- not one lucky
-    checkpoint, but the diagnostic batch clearing the bar min_len times
-    back to back.
+    Indices [start, end] (inclusive) of every run where value >= threshold for at least
+    min_len consecutive checkpoints -- filters out a single lucky checkpoint.
     """
     windows = []
     start = None
@@ -186,12 +170,8 @@ def _shade_streak_windows(ax, timesteps, rows, n_diag_episodes):
 
 
 # ---------------------------------------------------------------------------
-# Plots -- 5 figures total (down from 11), each covering one question:
-#   1) training_error     -- is the optimization itself behaving?
-#   2) policy_std          -- is exploration decaying as expected?
-#   3) distance_distribution -- how close/consistent is the drone to target?
-#   4) success_and_outcomes -- is it succeeding, and why does it fail when it does?
-#   5) vs_pid_baseline      -- did RL actually beat the classical controller?
+# Plots -- 5 figures: training_error, policy_std, distance_distribution,
+# success_and_outcomes, and vs_pid_baseline.
 # ---------------------------------------------------------------------------
 def plot_training_run(csv_path, output_dir="plots_final",
                        hover_success_steps=480, n_diag_episodes=20,
@@ -203,17 +183,11 @@ def plot_training_run(csv_path, output_dir="plots_final",
                        pid_baseline_distances=None,
                        pid_gains_by_dist_path=None):
     """
-    hover_success_steps, n_diag_episodes, hit_threshold, streak_cap, max_steps
-    should match whatever RewardConfig / env / diagnostic loop you actually
-    trained with -- they're only used to draw target reference lines and
-    (for the reward-related ones) to rebuild an equivalent RewardConfig for
-    the PID baseline comparison, not to recompute anything from the CSV.
-
-    pid_baseline_distances/pid_gains_by_dist_path: pass these (e.g.
-    distances=(3,10,50,150), gains_by_dist_path="app/control/best_pid_gains_per_dist.json")
-    to compare the RL checkpoint against the PID baseline across the FULL
-    distance curriculum it was actually trained on, instead of the single
-    fixed target pid_gains_path/env default gives you.
+    hover_success_steps, n_diag_episodes, hit_threshold, streak_cap, max_steps must match
+    what the run was actually trained with -- they only draw reference lines and rebuild
+    an equivalent RewardConfig for the PID baseline, not recompute anything from the CSV.
+    Pass pid_baseline_distances/pid_gains_by_dist_path to compare against the PID
+    baseline across the full distance curriculum instead of one fixed target.
     """
     rows = _read_csv(csv_path)
     if not rows:
@@ -325,14 +299,10 @@ def plot_training_run(csv_path, output_dir="plots_final",
 
 def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold):
     """
-    Two-part check:
-      1) per-checkpoint sanity table for the LAST row (quick snapshot --
-         can look good by luck, doesn't prove stability).
-      2) the real signal -- for each hover-success-rate tier (25/50/75/100%),
-         has the diagnostic batch stayed at or above that rate for
-         STREAK_LEN consecutive checkpoints? A single good checkpoint isn't
-         convergence; oscillating good/moving_away_cap checkpoints will fail
-         this even if the last row looks great.
+    Two-part check: a quick sanity table for the last checkpoint (can look good by
+    luck), and the real signal -- whether the diagnostic batch has held each
+    hover-success-rate tier for STREAK_LEN consecutive checkpoints, which an
+    oscillating policy will fail even if the last row looks great.
     """
     last = rows[-1]
 
@@ -400,10 +370,9 @@ def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_t
 # ---------------------------------------------------------------------------
 def plot_eval_matrix_distance(labeled_results, output_path="plots_final/eval_matrix_distance.png"):
     """
-    Option A: x = task_dist ("correct" distance the episode had to close),
-    y = mean_final_dist actually achieved (lower is better; 0 = perfect).
-    labeled_results: {label -> list of run_eval_matrix() result dicts},
-    e.g. {"RL": rl_results, "PID": pid_results} to compare on one plot.
+    Plots task distance (x) vs. mean final distance actually achieved (y, 0=perfect).
+    labeled_results: {label -> list of run_eval_matrix() result dicts}, e.g.
+    {"RL": rl_results, "PID": pid_results} to compare on one plot.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     plt.figure(figsize=(7, 6))
@@ -428,10 +397,7 @@ def plot_eval_matrix_distance(labeled_results, output_path="plots_final/eval_mat
 
 
 def plot_eval_matrix_pairs(labeled_results, output_path="plots_final/eval_matrix_pairs.png"):
-    """
-    Option B: one group of bars per (start,target) pair, one bar per labeled
-    result set -- shows which SPECIFIC configs fail, not just the overall trend.
-    """
+    """One bar group per (start, target) pair, showing which specific configs fail."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     labels = list(labeled_results.keys())
     n_pairs = len(next(iter(labeled_results.values())))
@@ -461,17 +427,10 @@ def plot_eval_matrix_pairs(labeled_results, output_path="plots_final/eval_matrix
 # ---------------------------------------------------------------------------
 def plot_dagger_history(history, output_dir="plots_final"):
     """
-    history: list of {"round": int, "raw_counts": {dist:int}, "balanced_counts": {dist:int},
-    "hit_rate": {dist:float}} accumulated by dagger.py, one entry per round.
-
-    Two plots:
-      1) dagger_raw_counts.png -- pairs collected per distance per round BEFORE
-         balancing (shows the imbalance: long-distance episodes produce far
-         more transitions than short ones, so unweighted aggregation lets them
-         dominate the BC loss).
-      2) dagger_hit_rate.png -- per-distance hit rate per round (the POLICY
-         flying against the PID's labels, not the PID itself) -- the actual
-         signal for whether balancing is helping the short-range case recover.
+    history: list of {"round", "raw_counts", "balanced_counts", "hit_rate"} dicts from
+    dagger.py, one per round. Writes dagger_raw_counts.png (pre-balancing pair counts per
+    distance, showing long-distance episodes' data volume advantage) and
+    dagger_hit_rate.png (per-distance hit rate of the policy flying against PID labels).
     """
     if not history:
         print("[plot_dagger_history] empty history, nothing to plot")

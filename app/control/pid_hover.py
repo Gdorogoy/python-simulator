@@ -8,16 +8,14 @@ class PIDHoverController:
                  ki_pos=0.0, ki_att=0.0, ki_yaw=0.0,
                  integral_limit_pos=0.3, integral_limit_att=0.3):
 
-        #p - proportional gain, how hard to react to current error (how far rn)
-        #d - derivative gain, how hard to react to rate of change (prevents overshoot)
-        #i - integral gain, how hard to react to accumulated error (kills steady-state offset)
+        # p reacts to current error, d to rate of change (damps overshoot), i to accumulated error (kills steady-state offset).
 
-        # pos control kp pushes towards the target kd damps based on velocity , output is desired acceleration
+        # Position loop: kp pushes toward the target, kd damps by velocity; output is desired acceleration.
         self.kp_pos = kp_pos
         self.kd_pos = kd_pos
         self.ki_pos = ki_pos
 
-        # attitude kp pushes toward desired roll pitch the current roll pitch kd damps based on the acceleration
+        # Attitude loop: kp pushes toward desired roll/pitch, kd damps by angular rate.
         self.kp_att = kp_att
         self.kd_att = kd_att
         self.ki_att = ki_att

@@ -1,7 +1,4 @@
-"""
-Phase 0
-training-goals.md for more info
-"""
+"""Phase 0 training loop -- see training-goals.md for background."""
 from datetime import datetime
 import csv
 
@@ -19,11 +16,14 @@ from app.guidance.plotting import plot_training_run
 
 import logging
 
-from app.guidance.utils import calc_drone_state
+from app.guidance.utils import calc_drone_state, compute_grade
+from app.guidance.mlflow_utils import start_run, log_params_safe, log_metrics_safe
+import mlflow
 from app.reward_functions.rewards import make_reward_fn, RewardConfig
 
-os.makedirs("prod_logs", exist_ok=True)
-log_filename = f"prod_logs/phase2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+_log_dir = os.environ.get("OPTUNA_WORKER_LOG_DIR", "prod_logs")
+os.makedirs(_log_dir, exist_ok=True)
+log_filename = f"{_log_dir}/phase2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,9 +40,6 @@ log.info(f"Logging this run to: {log_filename}")
 
 
 
-#----------------------------------------------------------------------------
-# Best params found from optuna
-#----------------------------------------------------------------------------
 best_params={'streak_penalty_coef': -0.04983211032477406,
              'streak_cap': 21, 'phase0_pos_coef': 0.9233025352276092, 'tilt_penalty_coef': 0.13620117520669245,
              'ang_vel_penalty_coef': 0.09137289750622843, 'imitation_coef': 0.2545331593681599,
@@ -51,19 +48,36 @@ best_params={'streak_penalty_coef': -0.04983211032477406,
 
 
 # ---------------------------------------------------------------------------
-# Config
+# Config -- every training hyperparameter lives here so a run is fully
+# reproducible from one TrainConfig instance, and so optuna_search.py can
+# sweep any of them without touching this file.
 # ---------------------------------------------------------------------------
 class TrainConfig:
     def __init__(self,
                  TARGET_DISTANCE=1,
                  TARGET_ANGLE_DEG=45.0,
                  TARGET_Y_OFFSET=1.0,
-                 TOTAL_TIMESTEPS=5_000_000,  # was 2_000_000
+                 TOTAL_TIMESTEPS=5_000_000,
                  NUM_STEPS=4096,                  # rollout length per PPO update
                  NUM_EPOCHS=10,                   # PPO epochs per rollout batch
-                 GAMMA=0.98,  # was 0.97
+                 BATCH_SIZE=32,
+                 GAMMA=0.98,
                  LAM=0.95,
-                 LR=best_params["lr"],  # was originaly 3e-5 , but drone is not doing anything so now th gradient will be 100 times bigger
+                 LR=best_params["lr"],
+                 CLIP_EPS=0.2,
+                 VF_COEF=0.5,
+                 MAX_GRAD_NORM=0.5,
+                 HIDDEN=64,
+                 NUM_HIDDEN_LAYERS=3,
+                 DROPOUT=0.0,
+                 LOG_STD_MIN=-3.0,
+                 LOG_STD_MAX=0.0,
+                 LOG_STD_CLAMP_MIN=-3.0,
+                 LOG_STD_CLAMP_MAX=-0.5,
+                 ENT_COEF_START=0.01,
+                 ENT_COEF_END=0.001,
+                 TARGET_KL_START=0.02,
+                 TARGET_KL_END=0.015,
                  CHECKPOINT_EVERY_TIMESTEPS=15_000,   # coarse enough that diagnostics
                  CHECKPOINT_DIR="runs/1m_10epochs_v2",
                  METRICS_CSV="runs/1m_10epochs_v2/metrics.csv",
@@ -74,9 +88,24 @@ class TrainConfig:
         self.TOTAL_TIMESTEPS = TOTAL_TIMESTEPS
         self.NUM_STEPS = NUM_STEPS
         self.NUM_EPOCHS = NUM_EPOCHS
+        self.BATCH_SIZE = BATCH_SIZE
         self.GAMMA = GAMMA
         self.LAM = LAM
         self.LR = LR
+        self.CLIP_EPS = CLIP_EPS
+        self.VF_COEF = VF_COEF
+        self.MAX_GRAD_NORM = MAX_GRAD_NORM
+        self.HIDDEN = HIDDEN
+        self.NUM_HIDDEN_LAYERS = NUM_HIDDEN_LAYERS
+        self.DROPOUT = DROPOUT
+        self.LOG_STD_MIN = LOG_STD_MIN
+        self.LOG_STD_MAX = LOG_STD_MAX
+        self.LOG_STD_CLAMP_MIN = LOG_STD_CLAMP_MIN
+        self.LOG_STD_CLAMP_MAX = LOG_STD_CLAMP_MAX
+        self.ENT_COEF_START = ENT_COEF_START
+        self.ENT_COEF_END = ENT_COEF_END
+        self.TARGET_KL_START = TARGET_KL_START
+        self.TARGET_KL_END = TARGET_KL_END
         self.CHECKPOINT_EVERY_TIMESTEPS = CHECKPOINT_EVERY_TIMESTEPS
         self.CHECKPOINT_DIR = CHECKPOINT_DIR
         self.METRICS_CSV = METRICS_CSV
@@ -104,12 +133,15 @@ def diagnose_with_model(model, env, n_episodes):
     outcomes = {"oob": 0, "attitude-ROLL": 0, "attitude-PITCH": 0, "hit": 0,
                 "hover_success": 0, "moving_away_cap": 0, "drift": 0, "timeout": 0}
     steps_survived = []
+    hit_times_sec = []
+    final_dists = []
 
     for ep in range(n_episodes):
         obs, _ = env.reset()
         done = False
         step_count = 0
         last_reason = None
+        info = {}
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
@@ -124,17 +156,23 @@ def diagnose_with_model(model, env, n_episodes):
             last_reason = info["reason"]
 
         steps_survived.append(step_count)
+        final_dists.append(env.prev_distance)
+        if info.get("hit_time_sec") is not None:
+            hit_times_sec.append(info["hit_time_sec"])
 
         if env.hover_success_achieved:
             outcomes["hover_success"] += 1
         elif truncated and not terminated:
             outcomes["timeout"] += 1
         else:
-            outcomes[last_reason] += 1
+            outcomes[last_reason] = outcomes.get(last_reason, 0) + 1
 
+    avg_hit_time_sec = float(np.mean(hit_times_sec)) if hit_times_sec else None
     print(f"[diagnostic] outcomes over {n_episodes} eps:", outcomes)
     print(f"[diagnostic] avg steps survived: {np.mean(steps_survived):.1f}")
-    print(f"step {step_count}: raw_mean={mean.squeeze(0).cpu().numpy()}")
+    print(f"[diagnostic] avg final dist: {np.mean(final_dists):.3f}  avg time-to-hit: {avg_hit_time_sec}")
+    outcomes["avg_hit_time_sec"] = avg_hit_time_sec
+    outcomes["avg_final_dist"] = float(np.mean(final_dists))
     return outcomes
 
 
@@ -153,17 +191,15 @@ def save_checkpoint(model, timesteps_done, cfg: TrainConfig):
 # ---------------------------------------------------------------------------
 def log_metrics(env, model, timesteps_done, ent_coef,
                  policy_loss, value_loss, entropy_loss, approx_kl, early_stopped,
-                 grad_norm, csv_path, n_diag_episodes=20):
-    # keys must match the EXACT reason strings the reward fns return (_check_hit
-    # returns "Hit", capital H) -- outcomes[last_reason] below creates/increments
-    # by that literal string, so a mismatched case here silently eats the count
-    # into an unread key (outcome_columns below maps this back to the lowercase
-    # outcome_hit CSV column).
+                 grad_norm, csv_path, n_diag_episodes=20, oob_radius=7.0):
+    # Keys must match the exact reason strings the reward fns return (_check_hit
+    # returns "Hit"); outcome_columns below maps this back to lowercase "outcome_hit".
     outcomes = {"oob": 0, "Hit": 0, "hover_success": 0,
                 "moving_away_cap": 0, "drift": 0, "timeout": 0}
     steps_survived = []
     final_dists = []
     diag_episode_rewards = []
+    hit_times_sec = []
     max_hover_streak = 0
 
     for _ in range(n_diag_episodes):
@@ -173,6 +209,7 @@ def log_metrics(env, model, timesteps_done, ent_coef,
         last_reason = None
         episode_max_hover_streak = 0
         episode_reward = 0.0
+        info = {}
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
@@ -192,6 +229,8 @@ def log_metrics(env, model, timesteps_done, ent_coef,
         final_dists.append(env.prev_distance)
         diag_episode_rewards.append(episode_reward)
         max_hover_streak = max(max_hover_streak, episode_max_hover_streak)
+        if info.get("hit_time_sec") is not None:
+            hit_times_sec.append(info["hit_time_sec"])
 
         if getattr(env, "hover_success_achieved", False):
             outcomes["hover_success"] += 1
@@ -204,20 +243,24 @@ def log_metrics(env, model, timesteps_done, ent_coef,
     avg_final_dist = float(np.mean(final_dists)) if final_dists else 0.0
     min_final_dist = float(np.min(final_dists)) if final_dists else 0.0
     std_final_dist = float(np.std(final_dists)) if final_dists else 0.0
+    avg_hit_time_sec = float(np.mean(hit_times_sec)) if hit_times_sec else None
 
-    LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
-    effective_std = np.exp(LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) *
+    effective_std = np.exp(model.log_std_min + 0.5 * (model.log_std_max - model.log_std_min) *
                             (np.tanh(model.actor_log_std.detach().cpu().numpy()) + 1))
     effective_std_mean = float(np.mean(effective_std))
     total_param_norm = sum(p.data.norm().item() for p in model.parameters())
 
-    # from the diagnostic episodes themselves (deterministic policy, same 20
-    # episodes as avg_final_dist/outcome_*/avg_steps_survived below), NOT the
-    # last 10 TRAINING rollout episodes (stochastic, a different sample
-    # entirely) -- that mismatch was silently making vs_pid_baseline's
-    # avg_reward describe different episodes than its other 3 stats.
+    # From the diagnostic episodes themselves (deterministic policy), not the
+    # stochastic training-rollout episodes, so all stats describe the same sample.
     reward_mean = float(np.mean(diag_episode_rewards)) if diag_episode_rewards else 0.0
     reward_std = float(np.std(diag_episode_rewards)) if diag_episode_rewards else 0.0
+
+    success_rate = outcomes["hover_success"] / n_diag_episodes if n_diag_episodes else 0.0
+    grade, _ = compute_grade(
+        success_rate=success_rate, avg_final_dist=avg_final_dist,
+        avg_hit_time_sec=avg_hit_time_sec, avg_grad_norm=grad_norm,
+        oob_radius=oob_radius, episode_time_budget_sec=env.max_steps * env.dt,
+    )
 
     row = {
         "timesteps": timesteps_done,
@@ -235,6 +278,8 @@ def log_metrics(env, model, timesteps_done, ent_coef,
         "avg_final_dist": avg_final_dist,
         "min_final_dist": min_final_dist,
         "std_final_dist": std_final_dist,
+        "avg_hit_time_sec": avg_hit_time_sec,
+        "grade": grade,
         "effective_std_mean": effective_std_mean,
         "total_param_norm": total_param_norm,
     }
@@ -257,8 +302,6 @@ def log_metrics(env, model, timesteps_done, ent_coef,
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
-
-    return row
 
     return row
 
@@ -290,60 +333,51 @@ def train(cfg: TrainConfig):
     reward_fn= make_reward_fn(reward_cfg)
 
     env = InterceptorDroneEnv(reward_fn)
-    # env.target_pos = compute_target_pos(
-    #     (0, 0,0), cfg.TARGET_DISTANCE, cfg.TARGET_ANGLE_DEG, cfg.TARGET_Y_OFFSET
-    # )
-
-    #to go upo
     env.target_pos=np.array([0,0,5],dtype=np.float32)
     print("target placed at:", env.target_pos)
-    print("dorne placet at:", env.drone_state.position)
+    print("drone placed at:", env.drone_state.position)
 
     model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
-                         env.action_space.low, env.action_space.high).to(device)
-    optimizer =torch.optim.Adam(
-        params=model.parameters(),
-        lr=cfg.LR,
-
-    )
+                         env.action_space.low, env.action_space.high,
+                         hidden=cfg.HIDDEN, num_hidden_layers=cfg.NUM_HIDDEN_LAYERS, dropout=cfg.DROPOUT,
+                         log_std_min=cfg.LOG_STD_MIN, log_std_max=cfg.LOG_STD_MAX).to(device)
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=cfg.LR)
     timesteps_done = 0
     all_episode_rewards = []
     drone_state_arr = []
-    dist_history=[]
+    last_checkpoint_path = None
 
     model.load_state_dict(torch.load("app/z_final_version_1m_10epoch/ppo_stage2_660000.pt", map_location=device))
 
+    start_run(experiment_name="phase0-training", run_name=cfg.CHECKPOINT_DIR)
+    log_params_safe({**vars(cfg), **vars(reward_cfg)})
 
     while timesteps_done < cfg.TOTAL_TIMESTEPS:
-
-        # Decay entropy coefficient over the course of the full run: early on,
-        # exploration is fine (policy needs to try things); late in training
-        # it should be near-zero so entropy stops dragging the policy back
-        # toward max noise once the advantage signal is weak/near-zero.
+        # Decay entropy coefficient and target_kl over the run; exploration matters
+        # early, but late in training entropy should stop dragging the policy toward
+        # max noise once the advantage signal is weak.
         progress = timesteps_done / cfg.TOTAL_TIMESTEPS
-        current_ent_coef = max(0.001, 0.01 * (1 - progress))
+        current_ent_coef = max(cfg.ENT_COEF_END, cfg.ENT_COEF_START * (1 - progress))
+        current_lr = cfg.LR * max(0.1, 0.01 * (1 - progress))
+        current_target_kl = cfg.TARGET_KL_START - (cfg.TARGET_KL_START - cfg.TARGET_KL_END) * progress
 
-
-        current_lr = cfg.LR* max(0.1, 0.01 * (1 - progress))
-
-        #adam dosent take new rl
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
-
-        current_target_kl = 0.02 - 0.005 * progress
 
         model, optimizer, episode_rewards, last_losses = ppo_train(
             env,
             total_timesteps=cfg.CHECKPOINT_EVERY_TIMESTEPS,   # one chunk per call
             num_steps=cfg.NUM_STEPS,
             gamma=cfg.GAMMA, lam=cfg.LAM, lr=current_lr,
-            model=model,                  #  resumes, not restarts
+            model=model,                  # resumes, not restarts
             ent_coef=current_ent_coef,
             optimizer=optimizer,
             global_timesteps_offset=timesteps_done,
             global_total_timesteps=cfg.TOTAL_TIMESTEPS,
             target_kl=current_target_kl,
-            num_epochs=cfg.NUM_EPOCHS,
+            num_epochs=cfg.NUM_EPOCHS, batch_size=cfg.BATCH_SIZE,
+            clip_eps=cfg.CLIP_EPS, vf_coef=cfg.VF_COEF, max_grad_norm=cfg.MAX_GRAD_NORM,
+            log_std_clamp_min=cfg.LOG_STD_CLAMP_MIN, log_std_clamp_max=cfg.LOG_STD_CLAMP_MAX,
         )
         all_episode_rewards.extend(episode_rewards)
         drone_state_arr.append(env.drone_state)
@@ -352,13 +386,16 @@ def train(cfg: TrainConfig):
 
         print()  # move off the in-place epoch/step progress line
         save_checkpoint(model, timesteps_done, cfg)
-        log_metrics(
+        last_checkpoint_path = os.path.join(cfg.CHECKPOINT_DIR, f"ppo_stage2_{timesteps_done}.pt")
+        row = log_metrics(
             env, model, timesteps_done, current_ent_coef,
             last_losses.get("policy_loss", 0.0), last_losses.get("value_loss", 0.0),
             last_losses.get("entropy_loss", 0.0), last_losses.get("approx_kl", 0.0),
             last_losses.get("early_stopped", False), last_losses.get("grad_norm", 0.0),
             csv_path=cfg.METRICS_CSV, n_diag_episodes=cfg.N_DIAGNOSTIC_EPISODES,
+            oob_radius=reward_cfg.oob_radius,
         )
+        log_metrics_safe(row, step=timesteps_done)
 
     plot_training_run(
         cfg.METRICS_CSV,
@@ -373,6 +410,12 @@ def train(cfg: TrainConfig):
         oob_penalty=reward_cfg.oob_penalty,
         streak_penalty_coef=reward_cfg.streak_penalty_coef,
     )
+
+    if last_checkpoint_path and os.path.exists(last_checkpoint_path):
+        mlflow.log_artifact(last_checkpoint_path)
+    if os.path.exists(cfg.METRICS_CSV):
+        mlflow.log_artifact(cfg.METRICS_CSV)
+    mlflow.end_run()
 
     return model
 

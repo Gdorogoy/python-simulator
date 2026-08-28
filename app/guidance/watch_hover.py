@@ -3,9 +3,6 @@ Load a trained checkpoint and watch it fly in the pybullet GUI.
 
 Usage:
     python -m app.guidance.watch_hover [checkpoint_path] [n_episodes]
-
-Defaults to the converged Phase 0 checkpoint from the 1m_10epochs_v4 run
-(streak-confirmed 100% hover_success across timesteps 930000..1005000).
 """
 import sys
 from pathlib import Path
@@ -25,8 +22,7 @@ def main():
     checkpoint = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CHECKPOINT
     n_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 
-    # same RewardConfig as train() in phase_0_training.py, so termination
-    # reasons/behavior match what the checkpoint was actually trained under
+    # Same RewardConfig as train() in phase_0_training.py, so behavior matches training.
     reward_cfg = RewardConfig(
         oob_radius=7,
         hit_reward=10,

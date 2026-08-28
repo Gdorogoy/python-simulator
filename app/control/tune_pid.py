@@ -6,17 +6,11 @@ from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.control.pid_hover import PIDHoverController
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-# One gains file at 3m doesn't hold at 250m -- max_tilt_rad caps commanded
-# tilt regardless of how far the target is, so a controller tuned tight for a
-# short error either can't produce enough sustained thrust angle to close a
-# long one in reasonable time, or (if tuned loose enough for long range)
-# overshoots/oscillates on short ones. Tune a separate gains set per distance
-# instead of one set for everything.
-
-
-"""FOR CURRENT FIX"""
+# One gains set doesn't hold across distances: max_tilt_rad caps commanded tilt
+# regardless of target distance, so gains tuned tight for a short error can't close a
+# long one, while gains loose enough for long range overshoot on short ones. Tune a
+# separate gains set per distance instead.
 DISTANCES = [3, 10, 50, 150]
-# DISTANCES=[3,250]
 
 MIN_EPISODE_SECONDS = 7.5   # dt=1/240 (interceptor_drone.py) -- floor is settling time, not travel time
 MIN_STEPS = int(MIN_EPISODE_SECONDS * 240)
@@ -24,10 +18,9 @@ MIN_STEPS = int(MIN_EPISODE_SECONDS * 240)
 
 def steps_for_dist(target_dist):
     """
-    Longer distance needs more steps to even reach the target once, let alone
-    hold it -- but hit_threshold precision (getting within 5cm) takes roughly
-    the same SETTLING time regardless of distance, so short distances still
-    need a real time floor, not just a proportionally tiny travel-time budget.
+    Scales steps with distance, but floors at MIN_STEPS: hit_threshold precision takes
+    roughly the same settling time regardless of distance, so short distances still need
+    a real time floor rather than a proportionally tiny travel-time budget.
     """
     return max(MIN_STEPS, int(750 * target_dist / 3))
 

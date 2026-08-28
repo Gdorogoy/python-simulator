@@ -36,16 +36,12 @@ def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
             mean, std, _ = model.forward(obs[b])
             epoch_std_sum += std.detach().mean(dim=0)
 
-            # actions[b] are real, bounded PID actions (Newtons/torque) -- map
-            # them back into the SAME raw pre-tanh space `mean` lives in
-            # (model.scale_action's inverse) before scoring, instead of
-            # MSE-ing the raw mean directly against a bounded target it can
-            # never exactly represent (tanh saturates). Then use the Gaussian
-            # NLL (dist.log_prob), not MSE: squared error gets divided by
-            # that action dimension's own learned variance, so a
-            # large-magnitude dimension (e.g. thrust) doesn't automatically
-            # dominate the loss over a small-magnitude one (e.g. yaw torque)
-            # the way unweighted MSE would.
+            # actions[b] are bounded PID actions; map them into the raw pre-tanh space
+            # `mean` lives in (inverse of model.scale_action) before scoring, since MSE
+            # against the bounded target directly can't be met once tanh saturates. Score
+            # with Gaussian NLL instead of MSE so each action dimension is normalized by
+            # its own learned variance, preventing large-magnitude dims (e.g. thrust) from
+            # dominating small ones (e.g. yaw torque).
             half_range = 0.5 * (model.action_high - model.action_low)
             normalized = (actions[b] - model.action_low) / half_range - 1.0
             normalized = torch.clamp(normalized, -0.999, 0.999)  # keep atanh finite

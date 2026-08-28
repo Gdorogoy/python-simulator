@@ -7,19 +7,8 @@ from scipy.spatial.transform import Rotation
 from app.dynamics.drone import QuadConfig, Vector3D, QuadState, Quaternion
 
 """
-we get the desired [thrust, roll, pitch, yaw]  from the rl, 
-we build a method that will by multiplying it against our vector of the drone rotors w 
-will return to use the desired [thrust, roll, pitch, yaw] .
-    
-the m matrix built like this:
-
-for each rotor theres a column that represent each of the output elements.
-so in our case:
-row 1 (k_f) [ F contribution of 1st rotor , F contribution of 2nd rotor , F contribution of 3rd rotor , F contribution of 4th rotor]
-row 2 (y*k_f) [ roll contribution of the 1st rotor , roll contribution of the 2nd rotor , roll contribution of the 3rd rotor , roll contribution of the 4th rotor]
-row 3 (-x*k_f) [ pitch contribution of the 1st rotor , pitch contribution of the 2nd rotor , pitch contribution of the 3rd rotor , pitch contribution of the 4th rotor]
-row 4 (k_m*spin_dir) [ yaw contribution of the 1st rotor , yaw contribution of the 2nd rotor , yaw contribution of the 3rd rotor , yaw contribution of the 4th rotor]
-
+Maps per-rotor speeds to [thrust, roll, pitch, yaw] via the mixer matrix M: row i holds
+each rotor's contribution to output i (thrust, roll, pitch, yaw respectively).
 """
 def mixer(config: QuadConfig, rotors_speed : list[float]):
     M=np.zeros((4,4))
@@ -36,18 +25,12 @@ def mixer(config: QuadConfig, rotors_speed : list[float]):
 
     res=M @ rotors_speed
 
-
-    # print("MIXER CALCULATIONS ========M===============")
-    # print(M)
-    # print("MIXER CALCULATIONS =======RES===============")
-    # print(res)
     return res
 
 
 """
-we have the method that will give us by multiplication the desried [thrust, roll, pitch, yaw] ,
-but the drone dosent undertand waht to do with it so we do inversion on the same method to get the instructions.
-in other words what w,rpm,inertia,cw/ccw etc to set the SPECIFIC rotor
+Inverts the mixer matrix to go from a desired [thrust, roll, pitch, yaw] command
+(e.g. from the RL policy) to the per-rotor speeds that produce it.
 """
 def mixer_inversion(config: QuadConfig, desired_params : list[float]) -> list[float]:
     M = np.zeros((4, 4))
@@ -65,22 +48,12 @@ def mixer_inversion(config: QuadConfig, desired_params : list[float]) -> list[fl
     speeds=np.linalg.inv(M) @ desired_params
     speeds = np.clip(speeds, 0.0, None)
     res = [np.sqrt(speed) for speed in speeds]
-    #
-    # print("MIXER CALCULATIONS ========M===============")
-    # print(np.linalg.inv(M))
-    # print("MIXER CALCULATIONS =======RES===============")
-    # print(res)
 
     return res
 
 """
-small_tau= responsive , big_tau = unresponsive
-how many seconds to get to wanted rpm
-
-adds realism , like an car engine cant go from 0 to 100kmh in 1 sec 
-so the drone rotators also needs to follow realism , 
-
-then calculating the change of the omega via dt, like the velocity change
+First-order lag toward the target rpm (motor_tau: small = responsive, large = sluggish),
+so a rotor can't jump speed instantly, like a real motor's spin-up/down time.
 """
 def motor_lag(w_current: float, w_target: float, motor_tau: float, dt: float) -> float:
     w_dot= (w_target-w_current) / motor_tau
@@ -89,18 +62,8 @@ def motor_lag(w_current: float, w_target: float, motor_tau: float, dt: float) ->
 
 
 """
-each rotator produces 2 forces:
-one thats pushing the drone in the direction
-another one that twists the drone body (aka tilting it),
-we need to combine all 4 of the rotators to get the 
-
-thrust =z index (up)
-
-F_i= thrust magnitude produced by the rotator (always POSITIVE!)
-w_i= angular speed of rotator always , because squared the thrust dosent care whether the rotator spins CW or CCW
-k_f= thrust coefficient , constant absorbing air density , propeller disk , blade pitch/shape.
-
-no spin_dir beacuse thrust can either go up or down.
+Thrust from one rotor, along body z. Always positive since it's squared in omega, so
+spin direction (CW/CCW) doesn't matter here the way it does for torque.
 """
 
 def thrust(k_f: float, w_i: float):
@@ -108,15 +71,8 @@ def thrust(k_f: float, w_i: float):
     return F_i
 
 """
-torque=rotation 
-
-M_i=reaction about the vertcial axis contributed by rotator i
-w_i= same speeds-squared as thrust, more speed more drag on the blades
-k_m= torque coefficient ,along the rotational drag
-spin_dir=usually -1 or +1 CW=1 CCW=-1 (or vice versa) depends on the convention
- 
-spin_dir exist because unlinke in thrust the torque directions depends on the spin direction,
- 
+Reaction torque from one rotor about the vertical axis. Unlike thrust, torque direction
+depends on spin_dir (+1/-1 for CW/CCW), since drag reaction opposes the spin.
 """
 
 def torque(k_m: float, w_i: float, spin_dir_i: float):
@@ -124,11 +80,7 @@ def torque(k_m: float, w_i: float, spin_dir_i: float):
     return F_i
 
 
-"""
-combining all of the thrust that we calculated per rotor to apply it to the body
-   thrust = simple sum
-
-"""
+"""Sums each rotor's thrust into the net body thrust."""
 
 def net_combining_thrust(config: QuadConfig, rotor_speeds: list[float]):
     F_net=np.zeros(4)
@@ -136,10 +88,7 @@ def net_combining_thrust(config: QuadConfig, rotor_speeds: list[float]):
         F_net[i]=thrust(config.rotors[i].k_f, rotor_speeds[i])
 
     return sum(F_net)
-"""
-combining all of the torque that we calculated per rotor to apply it to the body
-torque = reaction sum + cross product sum
-"""
+"""Sums each rotor's moment-arm contribution and reaction torque into net body torque."""
 def net_combining_torque(config: QuadConfig, rotor_speeds: list[float]):
     F_net = np.zeros(3)
 
@@ -152,9 +101,7 @@ def net_combining_torque(config: QuadConfig, rotor_speeds: list[float]):
         F_net += np.array([0, 0, torque(rotor.k_m, rotor_speeds[i], rotor.spin_dir)])  # reaction torque
     return F_net
 
-"""
-how we accelerate on each of our axis (roll , yaw ,pitch)
-"""
+"""Angular acceleration per axis: torque divided by that axis's inertia."""
 def angular_acceleration(config: QuadConfig, net_torque: list[float]) -> np.ndarray:
     alpha = np.zeros(3)
     for i in range(3):
@@ -162,9 +109,7 @@ def angular_acceleration(config: QuadConfig, net_torque: list[float]) -> np.ndar
     return alpha
 
 
-"""
-updating the velocity by adding to it the alpha (angular_acceleration) times dt (the time change)
-"""
+"""Integrates angular velocity forward by alpha * dt."""
 def update_angular_velocity(state: QuadState, alpha: np.ndarray, dt: float) -> np.ndarray:
     current_w = np.array([state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z])
     new_w = current_w + alpha * dt
@@ -172,11 +117,7 @@ def update_angular_velocity(state: QuadState, alpha: np.ndarray, dt: float) -> n
 
 
 
-"""
-input: drones current velocity (and in what direction)
-output:  the forces that are on the opposite of the direction of the drone on each of the axis,
-          that will be used in thrust/gravity/wind , and in acceleration calculations
-"""
+"""Drag force opposing the drone's current velocity vector."""
 def drag_force(velocity: list[float] , drag_coeff : float , cross_sec_area : float , air_dens : float):
     v=np.array(velocity)
     speed=np.linalg.norm(v)
@@ -189,10 +130,7 @@ def drag_force(velocity: list[float] , drag_coeff : float , cross_sec_area : flo
     return (-v/speed) *  F_drag
 
 
-"""
-input: wind vector with direction and magnitude as it elements , mass of the drone , wind coefficient
-output: an wind force vecotr on each of the axis that will be added in thrust/drag/gravity
-"""
+"""Per-axis wind force from the wind vector, scaled by mass and a wind coefficient."""
 def wind(wind: list[float] , mass: float , k_wind_coeff : float):
     F_wind = np.zeros(3)
     for i in range(0,3):
@@ -205,100 +143,54 @@ def wind(wind: list[float] , mass: float , k_wind_coeff : float):
 
 def timestamp_update(state: QuadState, config: QuadConfig , rl_action: list[float] , wind_vector : list[float] ,dt: float):
 
-    # print(f"=====================================================================")
-
     w_target : list[float] = mixer_inversion(config, rl_action)
-
-    # print(f"w_target: {w_target}")
-
-
 
     w_actual = np.zeros(4)
     for i in range(0,4):
         w_actual[i] = motor_lag(state.rotor_rpm[i], w_target[i], config.rotors[i].motor_tau, dt)
 
-    # print(f"w_actual: {w_actual}")
-
     net_thrust = net_combining_thrust(config, w_actual)  # scalar
     net_torque = net_combining_torque(config, w_actual)  # 3-element vector
-
-    # print(f"net_thrust: {net_thrust}")
-    # print(f"net_torque: {net_torque}")
 
     drag = drag_force(
         velocity=[state.velocity.x, state.velocity.y, state.velocity.z],
         drag_coeff=config.drag_coeff,
-        cross_sec_area=0.05,  # you'll want this as a proper QuadConfig field eventually
+        cross_sec_area=0.05,  # TODO: promote to a proper QuadConfig field
         air_dens=1.225,
     )
 
-    # print(f"drag: {drag}")
-
     wind_force = wind(
-        wind=wind_vector,  # the function parameter you already receive
+        wind=wind_vector,
         mass=config.mass,
         k_wind_coeff=0.1,  # tunable constant
     )
 
-    # print(f"wind_force: {wind_force}")
-
     gravity_force = np.array([0, 0, -config.mass * 9.81])
-
-    # print(f"gravity_force: {gravity_force}")
 
     current_rot = Rotation.from_quat(
         [state.orientation.x, state.orientation.y, state.orientation.z, state.orientation.w])
 
-    # print(f"current_rot: {current_rot}")
-
     thrust_body_frame = np.array([0, 0, net_thrust])
-
-    # print(f"thrust_body_frame: {thrust_body_frame}")
 
     thrust_world_frame = current_rot.apply(thrust_body_frame)
 
-    # print(f"thrust_world_frame: {thrust_world_frame}")
-
     total_force = thrust_world_frame + drag + wind_force + gravity_force
-
-    # print(f"total_force: {total_force}")
 
     linear_accel = total_force / config.mass
 
-    # print(f"linear_accel: {linear_accel}")
-
     new_velocity = np.array([state.velocity.x, state.velocity.y, state.velocity.z]) + linear_accel * dt
-
-    # print(f"new_velocity: {new_velocity}")
-
 
     new_position = np.array([state.position.x, state.position.y, state.position.z]) + new_velocity * dt
 
-    # print(f"new_position: {new_position}")
-
     alpha = angular_acceleration(config, net_torque)
-
-    # print(f"alpha: {alpha}")
 
     new_angular_velocity = update_angular_velocity(state, alpha, dt)
 
-    # print(f"new_angular_velocity: {new_angular_velocity}")
-
     delta_rot = Rotation.from_rotvec(new_angular_velocity * dt)
-
-    # print(f"delta_rot: {delta_rot}")
 
     new_rot = delta_rot * current_rot
 
-    # print(f"new_rot: {new_rot}")
-
-
-
-
     new_quat = new_rot.as_quat()  # returns [x, y, z, w]
-
-
-    # print(f"new_quat value: {new_quat}")
 
     quad_state=QuadState(
         position=Vector3D(*new_position),

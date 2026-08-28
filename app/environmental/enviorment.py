@@ -14,13 +14,11 @@ def spawn_drone(config: QuadConfig, start_position: Vector3D) -> int:
     Returns the body_id PyBullet uses to reference this object.
     """
 
-    # creating basic shape for the drone body
     body_half_extents = [config.arm_length * 0.3, config.arm_length * 0.3, 0.05]
     col_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=body_half_extents)
     vis_shape = p.createVisualShape(p.GEOM_BOX, halfExtents=body_half_extents, rgbaColor=[1, 0, 0, 1])
 
-    # creating basic shape for the drone rotors and then attaching them to the
-    # body model as child links
+    # Rotors are attached to the body as fixed child links.
     rotor_radius = 0.02
     link_masses = []
     link_collision_shapes = []
@@ -52,24 +50,24 @@ def spawn_drone(config: QuadConfig, start_position: Vector3D) -> int:
         link_joint_axes.append([0, 0, 0])
 
     drone_id = p.createMultiBody(
-        baseMass=config.mass,                     # the base body mass
-        baseCollisionShapeIndex=col_shape,          # the base body's invisible collision shape
-        baseVisualShapeIndex=vis_shape,              # the base body model visualized
-        basePosition=[start_position.x, start_position.y, start_position.z],  # starting position, absolute world coords
+        baseMass=config.mass,
+        baseCollisionShapeIndex=col_shape,
+        baseVisualShapeIndex=vis_shape,
+        basePosition=[start_position.x, start_position.y, start_position.z],  # absolute world coords
 
-        linkMasses=link_masses,                        # the mass of each linked (attached) rotor
-        linkCollisionShapeIndices=link_collision_shapes, # the collision shape of each linked rotor
-        linkVisualShapeIndices=link_visual_shapes,        # the model visualized for each linked rotor
+        linkMasses=link_masses,
+        linkCollisionShapeIndices=link_collision_shapes,
+        linkVisualShapeIndices=link_visual_shapes,
 
-        linkPositions=link_positions,                       # WHERE each rotor ATTACHES, relative to the parent (base body)
-        linkOrientations=link_orientations,                  # the ROTATION of each rotor's attachment point, relative to parent (quaternion)
+        linkPositions=link_positions,             # where each rotor attaches, relative to the base body
+        linkOrientations=link_orientations,        # rotation of each attachment point, relative to parent (quaternion)
 
-        linkInertialFramePositions=link_inertial_positions,   # WHERE each rotor's own MASS is centered, relative to its OWN attachment point
-        linkInertialFrameOrientations=link_inertial_orientations, # the ROTATION of each rotor's own mass center, relative to its OWN attachment point
+        linkInertialFramePositions=link_inertial_positions,        # where each rotor's own mass is centered, relative to its attachment point
+        linkInertialFrameOrientations=link_inertial_orientations,   # rotation of that mass center, relative to its attachment point
 
-        linkParentIndices=link_parent_indices,                  # which body each rotor is attached to (0 = base body)
-        linkJointTypes=link_joint_types,                          # HOW each rotor is allowed to MOVE relative to its parent (FIXED = rigid, no independent motion)
-        linkJointAxis=link_joint_axes,                              # rotation/slide axis, only relevant for non-fixed joints (irrelevant here since we use FIXED)
+        linkParentIndices=link_parent_indices,   # which body each rotor is attached to (0 = base body)
+        linkJointTypes=link_joint_types,          # FIXED = rigid, no independent motion
+        linkJointAxis=link_joint_axes,             # only relevant for non-fixed joints (unused here)
     )
 
     return drone_id
@@ -84,9 +82,6 @@ def sample_wind_conditions(np_rand):
     return wind_vector, mass_scale
 
 
-"""
-Will be used in the RL connection update
-"""
 def apply_rotor_thrust(body_id: int, config: QuadConfig, rotor_speeds: list[float]) -> None:
     """
     Converts 4 rotor speeds into total thrust, applies as a force
@@ -104,9 +99,6 @@ def apply_rotor_thrust(body_id: int, config: QuadConfig, rotor_speeds: list[floa
 
 
 
-"""
-Will be used in the RL connection update
-"""
 def apply_rotor_torque(body_id: int, config: QuadConfig,rotor_speeds: list[float]) -> None:
 
     F=net_combining_torque(config, rotor_speeds)

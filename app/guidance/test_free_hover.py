@@ -1,13 +1,8 @@
 """
-Diagnostic: load a trained checkpoint, spawn it at (0,0,5) (== target),
-and let it run WITHOUT the hover_success early-termination -- normally the
-episode ends the instant the drone holds the zone for 200 steps
-(hover_success_steps), so we've never actually watched what it does past
-that point. This disables that early exit (hover_success_steps set huge)
-so the episode keeps running under the SAME other failure conditions
-(attitude/oob/moving_away_cap) and prints distance-to-target over time --
-if the policy only learned to survive exactly ~200 steps and then falls
-apart, this is what will show it.
+Diagnostic: loads a trained checkpoint and lets it fly with the hover_success
+early-termination effectively disabled, so behavior past the normal 200-step success
+cutoff (which would otherwise end the episode) is visible -- reveals a policy that only
+learned to survive to that point and then falls apart.
 
 Usage:
     python -m app.guidance.test_free_hover [checkpoint_path] [--save-video [path.mp4]]
@@ -24,11 +19,7 @@ from app.environmental.interceptor_drone import InterceptorDroneEnv
 from app.guidance.train import ActorCritic
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
-# RUNS_DIR = Path(__file__).parent / "runs"
-# DEFAULT_CHECKPOINT = RUNS_DIR / "ppo_stage2_510000.pt"
-
-
-DEFAULT_CHECKPOINT = "runs/phase1/ppo_stage2_225000.pt"
+DEFAULT_CHECKPOINT = "/mnt/c/Users/Pc-Egor/PycharmProjects/python-simulator/app/z_final_version_5m_30epoch_50xyz/ppo_stage2_225000.pt"
 MAX_VIDEO_SECONDS = 10
 
 
@@ -66,7 +57,7 @@ def main():
     )
     reward_fn = make_reward_fn(reward_cfg)
     
-    env = InterceptorDroneEnv(reward_fn, render_mode="human")
+    env = InterceptorDroneEnv(reward_fn, render_mode="None")
 
     model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
                          env.action_space.low, env.action_space.high)
@@ -75,7 +66,7 @@ def main():
     print(f"Loaded {checkpoint}")
 
     obs, _ = env.reset(start_pos=np.array([0, 0, 5], dtype=np.float32),
-                        target_pos=np.array([-50, 10, 25], dtype=np.float32))
+                        target_pos=np.array([-100,0,5], dtype=np.float32))
     done = False
     step = 0
     info = {"reason": None}
@@ -115,10 +106,9 @@ def main():
         step += 1
         done = terminated or truncated
 
-        # the reward_fn used here (plain make_reward_fn) has no hit-detection at
-        # all -- unlike RewardFnPhase1's roadmap -- so log zone entry ourselves,
-        # without terminating, to keep this script's "watch what happens after
-        # success" purpose intact
+        # make_reward_fn has no hit-detection (unlike RewardFnPhase1), so log zone
+        # entry manually here without terminating, to preserve the "watch what
+        # happens after success" purpose of this script.
         in_zone = env.prev_distance < hit_threshold
         if in_zone and not was_in_zone:
             print(f"step {step:4d}  HIT -- dist={env.prev_distance:.4f} (within {hit_threshold}m of target)")

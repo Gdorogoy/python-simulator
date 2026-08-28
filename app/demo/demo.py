@@ -29,19 +29,13 @@ def altitude_thrust(state, target_z, hover_thrust, current_roll=0.0, current_pit
 def attitude_torque(state, target_roll, target_pitch, target_yaw_rate=0.0,
                      kp=8.0, kd=1.5, kd_yaw=1.5):
     """
-    Inner-loop attitude controller. Computes the error as a QUATERNION
-    rotation between current and target attitude, NOT by subtracting
-    Euler angles. Euler subtraction (roll - target_roll) gets corrupted
-    by roll/pitch/yaw coupling whenever yaw is spinning fast — this is
-    exactly what caused the crash during "yaw_spin": the earlier
-    wraparound fix only handled the +/-pi discontinuity, not the deeper
-    coupling that exists even mid-range. The quaternion error below never
-    subtracts roll/pitch numbers at all, so it doesn't inherit that bug.
+    Inner-loop attitude controller. Computes attitude error as a quaternion rotation
+    between current and target, not by subtracting Euler angles -- Euler subtraction
+    gets corrupted by roll/pitch/yaw coupling whenever yaw spins fast.
     """
     cur_rot = Rotation.from_quat([state.orientation.x, state.orientation.y,
                                    state.orientation.z, state.orientation.w])
-    # only extract yaw (to build a target at the SAME heading) — never
-    # extract/subtract roll or pitch, that's the part that was breaking
+    # Only extract yaw, to build a target at the same heading -- never extract/subtract roll or pitch.
     _, _, cur_yaw = cur_rot.as_euler('xyz')
     target_rot = Rotation.from_euler('xyz', [target_roll, target_pitch, cur_yaw])
 

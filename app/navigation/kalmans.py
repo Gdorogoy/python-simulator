@@ -2,43 +2,12 @@ import numpy as np
 
 
 """
-x_hat | state estimate |vector of 6 | current best guess: position and velocity
-P | state covariance | vector of 6 | how uncertain each part of that guess is
-F | state transition model | matrix of 6x6 | encodes the motion model, no measurement involved
-B | control input model | (0 because of u) | maps a known control input into the state
-u | control vector | (0 in the RL case because the accelerations is unknow) | the known control input itself, if any
-q | process model | scalar  | how much you distrust your own motion model 
-Q | process model | matrix of 6x6 | how much you distrust your own motion model in matrix form
-H | measurements model | matrix of 6x3 | maps state into what the sensor actually reads
-r | measurements noise variance | scalar | how noisy the sensors is
-R | measurements noise variance  | matrix of 6x6 | how noisy the sensors is in matrix form
-K | kalman gain | scalar | how much to trust new measurement vs prediction
-z | measurements vector | vector of 3 only [x,y,z] | the raw noisy sensor reading this cycle
-I | identity matrix | matrix pf 6x6 | does nothing when multiplied
-
-
-
-inner methods:
-
-R=I * r
-
-Q=I * q
-
-
-prediction methods:
-
-x_hat  { n|n-1 }  = F*x_hat { n-1|n-1 }+ B*u { n}
-
-P { n|n-1 } = F*P { n-1|n-1} * F transpose + Q
-
-update methods::
-
-K {n}= P { n|n-1} * H transpose *(H * P {n| n-1 } H transpose + R) ^ -1
-
-x_hat { n|n} = x_hat {n|n-1} + K* (z {n} - H * x_hat { n| n-1} )
-
-P { n|n }= (I - K { n} * H )* P { n|n-1 }
-
+Standard linear Kalman filter over a 6-element state [x, y, z, vx, vy, vz]. x_hat/P are
+the state estimate and its covariance; F is the constant-velocity motion model; Q/R are
+process/measurement noise (as scalars q/r, expanded to matrices via identity); H maps
+state to the 3 position measurements actually sensed; K is the Kalman gain balancing
+trust between prediction and new measurement. No control input (B/u) is used since RL
+actions aren't known accelerations here.
 """
 
 

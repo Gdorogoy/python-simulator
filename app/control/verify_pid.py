@@ -9,13 +9,10 @@ from app.guidance.plotting import plot_eval_matrix_distance, plot_eval_matrix_pa
 
 
 def _make_env(oob_radius):
-    # warmup_duration_steps=0, phase1_duration_steps=None -> phase_1_fn (which
-    # DOES check for "Hit") is the only stage, active from step 1, forever.
-    # Leaving warmup_duration_steps at its default (10_000) is a real bug here:
-    # chain_reward_fns' stage counter is shared/cumulative across the WHOLE
-    # eval run, not per-episode, so it silently falls through to base_fn (no
-    # hit-check at all) partway through the run and every pair after that
-    # can never register a "Hit" regardless of how well the PID flies.
+    # warmup_duration_steps=0 makes phase_1_fn (the only stage that checks for "Hit")
+    # active from step 1 forever. Leaving it at the default would be a real bug here:
+    # the stage counter is cumulative across the whole eval run, not per-episode, so it
+    # would silently fall through to the no-hit-check base_fn partway through.
     reward_fn = RewardFnPhase1(
         hit_steps_streak=1500,
         phase1_pos_coef=0.25,
@@ -44,9 +41,8 @@ for dist in DISTANCES:
     oob_radius = max(20.0, dist * 3.0)
     env = _make_env(oob_radius)
 
-    # Same fixed (start,target) pairs used to score RL checkpoints
-    # (app/training/eval_matrix.py) -- lets the PID baseline be compared
-    # against RL on identical, non-random configs.
+    # Same fixed (start, target) pairs used to score RL checkpoints, so the PID
+    # baseline is compared against RL on identical, non-random configs.
     results = run_eval_matrix(
         env, make_pid_action_fn(pid), pairs=build_eval_pairs(oob_radius=oob_radius, distances=(dist,)),
         n_repeats=3, max_steps=steps_for_dist(dist), on_episode_reset=pid.reset,

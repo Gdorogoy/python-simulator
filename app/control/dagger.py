@@ -14,11 +14,9 @@ from app.training.eval_matrix import build_eval_pairs
 
 
 def _make_env(oob_radius):
-    # same fix as collect_demonstrations.py: skip warmup/imitation and stay in
-    # phase_1_fn's hit-check the whole time -- this is repeated rollout collection,
-    # not real curriculum RL, and the chain's phase-state is shared across every
-    # env.reset(), so a real warmup_duration_steps would only ever fire once across
-    # ALL rounds/episodes combined, not per-episode
+    # Skip warmup/imitation and stay in phase_1_fn's hit-check the whole time: this is
+    # rollout collection, not curriculum RL, and phase-state is shared across every
+    # env.reset(), so a nonzero warmup_duration_steps would only fire once total, not per-episode.
     reward_fn = RewardFnPhase1(
         hit_steps_streak=1500,
         phase1_pos_coef=0.25,
@@ -50,28 +48,15 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
            out_path="app/control/pretrained_bc_dagger.pt",
            plots_dir="plots_final", distances=DISTANCES):
     """
-    Same distance curriculum as collect_demonstrations.py: for every distance in
-    `distances` (defaults to tune_pid.DISTANCES), uses that distance's own PID
-    gains (gains_by_dist, from best_pid_gains_per_dist.json) and every x/y/z
-    direction at that distance (build_eval_pairs, minus any -z pair that would
-    land underground).
+    Runs the same distance curriculum as collect_demonstrations.py (per-distance PID
+    gains, every x/y/z direction via build_eval_pairs) to collect fresh rollouts each
+    round. `distances` only limits new collection -- any 250m rows already baked into
+    demo_path's dataset stay in the aggregate; they just stop growing.
 
-    distances lets a caller drop distances they don't need rollouts for -- e.g.
-    250m is steps_for_dist(250)=62,500 steps/episode vs 1,800 for 3m, roughly
-    half this function's total per-round cost, for a distance the phase1
-    curriculum (PHASE1_DISTANCES) doesn't train on. Note this only affects
-    NEW rollout collection each round -- if demo_path's existing dataset
-    already has 250m rows baked in from an earlier collect_demonstrations.py
-    run, those stay in the aggregated dataset (agg_obs/agg_actions below load
-    the whole file), they just won't grow further.
-
-    Per-distance balancing: long-distance episodes run far more steps than
-    short ones (steps_for_dist scales with distance), so raw pair counts per
-    distance are wildly unequal -- unweighted aggregation lets long-distance
-    data dominate the BC loss and starves short-range precision. Each round,
-    every distance's collected pairs are subsampled down to the smallest
-    distance's count before being added to the aggregated dataset, so every
-    distance contributes equally regardless of episode length.
+    Long-distance episodes run far more steps than short ones, so raw pair counts per
+    distance are wildly unequal; each round, every distance's pairs are subsampled
+    down to the smallest distance's count before aggregating, so no distance dominates
+    the BC loss.
     """
     shape_env = _make_env(oob_radius=300)
     model = ActorCritic(shape_env.observation_space.shape[0], shape_env.action_space.shape[0],
@@ -98,20 +83,14 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
             max_steps = steps_for_dist(dist)
             env = _make_env(oob_radius)
 
-            # jitter magnitude scales with task distance -- a fixed absolute
-            # range (the old +-0.75/1.25) is negligible noise at 250m but can
-            # be ~80% of the task distance at 3m, badly distorting exactly
-            # the shortest/otherwise-easiest curriculum bucket
+            # Jitter magnitude scales with task distance -- a fixed absolute range would be
+            # negligible at 250m but dominate (and distort) the shortest curriculum bucket.
             jitter_mag = min(0.75, 0.25 * dist)
 
             for start, target in build_eval_pairs(oob_radius=oob_radius, distances=(dist,), axes=(0, 1, 2)):
                 for ep in range(num_episodes_per_pair):
-                    # was drone_offset[2]/target_offset[2] = 0 -- reasonable back when
-                    # altitude was never part of the task (fixed base z), but now z-axis
-                    # pairs exist and need the same "neighborhood, not one exact curve"
-                    # jitter collect_demonstrations.py already gives x/y (and z there
-                    # too, it never zeroed it). Zeroing it here would leave z-axis pairs
-                    # with zero jitter in the one dimension that's actually the task.
+                    # Jitter must cover all 3 axes, including z: z-axis pairs need the same
+                    # neighborhood jitter as x/y, since z is the actual task dimension there.
                     drone_offset = np.random.uniform(-jitter_mag, jitter_mag, size=3).astype(np.float32)
                     target_offset = np.random.uniform(-jitter_mag, jitter_mag, size=3).astype(np.float32)
 
@@ -120,13 +99,13 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
                     pid.reset()
 
                     for step in range(max_steps):
-                        policy_action = _policy_action(model, obs)  # nn flies the drone
-                        pid_action = pid.compute_action(env.drone_state, env.target_pos)  # pid just labels doesnt fly
+                        policy_action = _policy_action(model, obs)  # policy drives the drone
+                        pid_action = pid.compute_action(env.drone_state, env.target_pos)  # PID only supplies the label
 
                         obs_by_dist[dist].append(obs.copy())
-                        actions_by_dist[dist].append(pid_action.copy())  # label = what the pid would do now
+                        actions_by_dist[dist].append(pid_action.copy())
 
-                        obs, reward, terminated, truncated, info = env.step(policy_action)  # executed = policys action
+                        obs, reward, terminated, truncated, info = env.step(policy_action)
                         if terminated or truncated:
                             break
 
@@ -164,8 +143,7 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
               f"aggregated dataset now {len(agg_obs)} pairs, retraining...")
         model = pretrain_behavior_cloning(model, obs=agg_obs, actions=agg_actions, epochs=retrain_epochs)
 
-        # keep a growing snapshot on disk in case a later round crashes -- save
-        # under a "_dagger" name unless we're already continuing from one
+        # Keep a growing snapshot on disk in case a later round crashes.
         snapshot_path = demo_path if demo_path.endswith("_dagger.npz") else demo_path.replace(".npz", "_dagger.npz")
         np.savez(snapshot_path, obs=agg_obs, actions=agg_actions)
         torch.save(model.state_dict(), out_path)
@@ -187,8 +165,6 @@ if __name__ == "__main__":
         checkpoint_path="app/control/pretrained_bc.pt",
         out_path="app/control/pretrained_bc_dagger.pt",
         demo_path="app/control/demonstrations.npz",
-        # 250m dropped -- not used by PHASE1_DISTANCES, and by far the most
-        # expensive distance (steps_for_dist(250)=62,500 vs 1,800 for 3m,
-        # ~53% of total per-round cost across all 5 distances)
-        distances=(3, 10, 50, 150),
+        # 150m/250m dropped -- both far more expensive per episode than 3/10/50m.
+        distances=(3, 10, 50),
     )

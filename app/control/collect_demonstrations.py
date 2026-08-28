@@ -13,18 +13,11 @@ def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
                             save_path="app/control/demonstrations.npz",
                             distances=DISTANCES):
     """
-    Collects (obs, action) demonstration pairs across the full distance
-    curriculum instead of one fixed 3m target: for every distance in
-    `distances` (defaults to tune_pid.DISTANCES), uses that distance's own
-    PID gains (gains_by_dist, loaded from best_pid_gains_per_dist.json) and
-    every x/y/z direction (+x/-x/+y/-y/+z/-z, minus any -z pair that would
-    land underground) at that distance (via build_eval_pairs), so the BC
-    dataset covers altitude changes too, not just lateral ones.
-
-    distances lets a caller drop distances they don't actually need demos
-    for -- e.g. 250m costs steps_for_dist(250)=62,500 steps/episode vs 1,800
-    for 3m, roughly half this function's total runtime, for a distance the
-    phase1 curriculum (PHASE1_DISTANCES) doesn't even train on.
+    Collects (obs, action) demonstration pairs across the full distance curriculum in
+    `distances`, using each distance's own PID gains and every x/y/z direction
+    (via build_eval_pairs) so the BC dataset covers altitude, not just lateral moves.
+    `distances` lets a caller drop the expensive-but-unused 250m case (not part of
+    PHASE1_DISTANCES) to save runtime.
     """
     all_obs = []
     all_actions = []
@@ -35,9 +28,8 @@ def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
         oob_radius = max(20.0, dist * 3.0)
         n_steps = steps_for_dist(dist)
 
-        # no warmup/imitation curriculum needed here -- this is repeated
-        # demonstration collection, not RL training, so stay in phase_1_fn's
-        # hit-check the whole time, every episode
+        # No warmup/imitation curriculum -- this is demonstration collection,
+        # not RL training, so stay in phase_1_fn's hit-check the whole time.
         reward_fn = RewardFnPhase1(
             hit_steps_streak=1500,
             phase1_pos_coef=0.25,
@@ -56,10 +48,8 @@ def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
 
         for start, target in build_eval_pairs(oob_radius=oob_radius, distances=(dist,), axes=(0, 1, 2)):
             for ep in range(n_episodes_per_pair):
-                # small offset around the nominal start gives BC a neighborhood of
-                # corrective examples instead of one exact noiseless curve through
-                # state space -- otherwise the model has zero training signal for
-                # "slightly off the nominal path" and drifts/compounds in closed loop
+                # Jitter around the nominal start gives BC a neighborhood of corrective
+                # examples, not one noiseless curve, so it has signal for off-path states.
                 jittered_start = start + np.random.uniform(-0.15, 0.15, size=3).astype(np.float32)
                 obs, _ = env.reset(start_pos=jittered_start.astype(np.float32), target_pos=target.copy())
                 pid.reset()
@@ -67,8 +57,7 @@ def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
                 for s in range(n_steps):
                     action = pid.compute_action(env.drone_state, env.target_pos)
 
-                    # record the STATE the policy would see and the ACTION the PID
-                    # took in response to it -- this pairing is what BC learns from
+                    # Record the state the policy would see paired with the PID's action -- what BC learns from.
                     all_obs.append(obs.copy())
                     all_actions.append(action.copy())
 
@@ -91,6 +80,5 @@ if __name__ == "__main__":
     with open("app/control/best_pid_gains_per_dist.json") as f:
         gains_by_dist = json.load(f)
 
-    # 250m dropped -- not used by PHASE1_DISTANCES, and by far the most
-    # expensive distance (steps_for_dist(250)=62,500 vs 1,800 for 3m)
+    # 250m dropped -- unused by PHASE1_DISTANCES and by far the most expensive distance.
     collect_demonstrations(gains_by_dist, n_episodes_per_pair=10, distances=(3, 10, 50, 150))

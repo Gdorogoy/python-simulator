@@ -1,12 +1,14 @@
 import math
+from types import SimpleNamespace
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-LOG_STD_MIN, LOG_STD_MAX = -3.0, 0.0
+DEFAULT_LOG_STD_MIN, DEFAULT_LOG_STD_MAX = -3.0, 0.0
 
 
 def cosine_lr(base_lr, progress, min_ratio=0.01):
@@ -15,32 +17,40 @@ def cosine_lr(base_lr, progress, min_ratio=0.01):
     return base_lr * factor
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int, action_low, action_high, hidden: int = 64):
+    def __init__(self, obs_dim: int, action_dim: int, action_low, action_high,
+                 hidden: int = 64, num_hidden_layers: int = 3, dropout: float = 0.0,
+                 log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX):
         super().__init__()
-        self.shared = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
 
-        )
+        # num_hidden_layers Linear layers, Tanh(+Dropout) between all but the
+        # last -- matches the original fixed 3-layer trunk when left at defaults.
+        layers = []
+        in_dim = obs_dim
+        for i in range(num_hidden_layers):
+            layers.append(nn.Linear(in_dim, hidden))
+            if i < num_hidden_layers - 1:
+                layers.append(nn.Tanh())
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+            in_dim = hidden
+        self.shared = nn.Sequential(*layers)
+
         self.actor_mean = nn.Linear(hidden, action_dim)
         self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
         self.critic_head = nn.Linear(hidden, 1)
 
-        # action_low/action_high define the envs action_space box. The actor
-        # head outputs unbounded numbers; we squash them through tanh and
-        # rescale into this box (see scale_action / get_action_and_value)
-        # instead of relying on env.step's np.clip to do it for us.
-        # Registered as buffers so they're saved/loaded with the model.
+        # Actor head outputs unbounded values, squashed via tanh and rescaled
+        # into [action_low, action_high] (see scale_action). Registered as
+        # buffers so they're saved/loaded with the model.
         self.register_buffer("action_low", torch.as_tensor(action_low, dtype=torch.float32))
         self.register_buffer("action_high", torch.as_tensor(action_high, dtype=torch.float32))
 
     def forward(self, obs):
         x = nn.functional.relu(self.shared(obs))
         action_mean = self.actor_mean(x)
-        log_std=LOG_STD_MIN+0.5 *(LOG_STD_MAX-LOG_STD_MIN) *( torch.tanh(self.actor_log_std) +1) # was torch.clamp(self.actor_log_std, -3.0, 0.0) and before was none , changed because stopped ;earning in both of the cases
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (torch.tanh(self.actor_log_std) + 1)
         action_std = torch.exp(log_std)
         state_value = self.critic_head(x).squeeze(-1)
         return action_mean, action_std, state_value
@@ -52,14 +62,9 @@ class ActorCritic(nn.Module):
         return self.action_low + (squashed + 1) * 0.5 * (self.action_high - self.action_low)
 
     def get_action_and_value(self, obs, raw_action=None):
-        """
-        raw_action, if given, is the PRE-squash sample (what's stored in the
-        rollout buffer) -- NOT the actual action sent to the env. We re-derive
-        the squashed action deterministically from it so log_prob/entropy stay
-        consistent between rollout collection and the PPO update.
-
-        Returns (scaled_action, raw_action, log_prob, entropy, value).
-        """
+        """If raw_action is given (the pre-squash rollout-buffer sample), re-derive
+        the squashed action from it so log_prob/entropy match rollout collection.
+        Returns (scaled_action, raw_action, log_prob, entropy, value)."""
         mean, std, value = self.forward(obs)
         dist = Normal(mean, std)
 
@@ -100,9 +105,12 @@ class RolloutBuffer:
 
 
 def compute_gae(rewards, values, dones, last_value, gamma: float, lam: float):
+    """Also handles the vectorized-envs case: pass rewards/values/dones shaped
+    (num_steps, num_envs) and last_value as a (num_envs,) tensor -- the backward
+    recursion below then runs across all envs at once via broadcasting."""
     n = len(rewards)
-    advantages = torch.zeros(n, device=device)
-    last_gae = 0.0
+    advantages = torch.zeros_like(rewards)
+    last_gae = torch.zeros_like(last_value) if torch.is_tensor(last_value) else 0.0
 
     for t in reversed(range(n)):
         next_value = last_value if t == n - 1 else values[t + 1]
@@ -118,14 +126,11 @@ def compute_gae(rewards, values, dones, last_value, gamma: float, lam: float):
 def ppo_update(model, optimizer, buffer, advantages, returns,
                clip_eps: float, vf_coef: float, ent_coef: float,
                num_epochs: int, batch_size: int, target_kl: float = 0.02,
+               max_grad_norm: float = 0.5,
                global_timesteps_done: int = 0, global_total_timesteps: int = 0):
-    """
-    Runs the PPO epoch/minibatch loop. Returns a dict with the LAST executed
-    epoch's averaged stats: policy_loss, value_loss, entropy_loss, approx_kl,
-    grad_norm, early_stopped. Prints nothing except a single in-place
-    progress line ("epoch(m/n) | step(m/n)") -- detailed metrics go to the
-    caller to log (see phase_0_training.log_metrics).
-    """
+    """Runs the PPO epoch/minibatch loop. Returns a dict with the last executed
+    epoch's averaged stats (policy_loss, value_loss, entropy_loss, approx_kl,
+    grad_norm, early_stopped)."""
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     n = len(buffer.rewards)
 
@@ -154,10 +159,8 @@ def ppo_update(model, optimizer, buffer, advantages, returns,
 
             optimizer.zero_grad()
             loss.backward()
-            # grad_norm is the pre-clip total norm returned by clip_grad_norm_,
-            # captured before optimizer.step() applies the (possibly rescaled)
-            # gradients.
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            # grad_norm is the pre-clip total norm, captured before step() applies it.
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
             optimizer.step()
 
             with torch.no_grad():
@@ -180,9 +183,7 @@ def ppo_update(model, optimizer, buffer, advantages, returns,
             "grad_norm": sum(epoch_grad) / len(epoch_grad),
         }
 
-        # PPO early-stopping: if this epoch's updates moved the policy too far
-        # from the data it was collected under, stop taking more epochs on
-        # this batch rather than continuing to push off-distribution.
+        # Early-stop epochs on this batch once the policy has drifted too far from it.
         if last_epoch_stats["approx_kl"] > target_kl:
             early_stopped = True
             break
@@ -196,35 +197,20 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
               target_kl: float,
               model=None, optimizer=None, ent_coef: float = 0.015,
               global_timesteps_offset: int = 0, global_total_timesteps: int = None,
-              num_epochs: int = 10,
+              num_epochs: int = 10, batch_size: int = 32,
+              clip_eps: float = 0.2, vf_coef: float = 0.5, max_grad_norm: float = 0.5,
+              hidden: int = 64, num_hidden_layers: int = 3, dropout: float = 0.0,
+              log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX,
+              log_std_clamp_min: float = -3.0, log_std_clamp_max: float = -0.5,
               ):
-    """
-    Runs PPO for `total_timesteps`.
-
-    KEY CHANGE from before: accepts an EXISTING model/optimizer to resume
-    training from, instead of always constructing a fresh one. Pass
-    model=None (the default) to start fresh; pass a previously-returned
-    model to continue training it -- this is what makes checkpointed,
-    chunked training actually work instead of restarting from scratch
-    every chunk.
-
-    `ent_coef` is a caller-controlled entropy coefficient (default 0.01,
-    matching the previous hardcoded value). Callers doing multi-chunk
-    training should decay this over the course of the full run -- see
-    phase_0_training.train() -- otherwise entropy keeps winning the loss
-    tug-of-war indefinitely whenever the policy-gradient signal is weak.
-
-    `global_timesteps_offset`/`global_total_timesteps` let a chunked caller
-    (see phase_0_training.train()) report true whole-run progress in the
-    "step(m/n)" progress line; they default to this call's own
-    total_timesteps, preserving old behavior for callers that don't pass them.
-
-    Now also returns `last_losses`, the dict from the final ppo_update call
-    made in this chunk.
-    """
+    """Runs PPO for `total_timesteps`. Pass model=None (default) to start fresh,
+    or a previously-returned model/optimizer to resume chunked training.
+    Returns (model, optimizer, episode_rewards, last_losses)."""
     if model is None:
         model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
-                             env.action_space.low, env.action_space.high).to(device)
+                             env.action_space.low, env.action_space.high,
+                             hidden=hidden, num_hidden_layers=num_hidden_layers, dropout=dropout,
+                             log_std_min=log_std_min, log_std_max=log_std_max).to(device)
     if optimizer is None:
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if global_total_timesteps is None:
@@ -250,21 +236,15 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
             done = terminated or truncated
 
             if truncated and not terminated:
-                # time-limit cutoff (env.max_steps), not a real terminal state --
-                # bootstrap the missing future value into THIS step's reward
-                # using the true next_obs (before env.reset() below overwrites
-                # it), instead of letting GAE implicitly treat it as zero-value.
-                # dones[t] still needs to be True for this step (see buffer.add
-                # below) -- after reset, values[t+1] in the buffer belongs to a
-                # DIFFERENT episode, so GAE must not chain through it here; the
-                # correction below is what carries the missing future value.
+                # Time-limit cutoff, not a real terminal state: bootstrap the missing
+                # future value into this step's reward instead of treating it as zero.
                 with torch.no_grad():
                     next_obs_t = torch.as_tensor(next_obs, dtype=torch.float32, device=device).unsqueeze(0)
                     bootstrap_value = model.forward(next_obs_t)[2].item()
                 reward = reward + gamma * bootstrap_value
 
-            # store the PRE-squash raw action -- ppo_update recomputes the
-            # squashed action/log_prob from this during the policy update.
+            # Store the pre-squash raw action; ppo_update recomputes the squashed
+            # action/log_prob from it during the policy update.
             buffer.add(obs, raw_action.squeeze(0), log_prob.squeeze(0), reward, value.squeeze(0), done)
 
             episode_reward += reward
@@ -272,17 +252,14 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
             if done:
                 episode_rewards.append(episode_reward)
 
-                episode_end_states.append({               # <- NEW, captured BEFORE reset()
+                # Captured before env.reset() overwrites drone_state.
+                episode_end_states.append({
                     "position": env.drone_state.position,
                     "velocity": env.drone_state.velocity,
                     "orientation": env.drone_state.orientation,
                     "rotor_rpm": env.drone_state.rotor_rpm,
-                    "final_dist": env.prev_distance,        # note: env.prev_distance, not self.prev_distance
+                    "final_dist": env.prev_distance,
                 })
-
-
-
-
                 episode_reward = 0.0
 
 
@@ -295,57 +272,127 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
         advantages, returns = compute_gae(buffer.rewards, buffer.values, buffer.dones, last_value, gamma, lam)
         timesteps_done += num_steps
         last_losses = ppo_update(model, optimizer, buffer, advantages, returns,
-                   clip_eps=0.2, vf_coef=0.5, ent_coef=ent_coef, num_epochs=num_epochs, batch_size=32,
+                   clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef, num_epochs=num_epochs,
+                   batch_size=batch_size, max_grad_norm=max_grad_norm,
                    global_timesteps_done=global_timesteps_offset + timesteps_done,
                    global_total_timesteps=global_total_timesteps, target_kl=target_kl)
-                    #was  vf_coef=0.5
-
 
         with torch.no_grad():
-            # ceiling raised the std floor to ~0.11 regardless of where training
-            # started -- fine for phase 0 (always starts from scratch at max std
-            # anyway), but for a run resuming a low-std BC/DAgger-pretrained
-            # checkpoint, the entropy bonus races std up to this ceiling and pins
-            # it there for the rest of training, destroying the precision the
-            # warm start brought in. Lowered ceiling to ~0.064 and widened the
-            # floor to ~0.05 (the transform's natural minimum) so a warm-started
-            # policy can actually stay/get precise instead of being forced back
-            # toward near-max noise.
-            model.actor_log_std.clamp_(-3.0, -1.2)
+            # Keeps action noise from collapsing to (near-)zero or exploding.
+            model.actor_log_std.clamp_(log_std_clamp_min, log_std_clamp_max)
 
     return model, optimizer, episode_rewards, last_losses
 
 
-def warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam: float, lr: float = 3e-5):
-    """
-    Collects rollouts with the CURRENT actor (untouched) and updates ONLY
-    critic_head for num_rounds rounds before real PPO updates start.
+def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
+                   gamma: float, lam: float, lr: float,
+                   target_kl: float,
+                   model=None, optimizer=None, ent_coef: float = 0.015,
+                   global_timesteps_offset: int = 0, global_total_timesteps: int = None,
+                   num_epochs: int = 10, batch_size: int = 32,
+                   clip_eps: float = 0.2, vf_coef: float = 0.5, max_grad_norm: float = 0.5,
+                   hidden: int = 64, num_hidden_layers: int = 3, dropout: float = 0.0,
+                   log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX,
+                   log_std_clamp_min: float = -3.0, log_std_clamp_max: float = -0.5,
+                   ):
+    """Same as ppo_train, but collects rollouts across vec_env.num_envs environments
+    in lockstep each step -- one batched (num_envs, obs_dim) forward pass instead of
+    num_envs separate ones, which is what actually gives a GPU something to chew on.
+    vec_env is a VecInterceptorDroneEnv. Returns (model, optimizer, episode_rewards,
+    last_losses), same as ppo_train (no per-episode drone-state snapshots here --
+    nothing downstream of the vectorized path currently consumes those)."""
+    num_envs = vec_env.num_envs
+    obs_dim = vec_env.observation_space.shape[0]
+    action_dim = vec_env.action_space.shape[0]
 
-    BC/DAgger's imitation loss (pretrain_bc.py) never uses model.forward()'s
-    state_value output, so critic_head is still at its original random init
-    when a BC/DAgger checkpoint is loaded into PPO -- the very first PPO
-    updates would otherwise compute advantages from a critic with no idea
-    what states are actually good/bad, producing noisy/wrong policy
-    gradients that can corrupt an otherwise-good warm-started actor before
-    it gets a chance to build on what it already knows.
+    if model is None:
+        model = ActorCritic(obs_dim, action_dim, vec_env.action_space.low, vec_env.action_space.high,
+                             hidden=hidden, num_hidden_layers=num_hidden_layers, dropout=dropout,
+                             log_std_min=log_std_min, log_std_max=log_std_max).to(device)
+    if optimizer is None:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if global_total_timesteps is None:
+        global_total_timesteps = total_timesteps
 
-    Only model.critic_head.parameters() are in the optimizer here, so even
-    though value_loss.backward() also populates .grad on the shared trunk
-    (unavoidable, it's part of the same forward pass), those gradients are
-    never applied -- the actor (actor_mean, actor_log_std) and shared trunk
-    are left exactly as loaded.
+    obs = vec_env.reset()
+    running_episode_reward = np.zeros(num_envs, dtype=np.float32)
+    timesteps_done = 0
+    episode_rewards = []
+    last_losses = {}
 
-    lr is cosine-decayed across num_rounds (see cosine_lr): each round's
-    full-batch regression target is bootstrapped off the critic's OWN
-    (still-settling) value estimates over whatever mix of task distances
-    that round's random target_pairs draw happened to sample, so the
-    target is genuinely non-stationary round to round -- a flat lr held
-    at its round-0 value stayed large enough that later rounds could
-    still knock value_loss into the hundreds instead of settling
-    (observed: 3-15 through round 6, then 287/92/238/107 for rounds 7-10).
-    Decaying it means a bad late-round draw can't move the critic nearly
-    as far as it could early on.
-    """
+    while timesteps_done < total_timesteps:
+        buf_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)
+        buf_actions = torch.zeros(num_steps, num_envs, action_dim, device=device)
+        buf_log_probs = torch.zeros(num_steps, num_envs, device=device)
+        buf_rewards = torch.zeros(num_steps, num_envs, device=device)
+        buf_values = torch.zeros(num_steps, num_envs, device=device)
+        buf_dones = torch.zeros(num_steps, num_envs, device=device)
+
+        for step in range(num_steps):
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                action, raw_action, log_prob, _, value = model.get_action_and_value(obs_t)
+
+            action_np = action.cpu().numpy()
+            next_obs, reward, terminated, truncated, _ = vec_env.step(action_np)
+            done = terminated | truncated
+
+            # Same time-limit bootstrap as ppo_train, applied only to the envs that
+            # actually truncated (not terminated) this step.
+            trunc_only = truncated & ~terminated
+            if trunc_only.any():
+                with torch.no_grad():
+                    next_obs_t = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+                    bootstrap_values = model.forward(next_obs_t)[2].cpu().numpy()
+                reward = reward + gamma * bootstrap_values * trunc_only.astype(np.float32)
+
+            buf_obs[step] = obs_t
+            buf_actions[step] = raw_action
+            buf_log_probs[step] = log_prob
+            buf_rewards[step] = torch.as_tensor(reward, dtype=torch.float32, device=device)
+            buf_values[step] = value
+            buf_dones[step] = torch.as_tensor(done, dtype=torch.float32, device=device)
+
+            running_episode_reward += reward
+            for i in np.flatnonzero(done):
+                episode_rewards.append(float(running_episode_reward[i]))
+                running_episode_reward[i] = 0.0
+
+            obs = next_obs
+
+        with torch.no_grad():
+            last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+            last_value = model.get_action_and_value(last_obs_t)[4]
+
+        advantages, returns = compute_gae(buf_rewards, buf_values, buf_dones, last_value, gamma, lam)
+        timesteps_done += num_steps * num_envs
+
+        # Flatten (num_steps, num_envs, ...) -> (num_steps*num_envs, ...); ppo_update
+        # only reads these five attributes off `buffer`, so a plain namespace works.
+        flat_buffer = SimpleNamespace(
+            obs=buf_obs.reshape(-1, obs_dim), actions=buf_actions.reshape(-1, action_dim),
+            log_probs=buf_log_probs.reshape(-1), rewards=buf_rewards.reshape(-1),
+            values=buf_values.reshape(-1), dones=buf_dones.reshape(-1),
+        )
+
+        last_losses = ppo_update(model, optimizer, flat_buffer, advantages.reshape(-1), returns.reshape(-1),
+                   clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef, num_epochs=num_epochs,
+                   batch_size=batch_size, max_grad_norm=max_grad_norm,
+                   global_timesteps_done=global_timesteps_offset + timesteps_done,
+                   global_total_timesteps=global_total_timesteps, target_kl=target_kl)
+
+        with torch.no_grad():
+            model.actor_log_std.clamp_(log_std_clamp_min, log_std_clamp_max)
+
+    return model, optimizer, episode_rewards, last_losses
+
+
+def warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam: float, lr: float = 3e-5,
+                   max_grad_norm: float = 0.5):
+    """Collects rollouts with the current (untouched) actor and updates only
+    critic_head for num_rounds, so a BC/DAgger-loaded critic isn't still at
+    random init when real PPO updates start. lr is cosine-decayed across
+    rounds since each round's regression target is non-stationary."""
     critic_optimizer = torch.optim.Adam(model.critic_head.parameters(), lr=lr)
     obs, _ = env.reset()
 
@@ -390,7 +437,7 @@ def warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam
 
             model.zero_grad()
             value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.critic_head.parameters(), max_norm=0.5)
+            torch.nn.utils.clip_grad_norm_(model.critic_head.parameters(), max_norm=max_grad_norm)
             critic_optimizer.step()
 
         print(f"[critic warmup] round {round_idx + 1}/{num_rounds}  lr={round_lr:.2e}  value_loss={value_loss.item():.4f}")
