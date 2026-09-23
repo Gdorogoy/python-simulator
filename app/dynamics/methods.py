@@ -188,7 +188,11 @@ def timestamp_update(state: QuadState, config: QuadConfig , rl_action: list[floa
 
     delta_rot = Rotation.from_rotvec(new_angular_velocity * dt)
 
-    new_rot = delta_rot * current_rot
+    # angular_velocity is body-frame (p,q,r), so the incremental rotation must
+    # compose on the right (current_rot * delta_rot) -- left composition is only
+    # correct for a world-frame rate and gives a different result as soon as
+    # current_rot isn't near-identity.
+    new_rot = current_rot * delta_rot
 
     new_quat = new_rot.as_quat()  # returns [x, y, z, w]
 

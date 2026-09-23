@@ -1,8 +1,16 @@
 */logs
 .venv/
-/runs
+/runs/*
+!/runs/optuna_isaac/
 plots_final
 demonstrations_dagger.npz
 mlflow.db
+mlflow.db~
+mlflow_isaac.db
 mlruns/
 mlartifacts/
+recordings/
+out/
+prod_logs/
+__pycache__/
+*.pyc

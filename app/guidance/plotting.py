@@ -29,8 +29,8 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
     across the whole curriculum instead of one fixed-distance baseline. Returns None
     (with a printed reason) if the gains file is missing, since this plot is optional.
     """
-    from app.environmental.interceptor_drone import InterceptorDroneEnv
-    from app.control.pid_hover import PIDHoverController
+    from app.environmental.base_drone_env import BaseDroneEnv
+    from app.control.pid import PIDController
     from app.reward_functions.rewards import RewardConfig, make_reward_fn
 
     final_dists, steps_survived, episode_rewards = [], [], []
@@ -49,7 +49,7 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
         n_per_pair = max(1, n_episodes // (len(distances) * 4))
         for dist in distances:
             gains = gains_by_dist[str(dist)]
-            pid = PIDHoverController(**gains)
+            pid = PIDController(**gains)
             dist_oob_radius = max(oob_radius, dist * 3.0)
 
             reward_cfg = RewardConfig(
@@ -57,18 +57,18 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
                 oob_penalty=oob_penalty, streak_penalty_coef=streak_penalty_coef,
                 hover_success_steps=hover_success_steps, streak_cap=streak_cap,
             )
-            env = InterceptorDroneEnv(make_reward_fn(reward_cfg), pid_gains_path=None)
+            env = BaseDroneEnv(make_reward_fn(reward_cfg), pid_gains_path=None)
 
-            for start, target in build_eval_pairs(oob_radius=dist_oob_radius, distances=(dist,)):
+            for start, target, target_yaw in build_eval_pairs(oob_radius=dist_oob_radius, distances=(dist,)):
                 for _ in range(n_per_pair):
-                    obs, _ = env.reset(start_pos=start.copy(), target_pos=target.copy())
+                    obs, _ = env.reset(start_pos=start.copy(), target_pos=target.copy(), target_yaw=target_yaw)
                     pid.reset()
                     done = False
                     step_count = 0
                     ep_reward = 0.0
                     reason = None
                     while not done and step_count < n_steps:
-                        action = pid.compute_action(env.drone_state, env.target_pos)
+                        action = pid.compute_action(env.drone_state, env.target_pos, env.target_yaw)
                         obs, reward, terminated, truncated, info = env.step(action)
                         ep_reward += reward
                         step_count += 1
@@ -88,14 +88,14 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
 
         with open(pid_gains_path) as f:
             gains = json.load(f)
-        pid = PIDHoverController(**gains)
+        pid = PIDController(**gains)
 
         reward_cfg = RewardConfig(
             oob_radius=oob_radius, hit_reward=hit_reward, attitude_penalty=attitude_penalty,
             oob_penalty=oob_penalty, streak_penalty_coef=streak_penalty_coef,
             hover_success_steps=hover_success_steps, streak_cap=streak_cap,
         )
-        env = InterceptorDroneEnv(make_reward_fn(reward_cfg), pid_gains_path=None)
+        env = BaseDroneEnv(make_reward_fn(reward_cfg), pid_gains_path=None)
 
         for _ in range(n_episodes):
             obs, _ = env.reset()
@@ -105,7 +105,7 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
             ep_reward = 0.0
             reason = None
             while not done and step_count < n_steps:
-                action = pid.compute_action(env.drone_state, env.target_pos)
+                action = pid.compute_action(env.drone_state, env.target_pos, env.target_yaw)
                 obs, reward, terminated, truncated, info = env.step(action)
                 ep_reward += reward
                 step_count += 1
@@ -229,6 +229,12 @@ def plot_training_run(csv_path, output_dir="plots_final",
     plt.fill_between(timesteps, avg_dist - std_dist, avg_dist + std_dist, alpha=0.2,
                       label="+/- 1 std across diagnostic episodes")
     plt.plot(timesteps, min_dist, label="min_final_dist", linestyle="--")
+    if "pid_avg_final_dist" in rows[0]:
+        # Per-checkpoint PID-teacher reference on the exact same target_pairs
+        # (see diagnose_with_pid) -- a flat/low PID line next to a flat/high RL
+        # line means the task itself is solvable, so the gap is the policy's.
+        plt.plot(timesteps, col("pid_avg_final_dist"), label="pid_avg_final_dist",
+                  linestyle=":", color="gray")
     plt.axhline(y=hit_threshold, color="g", linestyle="--", label=f"hit_threshold={hit_threshold}")
     plt.axhline(y=0.0, color="k", linestyle=":", alpha=0.5)
     plt.xlabel("timesteps"); plt.ylabel("distance (m)")
@@ -239,7 +245,9 @@ def plot_training_run(csv_path, output_dir="plots_final",
     # --- 4) success_and_outcomes: hit rate + outcome breakdown ---
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 8))
     hit_ratio = col("outcome_hit") / n_diag_episodes
-    ax1.plot(timesteps, hit_ratio, marker=".")
+    ax1.plot(timesteps, hit_ratio, marker=".", label="RL success_rate")
+    if "pid_success_rate" in rows[0]:
+        ax1.plot(timesteps, col("pid_success_rate"), linestyle=":", color="gray", label="PID success_rate")
     for tier, style in ((0.25, ":"), (0.50, "--"), (0.75, "-."), (1.00, "-")):
         ax1.axhline(y=tier, color="g", linestyle=style, alpha=0.5, label=f"{int(tier*100)}%")
     ax1.set_ylim(-0.05, 1.05)
@@ -260,7 +268,7 @@ def plot_training_run(csv_path, output_dir="plots_final",
     fig.savefig(os.path.join(output_dir, "success_and_outcomes.png")); plt.close(fig)
 
     print(f"[plot_training_run] wrote plots_final to {output_dir}/")
-    _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold)
+    _print_suitable_weights(rows, os.path.dirname(csv_path) or ".", n_diag_episodes)
 
     # --- 5) vs_pid_baseline: RL final checkpoint vs classical PID controller ---
     baseline = compute_pid_baseline(
@@ -297,72 +305,173 @@ def plot_training_run(csv_path, output_dir="plots_final",
               f"(RL {rl_stats}, PID {baseline})")
 
 
-def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold):
-    """
-    Two-part check: a quick sanity table for the last checkpoint (can look good by
-    luck), and the real signal -- whether the diagnostic batch has held each
-    hover-success-rate tier for STREAK_LEN consecutive checkpoints, which an
-    oscillating policy will fail even if the last row looks great.
-    """
-    last = rows[-1]
+def plot_grad_norm(csv_path, output_dir="plots_final"):
+    """Standalone grad_norm-over-time plot, shading the critic_warmup stage -- training_error.png
+    already has grad_norm on a shared log-scale axis with value_loss, this is a clearer dedicated
+    view for spotting a post-unfreeze spike."""
+    rows = _read_csv(csv_path)
+    if not rows:
+        print(f"[plot_grad_norm] no rows found in {csv_path}")
+        return
 
-    def f(name, default=0.0):
-        return float(last.get(name, default) or default)
+    os.makedirs(output_dir, exist_ok=True)
+    timesteps = np.array([float(r["timesteps"]) for r in rows])
+    grad_norm = np.array([float(r.get("grad_norm", 0.0) or 0.0) for r in rows])
+    stage = [r.get("stage", "") for r in rows]
 
-    attitude_total = f("outcome_attitude-ROLL") + f("outcome_attitude-PITCH")
+    plt.figure(figsize=(9, 4.5))
+    warmup_mask = np.array([s == "critic_warmup" for s in stage])
+    if warmup_mask.any():
+        plt.axvspan(timesteps[0], timesteps[warmup_mask][-1], color="tab:orange", alpha=0.12, label="critic_warmup")
+    plt.plot(timesteps, grad_norm, marker=".", linewidth=1, color="tab:blue")
+    plt.xlabel("timesteps"); plt.ylabel("grad_norm (pre-clip)")
+    plt.title("Gradient norm over training")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "grad_norm.png")); plt.close()
+    print(f"[plot_grad_norm] wrote {output_dir}/grad_norm.png")
 
-    checks = [
-        ("avg_final_dist -> 0",
-         f("avg_final_dist"),
-         f("avg_final_dist") < hit_threshold * 0.5),
-        ("outcome_attitude(ROLL+PITCH) -> 0",
-         attitude_total, attitude_total == 0),
-        ("outcome_oob -> 0",
-         f("outcome_oob"), f("outcome_oob") == 0),
-        ("outcome_moving_away_cap -> 0",
-         f("outcome_moving_away_cap"), f("outcome_moving_away_cap") == 0),
-        (f"outcome_hit -> {n_diag_episodes}",
-         f("outcome_hit"),
-         f("outcome_hit") >= n_diag_episodes * 0.9),
-    ]
 
-    print(f"\n=== Snapshot check @ timestep {last['timesteps']} (last checkpoint only) ===")
-    passed = 0
-    for label, value, ok in checks:
-        mark = "PASS" if ok else "not yet"
-        print(f"  [{mark:7s}] {label:45s} current={value}")
-        passed += int(ok)
-    print(f"  {passed}/{len(checks)} criteria met.")
-    print("=" * 50)
+def plot_grad_norm_3d(csv_path, output_dir="plots_final"):
+    """3D view of grad_norm over training: x=timesteps, y=lr, z=grad_norm -- shows whether
+    gradient spikes line up with where the LR schedule was at the time, not just when.
+    The trajectory is colored by grad_norm itself (a 'hot' colormap, dark->red->yellow as
+    it spikes) via a Line3DCollection, and interpolated to a denser point count so the
+    natural chunk-to-chunk noise reads as a continuous wavy ribbon instead of straight segments."""
+    from matplotlib.colors import Normalize
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-    timesteps = [r["timesteps"] for r in rows]
-    ratios = _hit_ratios(rows, n_diag_episodes)
+    rows = _read_csv(csv_path)
+    if not rows:
+        print(f"[plot_grad_norm_3d] no rows found in {csv_path}")
+        return
 
-    print(f"\n=== Streak check: {STREAK_LEN}+ consecutive checkpoints at each hit-rate tier ===")
-    achieved_tier = None
-    for tier in STREAK_TIERS:
-        windows = _streak_windows(ratios, tier)
-        pct = int(tier * 100)
-        if windows:
-            start_i, end_i = windows[-1]
-            length = end_i - start_i + 1
-            print(f"  [PASS   ] >= {pct:3d}% hit rate held for {length} checkpoints straight "
-                  f"-> timesteps {timesteps[start_i]}..{timesteps[end_i]}")
-            achieved_tier = tier
-        else:
-            print(f"  [not yet] >= {pct:3d}% hit rate for {STREAK_LEN}+ checkpoints straight")
+    os.makedirs(output_dir, exist_ok=True)
+    timesteps = np.array([float(r["timesteps"]) for r in rows])
+    grad_norm = np.array([float(r.get("grad_norm", 0.0) or 0.0) for r in rows])
+    lr = np.array([float(r.get("lr", 0.0) or 0.0) for r in rows])
 
-    if achieved_tier == 1.00:
-        print("  -> Fully converged: sustained 100% hit rate. Run the manual deterministic "
-              "hold-position test to confirm.")
-    elif achieved_tier is not None:
-        print(f"  -> Partially converged: sustained {int(achieved_tier*100)}% hit rate, "
-              f"but never a clean {STREAK_LEN}-checkpoint 100% run. Still oscillating -- "
-              f"keep training or investigate what's causing the dips.")
+    if len(timesteps) >= 4:
+        dense_t = np.linspace(timesteps[0], timesteps[-1], len(timesteps) * 8)
+        lr_d = np.interp(dense_t, timesteps, lr)
+        grad_d = np.interp(dense_t, timesteps, grad_norm)
     else:
-        print("  -> Not converged: never held even the lowest tier for "
-              f"{STREAK_LEN} checkpoints in a row.")
-    print("=" * 50 + "\n")
+        dense_t, lr_d, grad_d = timesteps, lr, grad_norm
+
+    points = np.array([dense_t, lr_d, grad_d]).T.reshape(-1, 1, 3)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    norm = Normalize(grad_d.min(), grad_d.max() if grad_d.max() > grad_d.min() else grad_d.min() + 1)
+    lc = Line3DCollection(segments, cmap="hot", norm=norm)
+    lc.set_array(grad_d[:-1])
+    lc.set_linewidth(2.2)
+
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.add_collection3d(lc)
+    ax.set_xlim(dense_t.min(), dense_t.max())
+    ax.set_ylim(min(lr_d.min(), lr_d.max()), max(lr_d.min(), lr_d.max()))
+    ax.set_zlim(grad_d.min(), grad_d.max())
+    ax.set_facecolor("black")
+    fig.patch.set_facecolor("white")
+
+    ax.set_xlabel("timesteps")
+    ax.set_ylabel("lr")
+    ax.set_zlabel("grad_norm (pre-clip)")
+    ax.set_title("Gradient norm vs. LR schedule over training")
+    fig.colorbar(lc, ax=ax, shrink=0.6, pad=0.1, label="grad_norm")
+    fig.tight_layout()
+    fig.savefig(os.path.join(output_dir, "grad_norm_3d.png")); plt.close(fig)
+    print(f"[plot_grad_norm_3d] wrote {output_dir}/grad_norm_3d.png")
+
+
+def plot_time_to_hit(csv_path, output_dir="plots_final"):
+    """avg_hit_time_sec over training -- sim-seconds from episode start to
+    hit/hover-success, averaged only over episodes that actually succeeded
+    that checkpoint (blank/None when none did, see diagnose_with_model).
+    Success = trending down as the policy gets faster, not just hitting more."""
+    rows = _read_csv(csv_path)
+    if not rows:
+        print(f"[plot_time_to_hit] no rows found in {csv_path}")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    timesteps = np.array([float(r["timesteps"]) for r in rows])
+    tth = np.array([float(r["avg_hit_time_sec"]) if r.get("avg_hit_time_sec") not in (None, "") else np.nan
+                     for r in rows])
+
+    if np.all(np.isnan(tth)):
+        print(f"[plot_time_to_hit] avg_hit_time_sec is empty in every row of {csv_path} "
+              "(no checkpoint has hit/hover-succeeded yet) -- skipping")
+        return
+
+    plt.figure(figsize=(8, 4))
+    valid = ~np.isnan(tth)
+    plt.plot(timesteps[valid], tth[valid], marker=".", label="avg_hit_time_sec")
+    n_missing = int((~valid).sum())
+    if n_missing:
+        plt.scatter(timesteps[~valid], np.zeros(n_missing), marker="x", color="r",
+                     label=f"no hit this checkpoint ({n_missing})")
+    plt.xlabel("timesteps"); plt.ylabel("avg time-to-hit (sim seconds)")
+    plt.title("Time to hit target (success = trending down, not just hitting more)")
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "time_to_hit.png")); plt.close()
+    print(f"[plot_time_to_hit] wrote {output_dir}/time_to_hit.png")
+
+
+def _print_suitable_weights(rows, checkpoint_dir, n_diag_episodes, top_n=5, recent_window=20,
+                             sustain_window=5, avg_grade_min=0.75, min_grade_min=0.6):
+    """A checkpoint only counts as a potential suitable weight if its OWN trailing
+    sustain_window (ending at it) has avg grade >= avg_grade_min AND min grade >=
+    min_grade_min -- sustained performance, not one lucky spike (grade is already
+    computed and stored per-row during training, no re-evaluation needed). Prints the
+    top_n qualifying checkpoints all-time, and the top_n qualifying within the last
+    recent_window checkpoints -- same format as app.guidance.record_run.rank_checkpoints."""
+    def f(row, name):
+        return float(row.get(name, 0.0) or 0.0)
+
+    def score(r):
+        attitude = f(r, "outcome_attitude-ROLL") + f(r, "outcome_attitude-PITCH")
+        return {
+            "checkpoint": f"model_{r['timesteps']}.pt",
+            "grade": f(r, "grade"),
+            "hit": 100.0 * f(r, "outcome_hit") / n_diag_episodes,
+            "oob": 100.0 * f(r, "outcome_oob") / n_diag_episodes,
+            "attitude": 100.0 * attitude / n_diag_episodes,
+            "timeout": 100.0 * f(r, "outcome_timeout") / n_diag_episodes,
+        }
+
+    def print_leaderboard(title, entries):
+        print(f"\n{title} (from {checkpoint_dir}):")
+        if not entries:
+            print(f"  none -- no checkpoint's trailing {sustain_window}-checkpoint window met "
+                  f"avg>={avg_grade_min}/min>={min_grade_min}")
+            return
+        for i, s in enumerate(entries, 1):
+            print(f"{i}. {s['checkpoint']}  grade={s['grade']:.3f}  hit={s['hit']:.0f}%  "
+                  f"oob={s['oob']:.0f}%  attitude={s['attitude']:.0f}%  timeout={s['timeout']:.0f}%")
+
+    scored = [score(r) for r in rows]
+    grades = [s["grade"] for s in scored]
+
+    qualified = []
+    for i in range(len(scored)):
+        if i + 1 < sustain_window:
+            continue
+        window = grades[i + 1 - sustain_window: i + 1]
+        if sum(window) / len(window) >= avg_grade_min and min(window) >= min_grade_min:
+            qualified.append((i, scored[i]))
+
+    crit = f"avg>={avg_grade_min}/min>={min_grade_min} over trailing {sustain_window} checkpoints"
+
+    all_time = sorted((s for _, s in qualified), key=lambda s: s["grade"], reverse=True)[:top_n]
+    print_leaderboard(f"Potential suitable weights (top {len(all_time)} of {len(qualified)} qualifying [{crit}], all time)",
+                       all_time)
+
+    recent_start = len(scored) - recent_window
+    recent_qualified = [s for i, s in qualified if i >= recent_start]
+    recent_top = sorted(recent_qualified, key=lambda s: s["grade"], reverse=True)[:top_n]
+    print_leaderboard(f"Potential suitable weights (top {len(recent_top)} of {len(recent_qualified)} "
+                       f"qualifying in last {recent_window} checkpoints)", recent_top)
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +568,62 @@ def plot_dagger_history(history, output_dir="plots_final"):
     fig.savefig(os.path.join(output_dir, "dagger_hit_rate.png")); plt.close(fig)
 
     print(f"[plot_dagger_history] wrote dagger_raw_counts.png, dagger_hit_rate.png to {output_dir}/")
+
+
+def plot_worker_metrics(history, counts, output_dir="plots_final"):
+    """Per-worker breakdown of what SubprocVecBaseDroneEnv's parallel envs are
+    actually doing over the course of training -- one worker_<i>/ folder per
+    OS worker process (i in range(len(counts))), each with every env that
+    worker owns plotted as its own line.
+
+    history: {"timesteps": [t0, t1, ...],
+              "start_dist": [arr0, arr1, ...],   # each arr shape (num_envs,)
+              "live_dist":  [arr0, arr1, ...]}   # snapshotted once per chunk
+    counts: SubprocVecBaseDroneEnv.counts -- envs-per-worker, in the same
+    order the flat (num_envs,) arrays above are concatenated in, so a
+    straight cumulative-sum split recovers each worker's own slice.
+
+    Two plots per worker:
+      - target_dist.png: start_dist per env over time -- confirms the
+        sampler is actually spreading distances across every worker, not
+        just in aggregate.
+      - live_dist.png: live current distance-to-target per env over time --
+        a diverging/stuck worker shows up here as a line that doesn't trend
+        toward its own start_dist.
+    """
+    if not history["timesteps"]:
+        print("[plot_worker_metrics] empty history, nothing to plot")
+        return
+
+    timesteps = np.asarray(history["timesteps"])
+    start_dist = np.stack(history["start_dist"])  # (n_chunks, num_envs)
+    live_dist = np.stack(history["live_dist"])  # (n_chunks, num_envs)
+
+    offsets = np.cumsum([0, *counts])
+    for w, (lo, hi) in enumerate(zip(offsets[:-1], offsets[1:])):
+        worker_dir = os.path.join(output_dir, f"worker_{w}")
+        os.makedirs(worker_dir, exist_ok=True)
+        env_ids = range(lo, hi)
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for env_idx in env_ids:
+            ax.plot(timesteps, start_dist[:, env_idx], alpha=0.7, label=f"env {env_idx}")
+        ax.set_xlabel("timesteps"); ax.set_ylabel("target spawn distance (m)")
+        ax.set_title(f"worker {w} ({len(env_ids)} envs) -- target spawn distance")
+        ax.legend(fontsize=6, ncol=2)
+        fig.tight_layout()
+        fig.savefig(os.path.join(worker_dir, "target_dist.png")); plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for env_idx in env_ids:
+            ax.plot(timesteps, live_dist[:, env_idx], alpha=0.7, label=f"env {env_idx}")
+        ax.set_xlabel("timesteps"); ax.set_ylabel("live distance to target (m)")
+        ax.set_title(f"worker {w} ({len(env_ids)} envs) -- live distance-to-target")
+        ax.legend(fontsize=6, ncol=2)
+        fig.tight_layout()
+        fig.savefig(os.path.join(worker_dir, "live_dist.png")); plt.close(fig)
+
+    print(f"[plot_worker_metrics] wrote {len(counts)} worker_*/ folders to {output_dir}/")
 
 
 if __name__ == "__main__":

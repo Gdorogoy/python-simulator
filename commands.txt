@@ -1,0 +1,30 @@
+cd /mnt/e/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator
+ok i call it a win , add recordings to gitignore add the runs also to gitignore and do a clean up , then add optuna and also add it to cleanup , in optuna search for every param (hyperparmas) a large scale for 1m stesps for each trail the same setup , run this for 100times and add this to mlflow when thats finishes dont add this to the defense guide but do update the defense guide if needed and part 0 aslo needs to have excersices and more indepth explenation
+
+uv run uvicorn app.guidance.serve_run:app --port 8000
+
+# 1. Collect demonstrations
+  /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/control/collect_demo_isaac.py --headless --num_envs 4096 --n_target_rows 2000000 --distance-low 3 --distance-high 10 --save-path app/control/demonstrations_isaac.npz
+
+
+# 2. BC pretrain
+uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_isaac.npz --out-path app/control/pretrained_bc.pt
+
+# 3. DAgger refine
+
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/control/dagger_isaac.py --headless \
+      --num_envs 4096 --n_rounds 5 --rows_per_round 500000 \
+      --distance-low 3 --distance-high 10 \
+      --checkpoint-path app/control/pretrained_bc.pt \
+      --demo-path app/control/demonstrations_isaac.npz \
+      --out-path app/control/pretrained_bc_dagger.pt
+
+
+# 4. Full training
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
+    --num_envs 4096 --total_timesteps 128000000 \
+    --distance-low 3 --distance-high 50 \
+    --checkpoint-dir runs/base_training_isaac_3_50 \
+    --bc-checkpoint app/control/pretrained_bc_dagger.pt
+
+

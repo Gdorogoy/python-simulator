@@ -3,15 +3,19 @@ import torch
 from torch.distributions import Normal
 
 from app.guidance.train import ActorCritic, device
-from app.reward_functions.reward_fn_phase1 import RewardFnPhase1
 
 
 def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
-                               obs=None, actions=None,
-                               epochs=50, batch_size=256, lr=1e-3):
+                               obs=None, actions=None, weights=None,
+                               epochs=50, batch_size=256, lr=1e-3, weight_decay=1e-4):
     """
     Trains on (obs, actions) arrays if given directly (e.g. DAgger's aggregated,
     growing dataset), otherwise loads them from demo_path.
+
+    `weights`, if given, is a per-sample array (same length as obs/actions) used to
+    weight each sample's contribution to the loss -- e.g. DAgger's recency weights,
+    so older rounds fade instead of counting equally with fresh corrections.
+    Unweighted (None) reproduces plain uniform BC.
     """
     if obs is None or actions is None:
         data = np.load(demo_path)
@@ -20,8 +24,9 @@ def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
 
     obs = torch.as_tensor(obs, dtype=torch.float32, device=device)
     actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
+    weights = torch.as_tensor(weights, dtype=torch.float32, device=device) if weights is not None else None
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     n = len(obs)
 
     for epoch in range(epochs):
@@ -36,19 +41,20 @@ def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
             mean, std, _ = model.forward(obs[b])
             epoch_std_sum += std.detach().mean(dim=0)
 
-            # actions[b] are bounded PID actions; map them into the raw pre-tanh space
-            # `mean` lives in (inverse of model.scale_action) before scoring, since MSE
-            # against the bounded target directly can't be met once tanh saturates. Score
-            # with Gaussian NLL instead of MSE so each action dimension is normalized by
-            # its own learned variance, preventing large-magnitude dims (e.g. thrust) from
-            # dominating small ones (e.g. yaw torque).
+            # Map bounded PID actions into raw pre-tanh space (model.scale_action's inverse) and
+            # score with Gaussian NLL instead of MSE, so large-magnitude dims don't dominate small ones.
             half_range = 0.5 * (model.action_high - model.action_low)
             normalized = (actions[b] - model.action_low) / half_range - 1.0
             normalized = torch.clamp(normalized, -0.999, 0.999)  # keep atanh finite
             raw_target = torch.atanh(normalized)
 
             dist = Normal(mean, std)
-            loss = -dist.log_prob(raw_target).mean()
+            per_sample_nll = -dist.log_prob(raw_target).mean(dim=-1)  # per-sample so weights can apply before collapsing
+            if weights is not None:
+                w = weights[b]
+                loss = (per_sample_nll * w).sum() / w.sum()
+            else:
+                loss = per_sample_nll.mean()
 
             optimizer.zero_grad()
             loss.backward()
@@ -65,31 +71,32 @@ def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
 
 
 if __name__ == "__main__":
-    from app.environmental.interceptor_drone import InterceptorDroneEnv
+    # Needs neither isaaclab nor a GPU -- BaseDroneEnv below only supplies obs/action shape.
+    import argparse
 
-    reward_fn = RewardFnPhase1(
-        hit_steps_streak=1500,
-        phase1_pos_coef=0.25,
-        hit_reward=5,
-        oob_radius=300,  # matches collect_demonstrations.py's max distance (250m)
-        hover_success_steps=None,
-        streak_cap=60,
-        outer_dist=1.0,
-        inner_dist=0.3,
-        hit_threshold=0.05,
-        imitation_duration_steps=0,
-        phase1_duration_steps=100,
-    ).as_roadmap()
-    env = InterceptorDroneEnv(reward_fn)
+    from app.environmental.base_drone_env import BaseDroneEnv
+    from app.reward_functions.rewards import reward_func
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--demo-path", dest="demo_path", default="app/control/demonstrations_omni.npz")
+    parser.add_argument("--out-path", dest="out_path", default="app/control/pretrained_bc.pt")
+    parser.add_argument("--epochs", type=int, default=55)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--hidden", type=int, default=64)
+    parser.add_argument("--num-hidden-layers", type=int, default=4)
+    args = parser.parse_args()
+
+    env = BaseDroneEnv(reward_func)  # only used for observation_space/action_space shape
 
     model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
                         env.action_space.low,
                         env.action_space.high,
-
+                        hidden=args.hidden, num_hidden_layers=args.num_hidden_layers,
                         ).to(device)
 
-    model = pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
-                                       epochs=55, batch_size=256, lr=1e-3)
+    model = pretrain_behavior_cloning(model, demo_path=args.demo_path,
+                                       epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
 
-    torch.save(model.state_dict(), "app/control/pretrained_bc.pt")
-    print("saved pretrained weights to app/control/pretrained_bc.pt")
+    torch.save(model.state_dict(), args.out_path)
+    print(f"saved pretrained weights to {args.out_path}")

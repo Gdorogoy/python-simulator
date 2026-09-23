@@ -1,7 +1,7 @@
 # navigation
 
 ## Purpose
-A standalone linear Kalman filter that estimates position+velocity from noisy position-only measurements. Read-only with respect to `dynamics`/`environmental` - not currently wired into `InterceptorDroneEnv`'s observation pipeline, it's a self-contained estimator exercised by its own `test()`.
+A standalone linear Kalman filter that estimates position+velocity from noisy position-only measurements. Read-only with respect to `dynamics`/`environmental` - not currently wired into `BaseDroneEnv`'s observation pipeline, it's a self-contained estimator exercised by its own `test()`.
 
 ## Methods/Exposes
 
@@ -27,4 +27,4 @@ A standalone linear Kalman filter that estimates position+velocity from noisy po
 ## Notes
 - `predict()` must be called before `update()` - `update()` reads `self.est_x_hat`/`self.P_est`, which only exist after a `predict()` call has run (not set in `__init__`). `loop()` always calls them in the right order; calling `update()` standalone first will raise `AttributeError`.
 - Assumes a constant-velocity model with no control input (`B`/`u` from the docstring's math notes are omitted entirely from the actual `F`/`estimate_state` - there's no acceleration term, matching the docstring's "u=0 in the RL case because the acceleration is unknown").
-- Not currently imported by `environmental` or `guidance` - `build_observation` in `interceptor_drone.py` uses ground-truth `drone_state` directly, not a `Kalman`-filtered estimate.
+- Not currently imported by `environmental` or `guidance` - `build_observation` in `base_drone_env.py` uses ground-truth `drone_state` directly, not a `Kalman`-filtered estimate.

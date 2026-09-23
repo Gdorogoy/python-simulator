@@ -16,7 +16,7 @@ Validates that a given `QuadConfig` is physically sane before spending time trai
 - `check_step_response(config, n_steps=120, dt=1/240)` - applies a small constant roll torque and confirms the drone rolls in a bounded way (no NaN, `|roll| <= 90°`) rather than exploding under an active command.
 - `check_saturation(config)` - warns if hover RPM leaves less than 15% headroom to `max_rpm` on any rotor - not enough room left for an agent to actually maneuver.
 - `test_configuration(config, verbose=True)` - runs all 7 checks above in order, prints a summary table, returns `True` only if every check passed.
-- `test()` - builds the project's standard `QuadConfig` (mass=1.5, arm_length=0.22, etc. - matches `interceptor_drone.py`'s `reset()`) and runs `test_configuration` against it.
+- `test()` - builds the project's standard `QuadConfig` (mass=1.5, arm_length=0.22, etc. - matches `base_drone_env.py`'s `reset()`) and runs `test_configuration` against it.
 
 ## Depends on
 `numpy`, `scipy.spatial.transform.Rotation`. Internally: `app.dynamics.drone.create_quad_config`/`QuadState`/`Vector3D`/`Quaternion`/`QuadConfig`, `app.dynamics.methods` (`mixer`, `mixer_inversion`, `timestamp_update`, `thrust`, `torque`).

@@ -1,7 +1,7 @@
 # reward_functions
 
 ## Purpose
-Builds the reward function handed to `InterceptorDroneEnv` - shared termination checks plus a curriculum of three reward shapes (imitation -> phase 0 -> base) that can be chained to activate in order as training progresses.
+Builds the reward function handed to `BaseDroneEnv` - shared termination checks plus a curriculum of three reward shapes (imitation -> phase 0 -> base) that can be chained to activate in order as training progresses.
 
 ## Methods/Exposes
 
@@ -18,9 +18,9 @@ Builds the reward function handed to `InterceptorDroneEnv` - shared termination 
   - Phase order when chained: `phase_imitation_fn` (if `imitation_duration_steps` set) -> `phase_0_fn` (if `phase0_duration_steps` set) -> `base_fn` (always last, runs indefinitely). If only one phase ends up configured, `make_reward_fn` returns it directly (unchained).
 
 ## Depends on
-`numpy`, `scipy.spatial.transform.Rotation`. Internally: `app.dynamics.methods.mixer_inversion` (for `phase_0_fn`'s RPM term), `app.control.pid_hover.PIDHoverController` (imported but only actually used via `env.pid_teacher`, which the env constructs itself from `best_pid_gains.json`).
+`numpy`, `scipy.spatial.transform.Rotation`, `app.control.step_budget.steps_for_dist` (for `reward_func`'s step penalty). `env.pid_teacher` (constructed by the env itself from `best_pid_gains.json`, an `app.control.pid.PIDController`) is used by the imitation reward stages. No yaw penalty anywhere in this file anymore -- see the session's yaw_term discussion for why it was removed.
 
 ## Notes
 - All three reward variants call `_terminal_checks` first and return its `(reward, terminated, reason)` unchanged on a hard failure - termination behavior is identical across phases, only the in-episode shaping differs.
 - `env.moving_away_streak`, `env.hover_steps_in_zone`, `env.prev_distance`, `env.hover_success_achieved` are mutated directly on the passed-in `env` by these functions - the reward function is stateful with respect to the env object, not pure.
-- `phase_imitation_fn` requires `env.pid_teacher` to be non-`None` (i.e. `best_pid_gains.json` must load successfully) - see `InterceptorDroneEnv.__init__`.
+- `phase_imitation_fn` requires `env.pid_teacher` to be non-`None` (i.e. `best_pid_gains.json` must load successfully) - see `BaseDroneEnv.__init__`.

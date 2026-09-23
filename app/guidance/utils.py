@@ -3,7 +3,7 @@ import math
 
 def compute_grade(success_rate, avg_final_dist, avg_hit_time_sec, avg_grad_norm,
                    oob_radius, episode_time_budget_sec, grad_norm_ceiling=50.0,
-                   w_success=1.0, w_error=0.3, w_time=0.2, w_grad=0.1):
+                   w_success=1.0, w_error=0.3, w_time=0.0, w_grad=0.1):
     """Single scalar score for comparing checkpoints/trials: success rate, rewarded,
     minus normalized penalties for final distance error, time-to-hit, and grad norm.
     Returns (grade, breakdown_dict)."""
@@ -27,7 +27,7 @@ def compute_grade(success_rate, avg_final_dist, avg_hit_time_sec, avg_grad_norm,
 
 def calc_drone_state(drone_state_arr, n=10):
     """Averages position/velocity/orientation/rotor_rpm over the last n drone states."""
-    if len(drone_state_arr) < 0:
+    if len(drone_state_arr) <= 0:
         return
 
 

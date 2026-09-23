@@ -1,8 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from app.dynamics.methods import mixer_inversion
-from app.control.pid_hover import PIDHoverController
+from app.control.step_budget import steps_for_dist
 
 """Reward functions and curriculum chaining (phase_0 -> base) for the hover/approach task."""
 
@@ -112,20 +111,23 @@ def _terminal_checks(cfg, env, pos, roll, pitch):
     return None
 
 
-def chain_reward_fns(phases:list[object]):
-    """phases is an ordered list of (reward_fn, duration_steps) tuples; duration_steps
-    counts env steps before permanently advancing to the next phase. Last phase's
-    duration should be None (runs indefinitely)."""
+def chain_reward_fns(fns: list, n: int):
+    """fns is an ordered list of plain reward functions (each fn(env) ->
+    (reward, terminated, reason)); each one runs for exactly n env-steps
+    before permanently advancing to the next -- the LAST function in the
+    list runs indefinitely once reached (no duration to advance past).
+    state["step"] resets on every advance so each function gets its own
+    full n steps, not n minus whatever the global step count already
+    accumulated on prior functions."""
     state = {"step": 0, "idx": 0}
 
     def chained_fn(env):
         state["step"] += 1
-        fn, duration = phases[state["idx"]]
-        if duration is not None and state["step"] > duration and state["idx"] < len(phases) - 1:
+        if state["step"] > n and state["idx"] < len(fns) - 1:
             state["idx"] += 1
-            fn, duration = phases[state["idx"]]
+            state["step"] = 1
 
-        return fn(env)
+        return fns[state["idx"]](env)
 
     return chained_fn
 
@@ -201,38 +203,6 @@ def make_reward_fn(cfg: RewardConfig):
     def base_fn(env):
         return base_reward_fn(cfg, env)
 
-    def phase_0_fn(env):
-        pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)
-
-        terminal = _terminal_checks(cfg, env, pos, roll, pitch)
-        if terminal is not None:
-            return terminal
-
-        diff = env.prev_distance - dist
-
-        # Known-correct hover RPMs for this episode's mass, used to reward matching them.
-        hover_thrust = env.config.mass * 9.81
-        hover_rpm = np.array(mixer_inversion(env.config, [hover_thrust, 0.0, 0.0, 0.0]))
-        current_rpm = np.array(env.drone_state.rotor_rpm)
-        rpm_deviation = np.linalg.norm(current_rpm - hover_rpm) / env.config.rotors[0].max_rpm  # normalized ~[0,1]
-
-        if dist < cfg.outer_dist:
-            env.moving_away_streak = 0
-            approach_term = cfg.zone_bonus - (cfg.dist_penalty_coef * cfg.phase0_pos_coef * dist) - cfg.rpm_penalty_coef * rpm_deviation
-        else:
-            env.moving_away_streak = env.moving_away_streak + 1 if diff < 0 else 0
-            approach_term = (diff * cfg.approach_gain - cfg.step_penalty) if diff < 0 else (diff - cfg.step_penalty)
-            approach_term -= cfg.rpm_penalty_coef * 0.5 * rpm_deviation
-
-        closer_bonus = cfg.closer_bonus_val if diff > 0 else 0.0
-        streak_penalty = cfg.streak_penalty_coef * env.moving_away_streak
-        env.prev_distance = dist
-
-        if env.moving_away_streak >= cfg.streak_cap:
-            return cfg.oob_penalty, True, "moving_away_cap"
-
-        return approach_term + streak_penalty + closer_bonus, False, "running"
-
     def phase_imitation_fn(env):
         pos, vel, ang_vel, roll, pitch, yaw, dist = _kinematics(env)
 
@@ -255,23 +225,150 @@ def make_reward_fn(cfg: RewardConfig):
         if env.moving_away_streak >= cfg.streak_cap:
             return cfg.oob_penalty, True, "moving_away_cap"
 
-        teacher_action = env.pid_teacher.compute_action(env.drone_state, env.target_pos)
+        teacher_action = env.pid_teacher.compute_action(env.drone_state, env.target_pos, env.target_yaw)
         action_range = env.action_space.high - env.action_space.low
         normalized_diff = np.linalg.norm((env.last_raw_action - teacher_action) / action_range)
         imitation_term = -cfg.imitation_coef * normalized_diff
 
-        return approach_term + streak_penalty + closer_bonus + imitation_term, False, "running"
+        return approach_term + streak_penalty + closer_bonus + imitation_term , False, "running"
 
-    phases = []
+    fns = []
     if cfg.imitation_duration_steps is not None:
-        phases.append((phase_imitation_fn, cfg.imitation_duration_steps))
-    if cfg.phase0_duration_steps is not None:
-        phases.append((phase_0_fn, cfg.phase0_duration_steps))
-    phases.append((base_fn, None))
+        fns.append(phase_imitation_fn)
+    fns.append(base_fn)
 
-    if len(phases) == 1:
-        return phases[0][0]
-    return chain_reward_fns(phases)
+    if len(fns) == 1:
+        return fns[0]
+    return chain_reward_fns(fns, cfg.imitation_duration_steps)
+
+
+# reward_func -- flat, no phases, no config class, every knob a module constant.
+# Potential-based approach shaping (Ng et al.): F(s,s')=gamma*phi(s')-phi(s),
+# phi = negative L1 distance to target normalized by start_dist.
+OOB_RADIUS = 30.0
+ATTITUDE_ROLL_DEG = 65
+ATTITUDE_PITCH_DEG = 80
+ATTITUDE_PENALTY = -1.0
+OOB_PENALTY = -1.5
+HIT_THRESHOLD = 0.25
+
+# Was 1000 -- 100-1000x every other term, which produced heavy-tailed advantages
+# that blew up KL divergence and collapsed training. See PROJECT_DEFENSE_GUIDE.md Part 2.
+HIT_REWARD = 50
+
+TARGET_FRACTION = 0.25
+# Measured via the tuned PID at dist=3,10 -- rerun app.control.tune_pid.calibrate_approach_milestone_budget()
+# and update this if best_pid_gains_per_dist.json, HIT_REWARD, or this reward changes.
+APPROACH_MILESTONE_BUDGET = 96.72
+
+MILESTONE_FRACS = (0.25, 0.5, 0.75)
+MILESTONE_BONUSES = (10.0, 15.0, 20.0)
+
+# Anti-oscillation terms (2026-09-19) -- see PROJECT_DEFENSE_GUIDE.md Part 2.4.1
+# for the full derivation and worked best/avg/worst-case numbers.
+OUTER_ZONE_RADIUS = 1.0
+INNER_ZONE_RADIUS = 0.5
+OUTER_ZONE_EXIT_PENALTY = -1.0
+INNER_ZONE_EXIT_PENALTY = -2.0
+STABILITY_COEF = 0.1  # applied inside OUTER_ZONE_RADIUS: -STABILITY_COEF*(|vel|+|roll|+|pitch|)
+
+# PPO's own discount factor, exported so base_training.PARAMS can't drift from it.
+GAMMA = 0.97
+
+
+def terminal_checks(pos, roll, pitch, oob_radius=OOB_RADIUS):
+    """Evaluates every hard-failure condition (not just the first one tripped)
+    and returns (penalty_sum, term_reason, active_reasons): term_reason/
+    active_reasons are empty/None while non-terminal (episode continues);
+    otherwise every condition that tripped THIS step is summed into
+    penalty_sum and listed (e.g. an oob position that's also over the
+    attitude limit reports both, instead of only whichever check happened
+    to be evaluated first).
+
+    `oob_radius` defaults to the flat module constant (the original Uniform(3,10)
+    task) but reward_func passes a distance-scaled value instead -- a fixed 30m
+    radius makes any target past ~10m structurally unreachable (the drone gets
+    flagged oob leaving the sphere long before reaching the target), which isn't
+    a PID/policy failure, just a mismatched radius."""
+    penalty_sum = 0.0
+    active_reasons = []
+
+    if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) > oob_radius:
+        penalty_sum += OOB_PENALTY
+        active_reasons.append("oob")
+    if abs(roll) > np.radians(ATTITUDE_ROLL_DEG):
+        penalty_sum += ATTITUDE_PENALTY
+        active_reasons.append("attitude-ROLL")
+    if abs(pitch) > np.radians(ATTITUDE_PITCH_DEG):
+        penalty_sum += ATTITUDE_PENALTY
+        active_reasons.append("attitude-PITCH")
+
+    term_reason = "+".join(active_reasons) if active_reasons else None
+    return penalty_sum, term_reason, active_reasons
+
+
+def hit_target(dist):
+    return dist < HIT_THRESHOLD
+
+
+def milestone_bonus(env, dist, start_dist):
+    """Fires each of MILESTONE_FRACS' bonuses once per episode, the first
+    time progress (fraction of start_dist closed) crosses it. env.milestones_hit
+    (a set, reset in BaseDroneEnv.reset()) tracks which have already fired."""
+    progress = 1.0 - dist / start_dist
+    bonus = 0.0
+    for frac, val in zip(MILESTONE_FRACS, MILESTONE_BONUSES):
+        if progress >= frac and frac not in env.milestones_hit:
+            env.milestones_hit.add(frac)
+            bonus += val
+    return bonus
+
+
+def reward_func(env):
+    pos, vel, _ang_vel, roll, pitch, _yaw, dist = _kinematics(env)
+
+    # oob_radius scales with this episode's start_dist so a far target isn't structurally unreachable.
+    oob_radius = max(OOB_RADIUS, env.start_dist * 3.0)
+    term_sum, term_reason, _term_list = terminal_checks(pos, roll, pitch, oob_radius=oob_radius)
+    if term_reason:
+        return term_sum, True, term_reason
+
+    if hit_target(dist):
+        return HIT_REWARD, True, "Hit"
+
+    # Plain phi_now-phi_prev, not GAMMA*phi_now-phi_prev -- the gamma-scaled form leaves
+    # a small positive reward for standing still, undermining step_penalty (see rewards.py history).
+    diff = env.target_pos - pos
+    prev_diff = env.target_pos - env.prev_position
+    phi_now = -np.sum(np.abs(diff)) / env.start_dist
+    phi_prev = -np.sum(np.abs(prev_diff)) / env.start_dist
+    reward = phi_now - phi_prev
+
+    step_penalty = -(TARGET_FRACTION * APPROACH_MILESTONE_BUDGET) / steps_for_dist(env.start_dist)
+    reward += step_penalty
+
+    reward += milestone_bonus(env, dist, env.start_dist)
+
+    # Stability term: costs more to fly fast/tilted once inside the outer zone.
+    if dist < OUTER_ZONE_RADIUS:
+        tilt = abs(roll) + abs(pitch)
+        reward -= STABILITY_COEF * (np.linalg.norm(vel) + tilt)
+
+    # Zone-exit penalty: retreating out of a zone entered last step is strictly worse than neutral.
+    prev_dist = env.prev_distance
+    was_in_inner = prev_dist < INNER_ZONE_RADIUS
+    was_in_outer = prev_dist < OUTER_ZONE_RADIUS
+    now_in_inner = dist < INNER_ZONE_RADIUS
+    now_in_outer = dist < OUTER_ZONE_RADIUS
+    if was_in_inner and not now_in_inner:
+        reward += INNER_ZONE_EXIT_PENALTY
+    elif was_in_outer and not now_in_outer:
+        reward += OUTER_ZONE_EXIT_PENALTY
+
+    env.prev_position = pos.copy()
+    env.prev_distance = dist
+
+    return reward, False, None
 
 
 

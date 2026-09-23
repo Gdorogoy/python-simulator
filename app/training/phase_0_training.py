@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 plt.switch_backend("Agg")
 from scipy.spatial.transform import Rotation
 
-from app.environmental.interceptor_drone import InterceptorDroneEnv
+from app.environmental.base_drone_env import BaseDroneEnv
 from app.guidance.train import ActorCritic, ppo_train, evaluate, device
 from app.guidance.plotting import plot_training_run
 
@@ -21,7 +21,7 @@ from app.guidance.mlflow_utils import start_run, log_params_safe, log_metrics_sa
 import mlflow
 from app.reward_functions.rewards import make_reward_fn, RewardConfig
 
-_log_dir = os.environ.get("OPTUNA_WORKER_LOG_DIR", "prod_logs")
+_log_dir = os.environ.get("WORKER_LOG_DIR", "prod_logs")
 os.makedirs(_log_dir, exist_ok=True)
 log_filename = f"{_log_dir}/phase2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
@@ -40,17 +40,18 @@ log.info(f"Logging this run to: {log_filename}")
 
 
 
-best_params={'streak_penalty_coef': -0.04983211032477406,
-             'streak_cap': 21, 'phase0_pos_coef': 0.9233025352276092, 'tilt_penalty_coef': 0.13620117520669245,
-             'ang_vel_penalty_coef': 0.09137289750622843, 'imitation_coef': 0.2545331593681599,
-             'lr': 0.00021775015806847712, 'gamma': 0.9663964477093601, 'lam': 0.9076864484897095,
-             'ent_coef': 0.013508073722014471, 'target_kl': 0.03251152911493923}
+# Continuous values rounded to 2 sig figs (last digit snapped to 0/5) since
+# there's no search to re-derive them from; streak_cap (int count) left exact.
+best_params={'streak_penalty_coef': -0.05,
+             'streak_cap': 21, 'phase0_pos_coef': 0.925, 'tilt_penalty_coef': 0.135,
+             'ang_vel_penalty_coef': 0.0915, 'imitation_coef': 0.255,
+             'lr': 0.00022, 'gamma': 0.965, 'lam': 0.91,
+             'ent_coef': 0.0135, 'target_kl': 0.0325}
 
 
 # ---------------------------------------------------------------------------
 # Config -- every training hyperparameter lives here so a run is fully
-# reproducible from one TrainConfig instance, and so optuna_search.py can
-# sweep any of them without touching this file.
+# reproducible from one TrainConfig instance.
 # ---------------------------------------------------------------------------
 class TrainConfig:
     def __init__(self,
@@ -124,56 +125,6 @@ def compute_target_pos(start_position, distance, angle_deg, y_offset):
         start_position[1] + y_offset,
         start_position[2] + dz,
     ], dtype=np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Outcome-distribution diagnostic (trained-model version)
-# ---------------------------------------------------------------------------
-def diagnose_with_model(model, env, n_episodes):
-    outcomes = {"oob": 0, "attitude-ROLL": 0, "attitude-PITCH": 0, "hit": 0,
-                "hover_success": 0, "moving_away_cap": 0, "drift": 0, "timeout": 0}
-    steps_survived = []
-    hit_times_sec = []
-    final_dists = []
-
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        done = False
-        step_count = 0
-        last_reason = None
-        info = {}
-
-        while not done:
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            with torch.no_grad():
-                mean, std, _ = model.forward(obs_t)
-                action = model.scale_action(mean)
-            action = action.squeeze(0).cpu().numpy()
-
-            obs, reward, terminated, truncated, info = env.step(action)
-            step_count += 1
-            done = terminated or truncated
-            last_reason = info["reason"]
-
-        steps_survived.append(step_count)
-        final_dists.append(env.prev_distance)
-        if info.get("hit_time_sec") is not None:
-            hit_times_sec.append(info["hit_time_sec"])
-
-        if env.hover_success_achieved:
-            outcomes["hover_success"] += 1
-        elif truncated and not terminated:
-            outcomes["timeout"] += 1
-        else:
-            outcomes[last_reason] = outcomes.get(last_reason, 0) + 1
-
-    avg_hit_time_sec = float(np.mean(hit_times_sec)) if hit_times_sec else None
-    print(f"[diagnostic] outcomes over {n_episodes} eps:", outcomes)
-    print(f"[diagnostic] avg steps survived: {np.mean(steps_survived):.1f}")
-    print(f"[diagnostic] avg final dist: {np.mean(final_dists):.3f}  avg time-to-hit: {avg_hit_time_sec}")
-    outcomes["avg_hit_time_sec"] = avg_hit_time_sec
-    outcomes["avg_final_dist"] = float(np.mean(final_dists))
-    return outcomes
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +206,11 @@ def log_metrics(env, model, timesteps_done, ent_coef,
     reward_mean = float(np.mean(diag_episode_rewards)) if diag_episode_rewards else 0.0
     reward_std = float(np.std(diag_episode_rewards)) if diag_episode_rewards else 0.0
 
-    success_rate = outcomes["hover_success"] / n_diag_episodes if n_diag_episodes else 0.0
+    # _check_hit terminates an episode as "Hit" before hover_steps_in_zone can
+    # ever reach hover_success_steps, so the two are mutually exclusive per
+    # episode -- counting both credits either kind of success instead of only
+    # the stricter sustained-hover one.
+    success_rate = (outcomes["hover_success"] + outcomes.get("Hit", 0)) / n_diag_episodes if n_diag_episodes else 0.0
     grade, _ = compute_grade(
         success_rate=success_rate, avg_final_dist=avg_final_dist,
         avg_hit_time_sec=avg_hit_time_sec, avg_grad_norm=grad_norm,
@@ -332,7 +287,7 @@ def train(cfg: TrainConfig):
 
     reward_fn= make_reward_fn(reward_cfg)
 
-    env = InterceptorDroneEnv(reward_fn)
+    env = BaseDroneEnv(reward_fn)
     env.target_pos=np.array([0,0,5],dtype=np.float32)
     print("target placed at:", env.target_pos)
     print("drone placed at:", env.drone_state.position)
@@ -377,7 +332,6 @@ def train(cfg: TrainConfig):
             target_kl=current_target_kl,
             num_epochs=cfg.NUM_EPOCHS, batch_size=cfg.BATCH_SIZE,
             clip_eps=cfg.CLIP_EPS, vf_coef=cfg.VF_COEF, max_grad_norm=cfg.MAX_GRAD_NORM,
-            log_std_clamp_min=cfg.LOG_STD_CLAMP_MIN, log_std_clamp_max=cfg.LOG_STD_CLAMP_MAX,
         )
         all_episode_rewards.extend(episode_rewards)
         drone_state_arr.append(env.drone_state)
@@ -423,4 +377,4 @@ def train(cfg: TrainConfig):
 if __name__ == "__main__":
     cfg = TrainConfig()
     model = train(cfg)
-    evaluate(model, InterceptorDroneEnv(), n_episodes=10)
+    evaluate(model, BaseDroneEnv(), n_episodes=10)

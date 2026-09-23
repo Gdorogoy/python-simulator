@@ -1,0 +1,1 @@
+step_penalty = -TARGET_CUMULATIVE / steps_for_dist(dist) (11)

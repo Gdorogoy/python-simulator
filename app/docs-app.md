@@ -11,7 +11,7 @@
 ## Blocks
 - **dynamics** - the physics engine: drone structure (rotors, frame, state) and the force/torque math that steps the drone forward in time
 - **environmental** - the glue between the physics engine and the outside world: spawns the drone in PyBullet, applies wind, and wraps everything as a Gymnasium RL environment for the interceptor
-- **control** - the classical PID hover controller: used standalone as a baseline, tuned via Optuna, and as the teacher whose demonstrations pretrain the RL policy via behavior cloning before PPO takes over
+- **control** - the classical PID hover controller: used standalone as a baseline, tuned per-distance via closed-form pole-placement math (no search), and as the teacher whose demonstrations pretrain the RL policy via behavior cloning before PPO takes over
 - **reward_functions** - builds the reward function passed to the env: shared termination checks plus a chainable curriculum of reward shapes (imitation -> phase 0 -> base)
 - **guidance** - the learning block: an actor-critic network pretrained via behavior cloning on the PID's demonstrations, then trained further with PPO so the interceptor learns to reach its target
 - **navigation** - reads the true state from dynamics (read-only, never writes to it), adds sensor noise/delay/drift, and outputs an estimated state; a one-way transform, not part of the physics update (not currently wired into the env's observations - self-contained estimator with its own test)

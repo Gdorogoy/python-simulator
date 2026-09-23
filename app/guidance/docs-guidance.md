@@ -23,22 +23,14 @@ The backbone-brain of the whole project that makes the interceptor learn
 
 ### `../training/phase_0_training.py` - the actual training entry point
 
-- `best_params` - hardcoded reward/PPO hyperparameters found by `optuna_search.py`'s best trial.
+- `best_params` - hardcoded reward/PPO hyperparameters (from a since-removed hyperparameter search).
 - `TrainConfig` - run-level constants: total timesteps (1,000,000), rollout length (4096), `gamma`/`lam`, base LR (from `best_params`), checkpoint cadence/dir/CSV path, number of diagnostic episodes per checkpoint.
 - `compute_target_pos(start_position, distance, angle_deg, y_offset)` - polar-offset target placement helper (currently unused in `train()` - target is hardcoded to `(0,0,5)`; kept for other placement experiments).
-- `diagnose_with_model(model, env, n_episodes)` - runs `n_episodes` deterministically, tallies outcome reasons (`oob`, `attitude-ROLL/PITCH`, `hit`, `hover_success`, `moving_away_cap`, `drift`, `timeout`) and avg steps survived; used by `optuna_search.py`.
+- `diagnose_with_model(model, env, n_episodes)` - runs `n_episodes` deterministically, tallies outcome reasons (`oob`, `attitude-ROLL/PITCH`, `hit`, `hover_success`, `moving_away_cap`, `drift`, `timeout`) and avg steps survived; also used by `../training/diagnostics.py`'s phase1/phase2 variant.
 - `save_checkpoint(model, timesteps_done, cfg)` - saves `model.state_dict()` to `<CHECKPOINT_DIR>/ppo_stage2_<timesteps>.pt`.
 - `log_metrics(env, model, episode_rewards, timesteps_done, ...)` - runs `n_diagnostic_episodes` deterministically, computes the same outcome tally as `diagnose_with_model` plus `avg_final_dist`/`min_final_dist`/`std_final_dist`/`max_hover_streak`/`effective_std_mean`/`total_param_norm`/reward stats, and appends one flat row to `METRICS_CSV` (creating it with a header on first call) - this CSV is what `plotting.py` reads.
 - `train(cfg)` - builds the chained `RewardConfig` (imitation phase for 150k steps -> phase0 for 200k steps -> base indefinitely, per `chain_reward_fns`), builds the env with target fixed at `(0,0,5)`, builds an `ActorCritic` and **loads `app/control/pretrained_bc.pt` as its starting weights** (the actual "imitate the PID" hookup - PPO fine-tunes from the BC-cloned policy, not from scratch), then loops in `CHECKPOINT_EVERY_TIMESTEPS`-sized chunks calling `ppo_train` (resuming the same model/optimizer each chunk), decaying entropy coefficient/LR/`target_kl` linearly with progress, checkpointing and logging metrics after each chunk. Plots the full run via `plot_training_run` at the end. Returns the trained model.
-- `__main__` - runs `train(TrainConfig())`, then `evaluate(model, InterceptorDroneEnv(), n_episodes=10)`.
-
-### `optuna_search.py` - hyperparameter search over `phase_0_training`'s knobs
-
-- `build_env(trial)` - builds a `RewardConfig` with several fields sampled from the trial (`streak_penalty_coef`, `streak_cap`, `phase0_pos_coef`, `tilt_penalty_coef`, `ang_vel_penalty_coef`, `imitation_coef`), fixed `imitation_duration_steps=phase0_duration_steps=20_000` (short - this is a search budget, not a full run), returns the env.
-- `objective(trial)` - samples PPO hyperparameters (`lr`, `gamma`, `lam`, `ent_coef`, `target_kl`), builds an `ActorCritic` (loading `pretrained_bc.pt` if present), trains it for `SEARCH_TIMESTEPS=60_000` via `ppo_train`, scores via `diagnose_with_model` over `N_EVAL_EPISODES=20`. Returns `success_rate + 0.001*mean_reward` (success rate is the real objective; reward only breaks ties).
-- `run_search(n_trials=N_TRIALS)` - runs `optuna.create_study(direction="maximize", sampler=TPESampler())`, prints the best trial, saves `study.trials_dataframe()` to `runs/optuna/search_<timestamp>.csv`.
-- `__main__` - `python -m app.guidance.optuna_search [n_trials]`, defaults `N_TRIALS=7`.
-- Trials run sequentially by design - a network this small doesn't get real throughput gains from parallel GPU trials contending for the same device.
+- `__main__` - runs `train(TrainConfig())`, then `evaluate(model, BaseDroneEnv(), n_episodes=10)`.
 
 ### `plotting.py` - post-run diagnostics/plots
 
@@ -63,9 +55,9 @@ The backbone-brain of the whole project that makes the interceptor learn
 - `python -m app.guidance.test_free_hover [checkpoint_path] [max_steps]` (note: `max_steps` is accepted on the command line description but not actually read from `sys.argv[2]` in the current code - it's hardcoded to `10000000`)
 
 ## Depends on
-`torch`, `numpy`, `optuna` (`optuna_search.py`), `matplotlib` (`plotting.py`, backend forced to `Agg`). Internally: `app.environmental.interceptor_drone.InterceptorDroneEnv`, `app.reward_functions.rewards`, `app.control.pid_hover`/`pretrained_bc.pt`/`best_pid_gains.json`.
+`torch`, `numpy`, `matplotlib` (`plotting.py`, backend forced to `Agg`). Internally: `app.environmental.base_drone_env.BaseDroneEnv`, `app.reward_functions.rewards`, `app.control.pid`/`pretrained_bc.pt`/`best_pid_gains.json`.
 
 ## Notes
 - `device` is hardcoded to `"cpu"` - the CUDA-selecting line is present but commented out.
-- The BC-pretraining -> PPO handoff happens in exactly one place: `phase_0_training.train()`'s `model.load_state_dict(torch.load("app/control/pretrained_bc.pt"))` call, before the PPO loop starts. If `app/control/pretrain_bc.py` hasn't been re-run since a `pid_hover.py` change, this loads a stale imitation target.
+- The BC-pretraining -> PPO handoff happens in exactly one place: `phase_0_training.train()`'s `model.load_state_dict(torch.load("app/control/pretrained_bc.pt"))` call, before the PPO loop starts. If `app/control/pretrain_bc.py` hasn't been re-run since a `pid.py` change, this loads a stale imitation target.
 - `training-goals.md` (same directory) has the higher-level curriculum/design rationale this module implements.
