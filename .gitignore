@@ -4,6 +4,8 @@
 !/runs/optuna_isaac/
 plots_final
 demonstrations_dagger.npz
+app/control/demonstrations_isaac.npz
+arch_dagger/
 mlflow.db
 mlflow.db~
 mlflow_isaac.db
