@@ -1,4 +1,5 @@
 """
-guidance — reads estimated_state (from navigation, never the true one) + target + environmental, and calculates the desired command (desired attitude/thrust) to reach the target. It's fine for guidance to call navigation first each tick to get its estimate before deciding — that's just it consuming navigation's output, not navigation updating anything.
-So the one-line fix to your mental model: navigation produces a second, noisy version of the state for guidance to make decisions on — it never modifies the real one. The real state only ever changes in one place: dynamics, at the end of the tick, after guidance's desired command has been converted to rpm and motor lag applied.
+Guidance reads the estimated state (from navigation, never the true one) plus the
+target, and computes the desired attitude/thrust command. Navigation's estimate is
+read-only input here; the real state only changes in dynamics, at the end of the tick.
 """

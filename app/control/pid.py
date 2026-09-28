@@ -1,0 +1,107 @@
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+
+def wrap_angle(angle):
+    """Wraps an angle (rad) into (-pi, pi] so a yaw error never sees the
+    +/-pi discontinuity as a huge jump."""
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+class PIDController:
+    def __init__(self, kp_pos, kd_pos, kp_att, kd_att, kp_yaw, kd_yaw, max_tilt_rad=0.3,
+                 ki_pos=0.0, ki_att=0.0, ki_yaw=0.0,
+                 integral_limit_pos=0.3, integral_limit_att=0.3,
+                 action_low=(-1.5 * 9.81, -0.5, -0.5, -0.5),
+                 action_high=(1.5 * 9.81, 0.5, 0.5, 0.5)):
+
+        # p reacts to current error, d to rate of change (damps overshoot), i to accumulated error (kills steady-state offset).
+
+        # Position loop: kp pushes toward the target, kd damps by velocity; output is desired acceleration.
+        self.kp_pos = kp_pos
+        self.kd_pos = kd_pos
+        self.ki_pos = ki_pos
+
+        # Attitude loop: kp pushes toward desired roll/pitch, kd damps by angular rate.
+        self.kp_att = kp_att
+        self.kd_att = kd_att
+        self.ki_att = ki_att
+
+        self.kp_yaw = kp_yaw
+        self.kd_yaw = kd_yaw
+        self.ki_yaw = ki_yaw
+        self.max_tilt_rad = max_tilt_rad
+
+        self.integral_limit_pos = integral_limit_pos
+        self.integral_limit_att = integral_limit_att
+
+        self.integral_pos = np.zeros(3)
+        self.integral_att = np.zeros(2)  # roll, pitch
+        self.integral_yaw = 0.0
+
+        # BaseDroneEnv.step() clips whatever action it receives to these same
+        # bounds before actuating (see base_drone_env.py's action_space), so any
+        # unclipped PID output past this range is never actually reachable --
+        # left unclipped here, it also poisons BC/DAgger labels: pretrain_bc.py
+        # normalizes actions into this range and atanh's them into raw target
+        # space, so an out-of-range label maps to a huge raw_target instead of
+        # the actual (clipped) actuator command.
+        self.action_low = np.array(action_low, dtype=np.float64)
+        self.action_high = np.array(action_high, dtype=np.float64)
+
+    def reset(self):
+        self.integral_pos = np.zeros(3)
+        self.integral_att = np.zeros(2)
+        self.integral_yaw = 0.0
+
+    def compute_action(self, drone_state, target_pos, target_yaw=0.0, dt=1 / 240):
+
+        # 1 read state
+        pos= np.array([drone_state.position.x, drone_state.position.y, drone_state.position.z])
+        vel=np.array([drone_state.velocity.x, drone_state.velocity.y, drone_state.velocity.z])
+        ang_vel=np.array([drone_state.angular_velocity.x, drone_state.angular_velocity.y, drone_state.angular_velocity.z])
+        roll, pitch, yaw = Rotation.from_quat([
+            drone_state.orientation.x, drone_state.orientation.y,
+            drone_state.orientation.z, drone_state.orientation.w
+        ]).as_euler("xyz")
+
+        pos_err= target_pos - pos
+
+        self.integral_pos = np.clip(self.integral_pos + pos_err * dt,
+                                     -self.integral_limit_pos, self.integral_limit_pos)
+
+        # 2 outer loop
+        accel_cmd= self.kp_pos* pos_err - self.kd_pos* vel + self.ki_pos* self.integral_pos
+
+        # accel_cmd is in world-frame x/y, but roll/pitch tilt the drone in its
+        # OWN (yaw-rotated) horizontal frame -- rotate by -yaw before mapping to
+        # tilt, or this is only correct at yaw=0. Without this, commanding any
+        # nonzero target_yaw makes the drone tilt toward the wrong world-frame
+        # direction as soon as it actually turns (roll/pitch get swapped/mixed
+        # by however far it's yawed).
+        cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
+        accel_body_x = accel_cmd[0] * cos_yaw + accel_cmd[1] * sin_yaw
+        accel_body_y = -accel_cmd[0] * sin_yaw + accel_cmd[1] * cos_yaw
+
+        des_roll=np.clip(-accel_body_y/9.81,-self.max_tilt_rad,self.max_tilt_rad)
+        des_pitch=np.clip(accel_body_x/9.81,-self.max_tilt_rad,self.max_tilt_rad)
+
+        att_err = np.array([des_roll - roll, des_pitch - pitch])
+        self.integral_att = np.clip(self.integral_att + att_err * dt,
+                                     -self.integral_limit_att, self.integral_limit_att)
+
+        yaw_err = wrap_angle(target_yaw - yaw)
+        self.integral_yaw = np.clip(self.integral_yaw + yaw_err * dt,
+                                     -self.integral_limit_att, self.integral_limit_att)
+
+        # 3 inner loop
+        roll_torque= self.kp_att* att_err[0] - self.kd_att* ang_vel[0] + self.ki_att* self.integral_att[0]
+        pitch_torque= self.kp_att* att_err[1] - self.kd_att* ang_vel[1] + self.ki_att* self.integral_att[1]
+
+        yaw_torque= self.kp_yaw*yaw_err - self.kd_yaw* ang_vel[2] + self.ki_yaw* self.integral_yaw
+        thrust_delta= self.kp_pos*pos_err[2] - self.kd_pos* vel[2] + self.ki_pos* self.integral_pos[2]
+
+        # 4 output action
+
+        action = np.array([thrust_delta, roll_torque, pitch_torque, yaw_torque])
+        return np.clip(action, self.action_low, self.action_high)

@@ -1,0 +1,68 @@
+cd /mnt/e/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator
+
+
+
+#=====================mlflow and site for testing
+
+uv run uvicorn app.guidance.serve_run:app --port 8000
+ /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db
+
+
+
+# 1. Collect demonstrations
+  /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/control/collect_demo_isaac.py --headless --num_envs 4096 --n_target_rows 2000000 --distance-low 3 --distance-high 10 --save-path app/control/demonstrations_isaac.npz
+
+
+# 2. BC pretrain
+uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_isaac.npz --out-path app/control/pretrained_bc.pt
+
+# 3. DAgger refine
+
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/control/dagger_isaac.py --headless \
+      --num_envs 4096 --n_rounds 5 --rows_per_round 500000 \
+      --distance-low 3 --distance-high 10 \
+      --checkpoint-path app/control/pretrained_bc.pt \
+      --demo-path app/control/demonstrations_isaac.npz \
+      --out-path app/control/pretrained_bc_dagger.pt
+
+
+# 4. Full training
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
+    --num_envs 4096 --total_timesteps 128000000 \
+    --distance-low 3 --distance-high 50 \
+    --checkpoint-dir runs/base_training_isaac_3_50 \
+    --bc-checkpoint app/control/pretrained_bc_dagger.pt
+
+
+
+
+
+
+
+
+
+  /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
+      --num_envs 16384 --num-steps-per-chunk 128 --total_timesteps 128000000 \
+      --distance-low 3 --distance-high 10 \
+      --checkpoint-dir runs/base_training_isaac_3_10_res_v1 \
+      --bc-checkpoint app/control/model_92274688.pt \
+      --residual-scale 0.1
+      --seed 42
+
+
+    --n-trials 100 --num_envs 256 --total-timesteps 2000000 \
+    --distance-low 3 --distance-high 10
+
+
+###============== mlflow
+
+/mnt/e/Isaac/env_igsaaclab/Scripts/python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db
+
+
+  /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
+      --num_envs 16384 --num-steps-per-chunk 128 --total_timesteps 128000000 \
+      --distance-low 3 --distance-high 50 \
+      --checkpoint-dir runs/base_training_isaac_3_50_v1 \
+      --bc-checkpoint app/control/model_92274688.pt \
+      --residual-scale 0.1
+      --seed 42

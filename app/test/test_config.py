@@ -1,8 +1,7 @@
 """
-test_configuration() — run this before EVERY training session, and any
-time you change QuadConfig parameters. Every check here targets a real
-bug this project has actually hit (units mismatches, mixer inversion
-issues, yaw/body-frame bugs, NaN from bad hover equilibrium, etc).
+test_configuration() -- run before every training session and after any QuadConfig
+change. Each check targets a real bug this project has hit before (unit mismatches,
+mixer inversion issues, yaw/body-frame bugs, NaN from bad hover equilibrium).
 
 Usage:
     from app.dynamics.drone import create_quad_config
@@ -88,16 +87,10 @@ def check_static_fields(config: QuadConfig) -> bool:
 
 def check_mixer_invertibility(config: QuadConfig) -> bool:
     """
-    The exact bug class from earlier: a near-singular mixer matrix doesn't
-    error, it just returns garbage. Catch it explicitly here.
-
-    IMPORTANT: uses CONDITION NUMBER, not raw determinant. Raw determinant
-    is NOT a valid zero-test here — k_f/k_m are naturally tiny (~1e-7,
-    since thrust = k_f * omega^2 with omega in the thousands), so a 4x4
-    determinant built from such small entries is naturally astronomically
-    small (~1e-30) even for a perfectly healthy, invertible matrix. That's
-    a scale artifact, not degeneracy. Condition number is scale-invariant
-    and is the correct test for "is this matrix actually close to singular."
+    A near-singular mixer matrix doesn't error, it just returns garbage, so this checks
+    explicitly. Uses condition number rather than raw determinant: k_f/k_m are naturally
+    tiny (~1e-7), so the determinant is astronomically small even for a healthy matrix --
+    a scale artifact, not degeneracy. Condition number is scale-invariant.
     """
     M = np.zeros((4, 4))
     for i in range(4):

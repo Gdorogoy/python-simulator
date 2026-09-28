@@ -1,3 +1,27 @@
+<<<<<<< HEAD
 */logs
 .venv/
 /runs
+=======
+*/logs
+.venv/
+/runs/*
+!/runs/optuna_isaac/
+plots_final
+demonstrations_dagger.npz
+app/control/demonstrations_isaac.npz
+arch_dagger/
+mlflow.db
+mlflow.db~
+mlflow_isaac.db
+mlruns/
+mlartifacts/
+recordings/
+out/
+prod_logs/
+__pycache__/
+*.pyc
+*.mp4
+optuna/
+optuna_isaac/
+>>>>>>> later_to_remove

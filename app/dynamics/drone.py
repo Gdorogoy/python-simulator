@@ -1,13 +1,7 @@
 """
-Drone dynamics entities.
-
-Three core dataclasses:
-    RotorConfig — static physics of a single motor/rotor
-    QuadConfig  — static physics of the whole drone (mass, inertia, 4 rotors)
-    QuadState   — dynamic per-tick state (position, velocity, orientation, etc)
-
-No redundant classes. CreateDrone/Rotor were removed — QuadConfig IS the
-"create drone" representation, built via create_quad_config() below.
+Drone dynamics entities: RotorConfig (static per-motor physics), QuadConfig
+(static per-drone physics: mass, inertia, 4 rotors), and QuadState (dynamic
+per-tick state: position, velocity, orientation, etc).
 """
 
 import math
@@ -58,10 +52,8 @@ class QuadState:
 
 
 """
-Places 4 rotors in a standard X configuration, 90 degrees apart,
-with alternating spin direction (CW/CCW) so reaction torques
-cancel out during hover — this is real quadcopter physics, not
-optional cosmetics.
+Places 4 rotors in a standard X configuration, 90 degrees apart, with alternating
+spin direction so reaction torques cancel out during hover.
 """
 
 def create_quad_rotors(
@@ -76,7 +68,7 @@ def create_quad_rotors(
     angles_deg = [45, 135, 225, 315]
     spin_dirs = [1, -1, 1, -1]  # alternating — cancels net yaw torque
 
-    # finiding k_f so 4 rotors will balance the gravity
+    # Solve k_f so 4 rotors at hover_rpm_fraction of max_rpm balance gravity.
     k_f=(mass*9.81/4)/ (max_rpm*hover_rpm_fraction)**2
 
     rotors: list[RotorConfig] = []
@@ -101,11 +93,7 @@ def create_quad_rotors(
 
 
 
-"""
-Builds a complete QuadConfig from raw physical parameters.
-This replaces the old CreateDrone class — no intermediate
-redundant object, just parameters straight into the final config.
-"""
+"""Builds a complete QuadConfig from raw physical parameters."""
 
 def create_quad_config(
     mass: float,
