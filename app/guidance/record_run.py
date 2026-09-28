@@ -14,6 +14,7 @@ app/control/.
 """
 import argparse
 import glob
+import json
 import os
 
 import imageio.v3 as iio
@@ -24,6 +25,7 @@ import numpy as np
 import torch
 
 from app.environmental.base_drone_env import BaseDroneEnv
+from app.environmental.subproc_vec_base_drone_env import _select_pid_teacher
 from app.guidance.train import ActorCritic, load_bc_checkpoint, device
 from app.guidance.utils import compute_grade
 from app.reward_functions.rewards import reward_func, HIT_THRESHOLD
@@ -34,6 +36,12 @@ CHECKPOINT_SEARCH_DIRS = ("runs", "app/control")
 MAX_RENDER_FRAMES = 360  # cap on frames actually drawn -- keeps render time/output size bounded
 FPS = 24
 N_EVAL_SCENARIOS = 75
+# Must match base_training_isaac.PidResidualEnv's composition exactly, or a residual checkpoint
+# (--residual-scale > 0 at training time -- e.g. every _res_v1/_v1 Isaac run as of 2026-09-27)
+# evaluates as "hover, don't steer": its actor head only ever learned a SMALL CORRECTION on top of
+# the PID (zero-initialized, scaled down at training time too), not a full action -- feeding it alone
+# to the env makes every episode time out, regardless of how good the correction actually is.
+RESIDUAL_GAINS_PATH = "app/control/best_pid_gains_per_dist.json"
 
 
 def find_latest_checkpoint(search_dirs=CHECKPOINT_SEARCH_DIRS):
@@ -79,8 +87,16 @@ def sample_target(distance_low, distance_high, rng):
     return start_pos, target_pos
 
 
-def run_episode(model, env, start_pos, target_pos, target_yaw=0.0):
+def run_episode(model, env, start_pos, target_pos, target_yaw=0.0, residual_scale=0.0, gains_by_dist=None):
+    """residual_scale > 0: executed action = pid_action + residual_scale * model_action (clipped to the
+    env's action space) -- the same composition base_training_isaac.PidResidualEnv applies during
+    training, required to get a meaningful episode out of a residual checkpoint (see RESIDUAL_GAINS_PATH's
+    comment). gains_by_dist re-selects env.pid_teacher's gains by this episode's target distance right
+    after reset, matching _select_pid_teacher's per-episode swap during training/diagnostics."""
     obs, _ = env.reset(start_pos=start_pos, target_pos=target_pos, target_yaw=target_yaw)
+    if residual_scale > 0:
+        _select_pid_teacher(env, gains_by_dist)
+        env.pid_teacher.reset()
     positions, dists, rewards = [], [], []
     done = False
     info = {"reason": None}
@@ -90,12 +106,22 @@ def run_episode(model, env, start_pos, target_pos, target_yaw=0.0):
         with torch.no_grad():
             mean, _, _ = model.forward(obs_t)
             action = model.scale_action(mean).squeeze(0).cpu().numpy()
+        if residual_scale > 0:
+            pid_action = env.pid_teacher.compute_action(env.drone_state, env.target_pos, env.target_yaw)
+            action = np.clip(pid_action + residual_scale * action, env.action_space.low, env.action_space.high)
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         positions.append([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
         dists.append(env.prev_distance)
         done = terminated or truncated
     return np.array(positions, dtype=np.float32), np.array(dists, dtype=np.float32), info, total_reward
+
+
+def _load_residual_gains(residual_scale, gains_path=RESIDUAL_GAINS_PATH):
+    if residual_scale <= 0:
+        return None
+    with open(gains_path) as f:
+        return json.load(f)
 
 
 def render_mp4(positions, dists, target_pos, out_path, reason, total_reward, fps=FPS):
@@ -151,17 +177,20 @@ def render_mp4(positions, dists, target_pos, out_path, reason, total_reward, fps
     return out_path
 
 
-def record_checkpoint(checkpoint_path, out_path, distance_low=3.0, distance_high=10.0, seed=None):
+def record_checkpoint(checkpoint_path, out_path, distance_low=3.0, distance_high=10.0, seed=None,
+                      residual_scale=0.0):
     """Runs one deterministic episode against checkpoint_path and writes an
     mp4 to out_path. Returns a small dict of episode stats (used by
     serve_run.py's API response)."""
     rng = np.random.default_rng(seed)
     model = load_model_for_inference(checkpoint_path)
+    gains_by_dist = _load_residual_gains(residual_scale)
 
     env = BaseDroneEnv(reward_func, max_steps=6000)
     start_pos, target_pos = sample_target(distance_low, distance_high, rng)
 
-    positions, dists, info, total_reward = run_episode(model, env, start_pos, target_pos)
+    positions, dists, info, total_reward = run_episode(model, env, start_pos, target_pos,
+                                                        residual_scale=residual_scale, gains_by_dist=gains_by_dist)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     render_mp4(positions, dists, target_pos, out_path, info["reason"], total_reward)
 
@@ -190,11 +219,13 @@ def _classify_outcome(reason):
     }
 
 
-def evaluate_checkpoint(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance_low=3.0, distance_high=10.0, seed=None):
+def evaluate_checkpoint(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance_low=3.0, distance_high=10.0,
+                        seed=None, residual_scale=0.0):
     """Runs checkpoint_path deterministically against n_scenarios random (start, target)
     scenarios, no rendering -- returns per-scenario outcomes, totals, and a text summary."""
     rng = np.random.default_rng(seed)
     model = load_model_for_inference(checkpoint_path)
+    gains_by_dist = _load_residual_gains(residual_scale)
     env = BaseDroneEnv(reward_func, max_steps=6000)
 
     scenarios = []
@@ -202,7 +233,8 @@ def evaluate_checkpoint(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance_
     for i in range(n_scenarios):
         start_pos, target_pos = sample_target(distance_low, distance_high, rng)
         dist = float(np.linalg.norm(target_pos - start_pos))
-        positions, dists, info, total_reward = run_episode(model, env, start_pos, target_pos)
+        positions, dists, info, total_reward = run_episode(model, env, start_pos, target_pos,
+                                                            residual_scale=residual_scale, gains_by_dist=gains_by_dist)
         outcome = _classify_outcome(info["reason"])
         for k, v in outcome.items():
             totals[k] += int(v)
@@ -233,12 +265,13 @@ def evaluate_checkpoint(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance_
 
 
 def rank_checkpoints(checkpoint_paths, n_scenarios=N_EVAL_SCENARIOS, distance_low=3.0, distance_high=10.0,
-                      seed=None, top_n=5):
+                      seed=None, top_n=5, residual_scale=0.0):
     """Batch-evaluates each of checkpoint_paths against n_scenarios scenarios (no per-scenario
     dump, no video) and returns only the top_n ranked by grade -- a short leaderboard of
     potential suitable weights."""
     oob_radius = max(20.0, distance_high * 3.0)
     max_steps = 6000
+    gains_by_dist = _load_residual_gains(residual_scale)
     results = []
     for path in checkpoint_paths:
         rng = np.random.default_rng(seed)
@@ -249,7 +282,8 @@ def rank_checkpoints(checkpoint_paths, n_scenarios=N_EVAL_SCENARIOS, distance_lo
         hit_times, final_dists = [], []
         for _ in range(n_scenarios):
             start_pos, target_pos = sample_target(distance_low, distance_high, rng)
-            positions, dists, info, _ = run_episode(model, env, start_pos, target_pos)
+            positions, dists, info, _ = run_episode(model, env, start_pos, target_pos,
+                                                     residual_scale=residual_scale, gains_by_dist=gains_by_dist)
             outcome = _classify_outcome(info["reason"])
             for k, v in outcome.items():
                 totals[k] += int(v)
@@ -291,6 +325,9 @@ def _parse_args():
     parser.add_argument("--n-scenarios", type=int, default=N_EVAL_SCENARIOS)
     parser.add_argument("--rank-dir", default=None, help="evaluate every .pt in this dir, print top --top-n by grade")
     parser.add_argument("--top-n", type=int, default=5)
+    parser.add_argument("--residual-scale", type=float, default=0.0,
+                         help="> 0 if checkpoint(s) were trained with --residual-scale (PID-residual mode) -- "
+                              "must match the value training used, or the composed action is wrong.")
     return parser.parse_args()
 
 
@@ -299,16 +336,19 @@ if __name__ == "__main__":
     if args.rank_dir:
         checkpoints = sorted(glob.glob(os.path.join(args.rank_dir, "*.pt")))
         result = rank_checkpoints(checkpoints, n_scenarios=args.n_scenarios, distance_low=args.distance_low,
-                                   distance_high=args.distance_high, seed=args.seed, top_n=args.top_n)
+                                   distance_high=args.distance_high, seed=args.seed, top_n=args.top_n,
+                                   residual_scale=args.residual_scale)
         print(result["summary_text"])
     else:
         checkpoint = args.checkpoint or find_latest_checkpoint()
         print(f"[record_run] checkpoint: {checkpoint}")
         if args.evaluate:
             result = evaluate_checkpoint(checkpoint, n_scenarios=args.n_scenarios, distance_low=args.distance_low,
-                                          distance_high=args.distance_high, seed=args.seed)
+                                          distance_high=args.distance_high, seed=args.seed,
+                                          residual_scale=args.residual_scale)
             print(result["summary_text"])
         else:
             stats = record_checkpoint(checkpoint, args.out, distance_low=args.distance_low,
-                                       distance_high=args.distance_high, seed=args.seed)
+                                       distance_high=args.distance_high, seed=args.seed,
+                                       residual_scale=args.residual_scale)
             print(f"[record_run] done: {stats}")

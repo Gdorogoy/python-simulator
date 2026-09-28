@@ -1,0 +1,21 @@
+{
+  "solid_at_chunk": 44,
+  "window_chunks": [
+    40,
+    44
+  ],
+  "window_grades": [
+    0.8799,
+    0.9214,
+    0.9208,
+    0.9514,
+    0.9222
+  ],
+  "window_mean": 0.9191,
+  "window_min": 0.8799,
+  "checkpoint": "runs/base_training_isaac_3_10_res_v1\\model_92274688.pt",
+  "checkpoint_chunk": 43,
+  "checkpoint_grade": 0.9514,
+  "distance_low": 3.0,
+  "distance_high": 10.0
+}

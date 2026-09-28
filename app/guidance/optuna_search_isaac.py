@@ -3,6 +3,13 @@ same search space as app.guidance.optuna_search except hidden/num_hidden_layers/
 are pinned (64/4/10/64) so every trial keeps the BC checkpoint's warm start valid. Builds one Isaac env
 and reuses it across all trials; --num_envs defaults to 256, not 4096, so warmup doesn't eat the budget.
 
+Mirrors train()'s current phase split exactly (pulled from base_training_isaac's own
+constants, not re-hardcoded): run-start-frozen rollout chunks, IMITATION_FRACTION
+imitation, floor-not-fraction critic warmup, the actor_log_std reset before that
+freeze locks it in, and the post-unfreeze LR ramp. Deliberately does NOT replicate
+the soft-reset-on-degrade mechanism (see the comment at its omission in the objective
+function for why) -- everything else searches hyperparameters against the real setup.
+
 Usage:
     E:\\Isaac\\env_isaaclab\\Scripts\\python.exe -u app\\guidance\\optuna_search_isaac.py --headless ^
         --n-trials 100 --num_envs 256 --total-timesteps 2000000
@@ -58,7 +65,11 @@ from app.guidance.mlflow_utils import start_run, log_params_safe, log_metrics_sa
 from app.guidance.train import ActorCritic, isaac_ppo_train, cosine_lr, device, load_bc_checkpoint
 from app.guidance.utils import compute_grade
 from app.reward_functions.rewards import reward_func, GAMMA as REWARD_GAMMA
-from app.training.base_training_isaac import _run_imitation_stage_isaac, MIN_WARMUP_CHUNKS, NUM_STEPS_PER_CHUNK
+from app.training.base_training_isaac import (
+    _run_imitation_stage_isaac, MIN_WARMUP_CHUNKS, NUM_STEPS_PER_CHUNK,
+    IMITATION_FRACTION, WARMUP_FRACTION, RUN_START_FROZEN_CHUNKS, UNFREEZE_LR_RAMP_CHUNKS,
+    entropy_coef_at, scheduled_lr,
+)
 from app.training.diagnostics import diagnose_with_model
 from app.training.eval_matrix import build_uniform_omni_eval_pairs
 
@@ -127,15 +138,26 @@ def make_objective(env, gains_by_dist: dict, target_pairs, eval_env, oob_radius:
             else:
                 mlflow.set_tag("bc_checkpoint_missing", "true")
 
-            # Same 15% imitation / floor-not-fraction warmup / remainder PPO split as base_training_isaac.train().
-            imitation_timesteps_grand = int(0.15 * total_timesteps)
-            warmup_timesteps_grand = max(int(0.01 * total_timesteps), MIN_WARMUP_CHUNKS * chunk_grand_steps)
+            # Same phase split as base_training_isaac.train() -- pulled from its own
+            # constants (not re-hardcoded here) so this can't silently drift out of
+            # sync with it again, the way this file's old 0.15/0.01 literals did.
+            imitation_timesteps_grand = int(IMITATION_FRACTION * total_timesteps)
+            warmup_timesteps_grand = max(int(WARMUP_FRACTION * total_timesteps), MIN_WARMUP_CHUNKS * chunk_grand_steps)
             ppo_total_timesteps_grand = total_timesteps - imitation_timesteps_grand - warmup_timesteps_grand
             post_imitation_timesteps_grand = warmup_timesteps_grand + ppo_total_timesteps_grand
 
             if imitation_timesteps_grand > 0:
                 imitation_steps_per_env = max(1, imitation_timesteps_grand // unwrapped.num_envs)
                 model = _run_imitation_stage_isaac(env, model, imitation_steps_per_env, gains_by_dist)
+
+            # Same actor_log_std reset as train() (PROJECT_DEFENSE_GUIDE.md Part 5.1a) --
+            # both load_bc_checkpoint and _run_imitation_stage_isaac's Gaussian-NLL loss
+            # collapse std toward log_std_min against the deterministic PID teacher.
+            # Skipping this here would search hyperparameters against a policy that can
+            # never actually explore, same broken regime that produced garbage results
+            # before this was found and fixed.
+            with torch.no_grad():
+                model.actor_log_std.zero_()
 
             actor_frozen = warmup_timesteps_grand > 0
             if actor_frozen:
@@ -148,18 +170,33 @@ def make_objective(env, gains_by_dist: dict, target_pairs, eval_env, oob_radius:
             optimizer = torch.optim.AdamW(model.parameters(), lr=p["lr"], weight_decay=p["weight_decay"])
             n_chunks = max(1, post_imitation_timesteps_grand // chunk_grand_steps)
 
+            # NOTE: unlike train(), this objective does NOT replicate the soft-reset-
+            # on-degrade mechanism (RESET_SUSTAIN_CHUNKS/RESET_DEGRADE_MARGIN/etc.) --
+            # it blends toward a saved checkpoint on disk (_soft_reset_toward_checkpoint),
+            # which isn't worth the per-trial disk I/O for these much shorter trials, and
+            # its thresholds were tuned against full 128M-step runs, not few-million-step
+            # search trials. Every other phase (run-start-frozen rollout, imitation,
+            # critic-warmup freeze/unfreeze, post-unfreeze LR ramp) is mirrored exactly.
             timesteps_done = imitation_timesteps_grand
             ppo_timesteps_done = 0
             ppo_obs = None  # None -> isaac_ppo_train does one full env.reset() at trial start
+            chunks_since_unfreeze = None
             for chunk in range(n_chunks):
+                run_start_frozen = chunk < RUN_START_FROZEN_CHUNKS
                 if actor_frozen and ppo_timesteps_done >= warmup_timesteps_grand:
                     for param in model.parameters():
                         param.requires_grad_(True)
                     actor_frozen = False
+                    chunks_since_unfreeze = 0
+                elif chunks_since_unfreeze is not None:
+                    chunks_since_unfreeze += 1
 
-                progress = ppo_timesteps_done / post_imitation_timesteps_grand
-                current_ent_coef = max(p["ent_coef_end"], p["ent_coef_start"] * (1 - progress))
-                current_lr = cosine_lr(p["lr"], progress, min_ratio=p["lr_min_ratio"])
+                current_ent_coef = entropy_coef_at(ppo_timesteps_done, warmup_timesteps_grand,
+                                                    ppo_total_timesteps_grand, p["ent_coef_start"], p["ent_coef_end"])
+                current_lr = scheduled_lr(ppo_timesteps_done, warmup_timesteps_grand,
+                                           post_imitation_timesteps_grand, p["lr"], p["lr_min_ratio"])
+                if chunks_since_unfreeze is not None and chunks_since_unfreeze < UNFREEZE_LR_RAMP_CHUNKS:
+                    current_lr *= (chunks_since_unfreeze + 1) / UNFREEZE_LR_RAMP_CHUNKS
                 for group in optimizer.param_groups:
                     group["lr"] = current_lr
 
@@ -169,7 +206,7 @@ def make_objective(env, gains_by_dist: dict, target_pairs, eval_env, oob_radius:
                     ent_coef=current_ent_coef, target_kl=p["target_kl"], num_epochs=p["num_epochs"],
                     batch_size=max(1, chunk_grand_steps // p["num_minibatches"]),
                     clip_eps=p["clip_eps"], vf_coef=p["vf_coef"], max_grad_norm=p["max_grad_norm"],
-                    initial_obs=ppo_obs,
+                    initial_obs=ppo_obs, skip_update=run_start_frozen,
                 )
                 timesteps_done += chunk_grand_steps
                 ppo_timesteps_done += chunk_grand_steps

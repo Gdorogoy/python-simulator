@@ -1,14 +1,27 @@
 # Project Defense Guide — Drone RL Simulator (numpy oracle + Isaac Lab port)
 
-Built from the actual code as of 2026-09-16 (not from docs-*.md, which may be
-stale, and not from memory). Every claim below cites a real `file:function`.
+Built from the actual code — first as of 2026-09-16, extended through
+2026-09-27 (not from docs-*.md, which may be stale, and not from memory).
+Every claim below cites a real `file:function`.
+
+**Theory is a ladder, for every topic: P (prerequisites) → B (basics) → C
+(what this project actually does today).** Part 0 has all three rungs for each
+topic (0.1-0.14); Parts 1-8 are the code walkthroughs that implement the C rung;
+Part 12 is the chronological case study of the 2026-09-19 → 09-27 work (what
+broke, how it was diagnosed, what was changed, what the numbers were).
+Part 13 checks this project against the actual K14 grading rubric.
 Scope: every active `.py` file under `app/`, excluding `__pycache__`,
 `deprecated/`, `app/test/`, and run-artifact folders (`app/z_final_version_*`).
 
 ## How to use this
 
-1. Read **Part 0** once — it's the theory every later part assumes. If a term
-   in Parts 1-9 is unfamiliar, it's almost certainly defined there.
+1. Read **Part 0** once — it's the theory every later part assumes, organized
+   per topic as **P → B → C**: if you're missing background, start at the P
+   rung; if the general idea is fine but you can't say what THIS project does,
+   jump to the C rung. If a term in Parts 1-12 is unfamiliar, it's almost
+   certainly defined there. Part 12 tells the story of the recent work in order
+   and is the best thing to read before a defense conversation about "what did
+   you actually do and why".
 2. Read each Part's **file walkthrough** before its **practice questions**.
 3. For practice: cover the "Model answer" and answer from memory first
    (closed-book, like a real defense), then check yourself. Score yourself
@@ -16,11 +29,182 @@ Scope: every active `.py` file under `app/`, excluding `__pycache__`,
 4. Part 10 has cross-file "trace the data" scenarios — these are the
    hardest and most realistic defense questions (a real panel will ask "and
    then what happens to that number", not "define GAE").
+5. Part 13 is administrative, not code theory — read it once before
+   submission and again before the oral defense (the rubric's "מעמד הצגת
+   הפרויקט" section is literally an oral exam on this codebase).
 
 ---
 # PART 0 — Prerequisite theory
 
 ## 0.1 Rigid-body dynamics
+
+**Ladder: P (prerequisites) → B (basics) → C (this project, current).**
+
+### 0.1.P Prerequisites
+
+**Vectors.** A vector is just a list of numbers that also has a direction in
+space — `(3, 0, 0)` means "3 meters along x, 0 along y, 0 along z". You
+already add/subtract them like you'd add lists element-by-element:
+`(1,2,0) + (0,1,5) = (1,3,5)`. Two operations on vectors show up constantly:
+
+- **Dot product** `a·b = a_x b_x + a_y b_y + a_z b_z` — multiply matching
+  components and add them up. It equals `|a||b|cosθ` (`θ` = angle between
+  them), so it measures "how much do these two vectors point the same way":
+  `+` = same-ish direction, `0` = perpendicular, `−` = opposite-ish.
+  *Example:* `a=(1,0,0)`, `b=(0,1,0)` (perpendicular): `a·b = 1·0+0·1+0·0 = 0`. ✓.
+- **Cross product** `a×b` — a *new vector*, perpendicular to both `a` and
+  `b`, with length `|a||b|sinθ`. Formula:
+  `a×b = (a_y b_z − a_z b_y,  a_z b_x − a_x b_z,  a_x b_y − a_y b_x)`.
+  *Why you need it here:* if you push on a rigid body at some offset `r`
+  from its center with force `F`, the amount it starts to SPIN (the torque)
+  is `τ = r×F`. *Example:* push with `F=(0,0,10)` N (straight up) at offset
+  `r=(1,0,0)` m (1m to the side): `τ = (0·10−0·0, 0·0−1·10, 1·0−0·0) = (0,−10,0)`
+  N·m — a torque around the y-axis, which is exactly right: pushing up on
+  one side of something makes it rotate around the axis running front-to-back.
+
+**Derivatives and integrals (just "rates" and "running totals").** Velocity
+is "how fast position is changing" — if position is `x(t)`, velocity is
+`v(t) = dx/dt`, its derivative. Acceleration is the derivative of velocity.
+Going backward (from acceleration to velocity to position) is *integration*
+— literally "add up all the little changes". A computer can't do a true
+continuous integral, so it approximates: pick a small time step `dt`
+(here, `dt = 1/240` s), and repeat `v_new = v_old + a·dt`,
+`x_new = x_old + v_new·dt`, one tick at a time. *Example:* starting at rest
+(`v=0`) with `a = 2 m/s²` and `dt = 0.1` s: after step 1, `v = 0 + 2·0.1 = 0.2`
+m/s; after step 2, `v = 0.2 + 2·0.1 = 0.4` m/s — velocity climbs by `a·dt`
+every tick, exactly matching the calculus answer `v(t)=a·t` in the limit of
+tiny steps.
+
+**Rotation matrices, briefly.** A 3×3 matrix `R` can rotate a vector:
+`v_world = R·v_body` turns a vector written in the drone's own frame into
+the same vector written in world coordinates. You don't need to compute one
+by hand for this project (quaternions do the actual work, 0.2) — just know
+that "rotating a vector" is a matrix multiply, and that rotating twice in a
+row is two matrix multiplies **in a specific order** (rotating by A then B
+is not generally the same as B then A).
+
+**Units, and the one bug this always causes.** Everything here is meters,
+seconds, kilograms, Newtons, Newton-meters, and **radians** (not degrees) —
+`radians = degrees · π/180`. This project's tilt limit is `0.3 rad ≈ 17°`,
+while its crash-detection limits are written in degrees
+(`ATTITUDE_ROLL_DEG = 65`) — mixing the two silently without converting is
+the single most common bug in any project like this.
+
+### 0.1.B Basics
+
+**Degrees of freedom (DoF) and "state".** A rigid body floating in space can
+move 3 independent ways (along x, y, z) and rotate 3 independent ways (roll,
+pitch, yaw) — 6 numbers total describe how it *can* move (6 DoF). To know
+where it actually IS right now, you need position (3 numbers), velocity (3),
+orientation (a quaternion, 4 numbers — 0.2 explains why 4 and not 3), and
+angular velocity (3) — 13 numbers total, and that whole list is called the
+**state**.
+
+**Newton's law, and its rotational twin.** You already know
+`F = m·a`, i.e. `a = F/m` — force divided by mass gives acceleration. The
+rotational version replaces each piece with its rotational analogue: force
+`F` → torque `τ` (how hard you're twisting), mass `m` → moment of inertia
+`I` (how hard it is to START it spinning, defined just below), acceleration
+`a` → angular acceleration `α` (how fast the spin rate itself is changing).
+That gives `α = τ/I`, i.e. **`τ = I·α`** — this is literally `F=ma` with
+every symbol relabeled for rotation, not a new law. *Example:* `I = 0.02`
+kg·m² (this drone's roll axis) and you apply `τ = 0.1` N·m of torque:
+`α = 0.1/0.02 = 5` rad/s² — the spin rate increases by 5 rad/s every second
+this torque is held.
+
+The version above ignores one subtlety that appears when a body is spinning
+around several axes *at once*: extra "gyroscopic" cross-terms
+(`ω×(Iω)`, ignore the exact formula) can appear, the same way a spinning
+bicycle wheel resists being tilted. This project's code drops that term
+(each axis is treated independently, `α_i = τ_i/I_i`) — a deliberate,
+named simplification (0.1.C), not a bug.
+
+**Moment of inertia, concretely.** `I = Σ mᵢ·rᵢ²` — for every little piece of
+mass `mᵢ` making up the object, multiply its mass by the *square* of its
+distance `rᵢ` from the spin axis, and add them all up. Mass far from the axis
+counts a lot more (squared!) than mass near it — this is why a figure skater
+spins faster when they pull their arms in. This project's drone has inertia
+`(Ixx, Iyy, Izz) = (0.02, 0.02, 0.04)` kg·m²: `Ixx = Iyy` because the drone
+looks the same from the front and the side (roll and pitch are equally
+"hard"), and `Izz` is bigger because the mass — the four rotors — sits
+farthest from the *vertical* (yaw) axis, at the ends of the arms.
+
+**How a quadrotor actually makes force: one rotor at a time.** Spin rotor `i`
+at angular speed `ωᵢ` (rad/s) and it produces thrust
+`Tᵢ = k_f·ωᵢ²` (`k_f` = a constant of that specific motor+propeller — thrust
+grows with the SQUARE of spin speed) straight up along the body, plus a
+reaction torque `Qᵢ = k_m·ωᵢ²` (the propeller pushes air one way, so by
+Newton's third law the air pushes the propeller's frame the other way — the
+same reason a helicopter needs a tail rotor). Add up all four rotors' thrust
+for total lift; add up all four rotors' *positions crossed with* their
+thrust (that's the `τ = r×F` from above) for roll/pitch torque, and all four
+reaction torques for yaw torque. Going the OTHER direction — "I want this
+much total thrust and this much roll/pitch/yaw torque, what should each
+rotor's speed be?" — is called the **mixer**, and since everything above is
+just squares of `ωᵢ`, solving it is: solve a linear system for the four
+`ωᵢ²` values, clip any negative ones to 0 (a rotor can't spin backward here),
+then take the square root of what's left to get real speeds.
+
+**Underactuation, i.e. "why tilt at all?"** The drone has 4 controls
+(thrust + 3 torques) but 6 DoF — it CANNOT push directly sideways. The trick:
+tilt the whole body a little, so part of the "up" thrust now points
+sideways. For small tilt angles, `sideways acceleration ≈ g · tilt_angle`
+(`g=9.81` m/s²) — *example:* tilt 0.1 rad (≈5.7°): sideways accel
+`≈ 9.81 · 0.1 = 0.981` m/s². This is why the whole controller (0.3) is built
+as position-error → desired TILT → torque to achieve that tilt, instead of
+one flat step.
+
+**Motor lag.** A rotor can't jump to a new speed instantly — it ramps toward
+its target: `ω_new = ω_old + (ω_target − ω_old)/τ_m · dt` (`τ_m` = the
+motor's own time constant, how many seconds it roughly takes to catch up).
+*Example:* `ω_old=0`, `ω_target=1000` rad/s, `τ_m=0.05` s, `dt=1/240` s:
+`ω_new = 0 + (1000−0)/0.05 · (1/240) ≈ 83.3` rad/s after just one tick — it's
+climbing toward 1000 but hasn't gotten there, and won't for several more
+ticks. A controller that assumes instant response will overshoot on a real
+(laggy) motor.
+
+**Drag and wind.** Air resistance grows with the SQUARE of speed and opposes
+motion: `F_drag = −½·ρ·C_d·A·|v|·v` (`ρ`=air density, `C_d`=a shape constant,
+`A`=cross-section area, `v`=velocity) — double your speed, quadruple the
+drag. Wind just adds an extra push proportional to how fast the air itself
+is moving relative to the drone.
+
+**Why "semi-implicit" Euler, not the naive version.** The naive
+("explicit") way to integrate is `x_new = x_old + v_old·dt` — using the OLD
+velocity. This project instead updates velocity FIRST, then uses the NEW
+velocity for position: `v_new = v_old + a·dt`, then `x_new = x_old + v_new·dt`.
+This one-line change (semi-implicit Euler) is dramatically more numerically
+stable for anything oscillating (like a controller correcting position
+error) — the explicit version can spiral out to infinity over many steps
+even when the real physics is stable. Because everything is tuned against
+one fixed `dt = 1/240`, this project never changes `dt` to speed things up —
+it uses **decimation** instead (0.6): running physics at full speed/accuracy
+but only asking the AI for a new decision every few ticks.
+
+**Hover, and why "action=0" means "just float".** To hover, total thrust
+must exactly cancel gravity: `ΣT = m·g`. *Example:* `m=1.5` kg:
+`ΣT = 1.5 · 9.81 = 14.715` N — that's this project's `_HOVER_THRUST`
+constant. Rather than have the neural network output the full 14.715 N from
+scratch every single time (and have to relearn "hovering" from zero), its
+thrust output is a *delta* added on top: `real_thrust = hover_thrust +
+action[0]`. So `action[0] = 0` already means "hover exactly", and the
+network only has to learn small corrections around that baseline.
+
+### 0.1.C In this project (current)
+- **Plant:** mass 1.5 kg, inertia `(0.02, 0.02, 0.04)` kg·m², arm 0.22 m, drag
+  coefficient 0.035 (cross-section 0.05 m², air density 1.225), max 12,000 rpm,
+  motor time constant 0.05 s, physics step `dt = 1/240 s`.
+- **Two implementations of the same physics.** The numpy "oracle"
+  (`methods.py`, Part 1) integrates everything itself. In Isaac Lab, **PhysX**
+  integrates the rigid body, while the mixer, motor lag, thrust/torque and
+  drag/wind are custom torch code applied each physics tick as an external
+  force and torque (`_apply_action`). The two are diff-tested against each
+  other (Part 8).
+- **Control rate differs between the two:** the numpy oracle queries the policy
+  every physics tick (240 Hz); Isaac queries it every 4th tick (60 Hz,
+  `decimation=4`) and holds the action in between. This is a known
+  simulator-to-simulator gap (see Part 12, open items).
+- **Detail and simplifications (original notes):**
 
 A rigid body's motion splits into **translational** (position/velocity,
 governed by `F = ma`) and **rotational** (orientation/angular velocity,
@@ -62,6 +246,109 @@ governed by `τ = Iα`) halves, which are coupled only through where forces are
 
 ## 0.2 Quaternions and rotation composition
 
+**Ladder: P → B → C.**
+
+### 0.2.P Prerequisites
+
+**Why not just use roll/pitch/yaw everywhere?** Roll/pitch/yaw ("Euler
+angles") are 3 numbers describing "rotate around x, then around y, then
+around z, in that order" — intuitive, and great for telling a controller
+"tilt 0.1 rad forward". Problem: at pitch = ±90°, the roll axis and the yaw
+axis end up pointing the same direction — you lose the ability to
+independently control one of the three rotations (this is called **gimbal
+lock**). A drone that ever pitches to vertical would break this
+representation. Quaternions are a 4-number alternative with no such
+breaking point.
+
+**The 2D warm-up: rotating with a single complex number.** In 2D, multiplying
+a point `z` (written as a complex number) by `e^{iθ} = cosθ + i·sinθ` rotates
+it by angle `θ` — one multiplication, no matrix needed. *Example:* rotate
+`z=1` (the point `(1,0)`) by `θ=90°`: `e^{i·90°} = cos90°+i·sin90° = 0+i·1
+= i`. `z·i = i`, i.e. the point `(0,1)` — quarter-turn counterclockwise,
+correct. A **quaternion** is the 3D generalization of this same trick (one
+mathematical object, one multiplication rule, rotates a vector directly).
+
+**3D rotations don't commute — order matters.** Rotate 90° about x, then 90°
+about y, and you land somewhere different than doing y-then-x. Any
+representation of 3D rotation has to respect this, including quaternions —
+composing two rotations is *multiplication*, and `q1*q2 ≠ q2*q1` in general.
+
+### 0.2.B Basics
+
+| Representation | Numbers | Pros | Cons |
+|---|---|---|---|
+| Euler angles | 3 | intuitive, good for setpoints | gimbal lock, awkward composition |
+| Rotation matrix | 9 | direct vector rotation | redundant, drifts from orthonormal |
+| Axis–angle / rotation vector | 3 | compact, natural for `ω·dt` | composing is awkward |
+| Unit quaternion | 4 | no singularity, cheap composition | double cover, needs unit norm |
+
+**What the 4 numbers mean.** A quaternion for "rotate by angle `θ` around
+unit axis `n̂`" is built as `q = (n̂·sin(θ/2), cos(θ/2))` — the first 3
+numbers are the rotation axis scaled by `sin(θ/2)`, the 4th is `cos(θ/2)`.
+*Example:* rotate 180° around the z-axis (`n̂=(0,0,1)`, `θ=180°`):
+`sin(90°)=1`, `cos(90°)=0`, so `q = (0,0,1,0)`. Notice `q` and `−q` (here,
+`(0,0,−1,0)`) describe the exact SAME rotation — every rotation has two
+valid quaternions representing it ("double cover"), which is why you can't
+just compare quaternions with `==` to check "are these the same rotation".
+
+**Composing and applying rotations.** Quaternions have their own
+multiplication rule (the "Hamilton product", `⊗`) that composes rotations —
+`q2 ⊗ q1` means "rotate by `q1` first, then by `q2`", same non-commuting
+order rule as above. To actually rotate a vector `v`, you compute
+`v' = q ⊗ (v,0) ⊗ q*` where `q*` is `q`'s conjugate (flip the sign of the
+axis part) — for a *unit* quaternion (length exactly 1), the conjugate is
+also the inverse, the same way rotating backward undoes rotating forward.
+
+**Turning a spin rate into a rotation, one tick at a time.** The drone's
+angular velocity `ω` (body-frame, rad/s per axis) tells you how fast it's
+currently spinning, not its orientation directly. Each physics tick, you need
+to turn "it's spinning at `ω` for `dt` seconds" into "here's the small extra
+rotation that happened" and then apply it. That small rotation is built
+exactly like the construction above, using axis = direction of `ω`
+and angle = `|ω|·dt`: `Δq = exp(ω·dt/2)` (a compact way of writing "build a
+quaternion from this rotation vector"). *Example:* `ω=(0,0,10)` rad/s
+(spinning around z at 10 rad/s) and `dt=1/240` s: rotation this tick is
+`|ω|·dt = 10/240 ≈ 0.0417` rad (about 2.4°) around z — a small step, applied
+240 times a second. Because `ω` is measured in the BODY's own frame, this
+small rotation must be composed **on the right**: `q_new = q_current ⊗ Δq`
+— composing on the left only happens to give the same (wrong-in-general)
+answer when `q_current` is very close to "no rotation", which is why this
+particular bug can hide for a while before showing up as a slowly-wrong
+simulation once the drone has actually turned.
+
+**Why no explicit "renormalize" step is needed here.** In principle,
+repeatedly multiplying quaternions could drift so the result is no longer
+exactly unit-length (floating-point rounding, accumulated over thousands of
+steps) — a broken invariant that would make the "rotate a vector" formula
+above subtly wrong. This project never calls an explicit renormalize because
+the quaternion library it uses (`scipy.spatial.transform.Rotation`)
+guarantees every rotation it returns is already unit-length internally — the
+safety net is built into the library, not missing from this project's code.
+
+**Converting back to angles.** Since the controller (0.3) thinks in
+roll/pitch/yaw, the quaternion is converted to Euler angles every step for
+that purpose. This re-introduces the gimbal-lock risk from 0.2.P in
+principle, but this project's episodes terminate at 65°/80° roll/pitch
+(well before ±90°), so the singularity is never actually reached in
+practice.
+
+**Naming conventions that WILL trip you up if you don't check them.**
+Different libraries write the same 4 numbers in different orders — `(x,y,z,w)`
+in scipy vs `(w,x,y,z)` in Isaac Lab — so copying a quaternion between the two
+without converting silently scrambles it into a different (wrong) rotation.
+Always check which convention a library uses before passing quaternions
+across a library boundary.
+
+### 0.2.C In this project (current)
+- The numpy side stores orientation as a scipy `Rotation` (unit by
+  construction, so no renormalize call is needed). The Isaac side reads
+  `root_quat_w` (wxyz) and converts with `isaaclab.utils.math.euler_xyz_from_quat`
+  inside `base_training_isaac._read_kinematics`, feeding roll/pitch/yaw to the
+  torch PID.
+- Episodes terminate at roll 65° / pitch 80° (`rewards.py`), so the Euler
+  extraction never reaches its singularity in practice.
+- **Detail (original notes):**
+
 A **quaternion** `q = (x, y, z, w)` (scipy/this-project convention) or
 `(w, x, y, z)` (Isaac Lab convention — **the two libraries disagree on
 component order**, a real bug source, see Part 1's frame-convention warning)
@@ -102,6 +389,232 @@ matrix or gimbal-locking Euler angles.
     variables log-prob correction** (see 0.4).
 
 ## 0.3 Classical control: PID
+
+**Ladder: P (prerequisites) → B (basics) → C (this project, current).**
+
+### 0.3.P Prerequisites
+
+**Feedback vs. feedforward, in one sentence each.** Feedforward: compute the
+right input from a MODEL ("I know I need exactly this much thrust to hover")
+— fast, but wrong the moment your model is a little off. Feedback: MEASURE
+what's actually happening and correct the error — robust to a wrong model or
+surprises (wind), but if it corrects too hard or too late it can overshoot
+or oscillate instead of settling. A PID controller is pure feedback.
+
+**The error signal.** `e(t) = target − measured`. Everything below is about
+turning this one number (or vector, here: a 3D position error) into a
+control output.
+
+**Why "second-order" system, and what `ζ`/`ωₙ` mean.** Many physical
+systems, once you write down their equation of motion, take the form
+`ẍ + 2ζωₙẋ + ωₙ²x = ωₙ²·r` (dots mean "derivative": `ẋ`=velocity,
+`ẍ`=acceleration). This is the same equation as a mass on a spring with a
+damper — `ωₙ` (rad/s) is roughly "how fast it wants to oscillate on its
+own", and `ζ` (no units) is "how much damping fights that oscillation":
+`ζ<1` overshoots and rings a bit before settling, `ζ=1` is the fastest
+settle with NO overshoot, `ζ>1` is slow and sluggish. You'll see below that
+a PD-controlled drone axis is EXACTLY this equation, with `ωₙ` and `ζ`
+literally set by the gains you choose.
+
+**Stability, the short version.** A linear system's behavior over time is
+governed by the roots of its "characteristic polynomial" (a small algebra
+step you do on the ODE, shown below). If every root has a negative real
+part, every disturbance dies out over time (stable); if any root has a
+positive real part, some disturbance grows without bound (unstable). For
+`s² + 2ζωₙs + ωₙ² = 0`, the quadratic formula gives roots
+`s = −ζωₙ ± ωₙ√(ζ²−1)` — the real part is `−ζωₙ`, which is negative for any
+positive `ζ` and `ωₙ`. Conclusion used constantly below: **as long as your
+gains are positive, this kind of controller is automatically stable** — the
+only question is how FAST and how SMOOTHLY it settles, not whether it does.
+
+**Settling time and overshoot, as formulas you'll actually use.** For
+`ζ<1`, the error overshoots the target before settling, by a fraction
+`≈ exp(−πζ/√(1−ζ²))` of the initial jump — *example:* `ζ=0.85`:
+`exp(−π·0.85/√(1−0.85²)) = exp(−2.671/0.527) = exp(−5.07) ≈ 0.006`, i.e. about
+0.6% overshoot, barely noticeable. Settling time (time to stay within 2% of
+the target) is roughly `4/(ζωₙ)` for the generic case — this project uses a
+more exact version of this idea below, because 2% of a 250m flight is 5m of
+slack, way looser than what this controller actually needs.
+
+**Actuator saturation and integrator windup.** Every real actuator has a
+limit (a motor can only spin so fast). While a command is stuck at that
+limit, the system is temporarily behaving open-loop (feedback can't push any
+harder) — and if a controller has an **integral** term that keeps
+accumulating error the whole time it's stuck, that integral can grow huge
+("wind up") and cause a big overshoot once the limit is no longer hit. Fixes:
+clamp the integral to a max size (what this project does), stop
+accumulating while saturated, or more advanced schemes.
+
+**Discrete time — the same formulas, just run every tick.** A real
+controller doesn't get a continuous signal, it runs once every `dt` seconds.
+An integral becomes a running sum (`I ← I + e·dt`, add a little bit each
+tick); a derivative becomes a measured rate or a difference between ticks.
+
+### 0.3.B Basics
+
+**The three PID terms, and what each one is FOR.**
+```
+u(t) = Kp·e(t)  +  Ki·∫e(t)dt  +  Kd·(de/dt)
+       ^^^^^^^     ^^^^^^^^^^^     ^^^^^^^^^^
+       P: react    I: remove       D: react to
+       to error    leftover        the RATE the
+       right now   steady offset   error is
+                                   changing at
+```
+- **P alone** pushes toward the target proportional to how wrong you are —
+  simple, but against a constant disturbance (like gravity) it settles with
+  some permanent leftover error, because it needs *some* error to keep
+  producing a nonzero push.
+- **I** fixes exactly that: it accumulates error over time, so even a tiny
+  leftover error eventually accumulates into a big enough push to cancel it.
+  Cost: it reacts slowly and can make the system overshoot/oscillate more.
+- **D** looks at how fast the error is changing (basically, velocity toward
+  or away from the target) and pushes against that — it "sees a crash coming"
+  and brakes early, reducing overshoot. Cost: it reacts to noise as hard as
+  it reacts to real motion, so a noisy sensor makes a D term jittery.
+
+**Derivative on the measurement, not on the error ("derivative kick").** If
+the target ever jumps instantly, `de/dt` spikes to a huge number for one
+tick — a real controller measures the plant's own rate of change instead
+(here: velocity), which for a fixed target is just `d(target−pos)/dt =
+−velocity`, so this project's D term is written as `−Kd·vel` directly —
+mathematically the same thing, but immune to target jumps.
+
+**Why this project uses PD only (`Ki=0`).** An integral term exists to
+cancel a constant disturbance the P term alone can't remove — but gravity
+(the main constant disturbance here) is already cancelled directly: the
+thrust output is a delta ON TOP OF a precomputed hover thrust (0.1.B), not
+learned from scratch. With that disturbance already handled, a plain PD
+loop is enough, and skipping the integral avoids windup entirely.
+
+**Choosing gains: three ways.** (1) Manual tuning or classic
+recipes like Ziegler–Nichols — trial and error, guided by rules of thumb.
+(2) **Pole placement** — write down the system's equation, decide what
+`ζ`/`ωₙ` you WANT, and solve algebraically for the gains that produce them
+(no trial and error at all — this is what this project does, derived
+below). (3) Numerical search (try many gain sets, measure which works best)
+— this repo tried Optuna for this early on; the closed-form approach below
+replaced it because it's exact and instant instead of a search.
+
+**The full derivation used by `tune_pid.py`, step by step.** Start from the
+real physics: for one axis, treating "commanded acceleration" as the
+control input, the plant is a plain double integrator
+`ẍ = u` (acceleration `u` in, position `x` out — literally Newton's second
+law with mass normalized away). The control law is PD on the position error
+`e = target − x`: `u = Kp·e − Kd·ẋ`. Two algebra steps turn this into the
+standard second-order form from 0.3.P:
+
+1. Since the target is fixed, `ė = −ẋ`, so `ẍ = −ë` and `ẋ = −ė`. Substitute
+   into `ẍ = u = Kp·e − Kd·ẋ`:
+   `−ë = Kp·e − Kd·(−ė) = Kp·e + Kd·ė`.
+2. Multiply by `−1` and rearrange:
+   **`ë + Kd·ė + Kp·e = 0`**.
+
+Compare this directly to `ẍ + 2ζωₙẋ + ωₙ²x = 0` (the no-disturbance version
+of 0.3.P's formula) term by term — they're the same equation with `e` in
+place of `x`, so:
+```
+Kd = 2·ζ·ωₙ        Kp = ωₙ²
+```
+This is the whole trick: **pick the `ζ` and `ωₙ` you want, and the gains
+fall straight out — no search.** *Worked example:* want `ζ=0.85`,
+`ωₙ=1.2` rad/s: `Kp = 1.2² = 1.44`, `Kd = 2·0.85·1.2 = 2.04` — closely
+matching this project's actual 10m gains (`kp_pos=1.43`, `kd_pos=2.04`,
+0.3.C shows exactly how `ωₙ=1.2` itself gets chosen for a given distance).
+
+**Turning "how fast do I need this to settle" into a required `ωₙ`.** With
+`ζ` reasonably close to 1, the error's decay is dominated by
+`e(t) ≈ e₀·exp(−ζωₙt)` (the real solution has an extra oscillating factor
+that matters less as `ζ→1`; ignoring it here is what makes this step
+approximate rather than exact — good enough for choosing a gain). Set a
+target: "shrink from `e₀` (the starting distance) down to a tolerance `ε` by
+time `t_s`", i.e. `ε = e₀·exp(−ζωₙt_s)`. Solve for `ωₙ`:
+```
+ε/e₀ = exp(−ζωₙt_s)
+ln(ε/e₀) = −ζωₙt_s
+ωₙ = ln(e₀/ε) / (ζ·t_s)
+```
+(flipped the sign by taking `ln(e₀/ε)` instead of `ln(ε/e₀)`, since
+`e₀>ε` makes that the positive, easier-to-read form). *Example:* `e₀=10`m,
+`ε=0.05`m, `ζ=0.85`, `t_s=5.21`s (0.3.C shows where 5.21 comes from):
+`ωₙ = ln(10/0.05)/(0.85·5.21) = ln(200)/4.43 = 5.298/4.43 ≈ 1.196` rad/s —
+matches the worked example above almost exactly (small rounding). Notice
+`ln(e₀/ε)` (how much decay is needed) grows only slowly as distance grows,
+while a longer flight naturally gets a longer time budget `t_s` too (0.3.C)
+— time budget growing faster than the required decay is *why* longer
+distances end up needing SMALLER `ωₙ` (a gentler, slower loop), which is the
+opposite of the naive guess that "far away needs a stronger push".
+
+**Cascade control: chaining two loops.** This project doesn't control
+tilt-angle-to-torque and position-to-tilt as one combined loop — it chains
+two separate PD loops, the first loop's OUTPUT becoming the second loop's
+TARGET (its "setpoint"). This only works if the inner loop reacts much
+faster than the outer one changes its mind (5× faster for roll/pitch here,
+2× for yaw) — otherwise the inner loop is still chasing yesterday's target
+when the outer loop already moved it again, and the two end up fighting.
+
+**The full quadrotor cascade, step by step:**
+1. **Position PD** (derived above) → desired horizontal acceleration.
+2. Small-angle relation from 0.1.B (`accel ≈ g·tilt`) inverted → desired
+   tilt angle `= accel/g`, clamped to `±max_tilt_rad` (a hardware/safety
+   limit, not a math step).
+3. **Attitude PD** on tilt error → roll/pitch torque. Since real physics is
+   `τ = I·α` (0.1.B) rather than a mass-normalized `ẍ=u`, the SAME
+   derivation above applies but with an extra factor of `I`:
+   `Kp_att = I·ωₙ_att²`, `Kd_att = 2ζ·I·ωₙ_att`.
+4. **Altitude PD** (same math as position, on the vertical axis alone) →
+   thrust delta.
+5. **Yaw PD** (same math again) → yaw torque, independently of the other
+   four steps.
+
+**Saturation is why the gain ladder exists.** Step 2's clamp caps
+commandable horizontal acceleration at `g·max_tilt_rad = 9.81·0.3 ≈ 2.94`
+m/s², no matter how far the target is. If you reused the 3m gains
+(`Kp_pos=1.65`) at 30m, the position loop would initially try to command
+`Kp·e = 1.65·30 = 49.5` m/s² — about **17× the actuator's real ceiling**
+(`49.5/2.94 ≈ 17`), so it just pins at max tilt and coasts, badly mismatched
+to the actual settle-time math above. That's why gains have to shrink with
+distance rather than being one fixed set (0.3.C's gain-ladder table).
+
+### 0.3.C In this project (current)
+- **Two implementations of the same law:** numpy `pid.py` and the batched torch
+  `TorchPIDController` in `torch_pid.py` (per-env gain tensors), diff-tested.
+- **Gain ladder.** `tune_pid.DISTANCES = (3, 10, 20, 30, 50, 100, 150, 250)`
+  (20 and 30 were added on 2026-09-25 for the 3-30 m stage; before that the
+  10 m gains served the whole 10-30 m span through nearest-neighbour lookup).
+  Position gains `(kp_pos, kd_pos)` currently in
+  `app/control/best_pid_gains_per_dist.json`:
+
+  | dist (m) | 3 | 10 | 20 | 30 | 50 | 100 | 250 |
+  |---|---|---|---|---|---|---|---|
+  | `kp_pos` | 1.65 | 1.43 | 0.458 | 0.232 | 0.097 | 0.029 | 0.006 |
+  | `kd_pos` | 2.18 | 2.04 | 1.15 | 0.82 | 0.53 | 0.29 | 0.13 |
+
+- **Worked example (10 m).** `steps_for_dist(10) = max(1800, 750·10/3) = 2500`
+  physics ticks = 10.42 s; settle time = `SETTLE_TIME_FRACTION (0.5) × 10.42 =
+  5.21 s`; `ωₙ = ln(10/0.05) / (0.85·5.21) = 5.298/4.427 = 1.197 rad/s`; so
+  `kp_pos = ωₙ² = 1.43`, `kd_pos = 2·0.85·1.197 = 2.03` — exactly the table.
+  Attitude: `ωₙ_att = 5·1.197 = 5.98`, `kp_att = 0.02·5.98² = 0.716`,
+  `kd_att = 2·0.85·0.02·5.98 = 0.203`. Yaw uses `2×` and `ζ=0.9`.
+- **Design tolerance ≠ scoring tolerance.** The PID is designed to reach
+  `ε = 0.05 m` (`tune_pid.HIT_THRESHOLD`) but the reward counts a hit at
+  `0.25 m` (`rewards.HIT_THRESHOLD`). That is why every successful episode's
+  `final_dist` reads about 0.25 — the episode ends the moment it is within
+  0.25 m, so **0.25 is the floor of `avg_final_dist`**, not an error.
+- **Gain selection.** Nearest key to the episode's start distance
+  (`assign_gains_by_distance`), re-selected on every reset.
+- **Measured performance** on the 3-10 m diagnostic (30 episodes per chunk):
+  success 0.97-0.98, final distance ≈ 0.26 m, hit time ≈ 3.7 s (≈ 220 policy
+  steps at 60 Hz). Gains fall steeply with distance (30 m: `kp_pos` is 6× softer
+  than at 10 m), so long-range episodes are slow by design (the step budget is
+  31 s at 30 m).
+- **Three roles in this repo:** imitation teacher (BC/DAgger labels), reference
+  baseline in every diagnostic (`pid_*` metrics), and — since 2026-09-26 — the
+  **base controller under the residual policy** (`PidResidualEnv`, 0.13): the
+  network now learns only a correction on top of it.
+- **Control rate:** the policy runs at 60 Hz (action held for 4 physics ticks);
+  `compute_action` is called with `dt = 1/240`.
+- **Detail (original notes — formula, anti-windup, frames, pole placement):**
 
 A **PID controller** computes a control signal from an error `e(t) = target
 - current`:
@@ -154,6 +667,203 @@ u(t) = Kp·e(t) + Ki·∫e(t)dt + Kd·(de/dt)
   exactly what `tune_pid.py` does.
 
 ## 0.4 Reinforcement learning: MDP, policy gradients, PPO, GAE
+
+**Ladder: P → B → C.**
+
+### 0.4.P Prerequisites
+
+**The reinforcement-learning setup, in plain words.** An **agent** (here, the
+neural network) sits in some **state** `s` (what it currently observes), picks
+an **action** `a`, and gets back a **reward** `r` (a number saying how good
+that was) plus a new state. One full run from start to done is an **episode**.
+The goal: pick actions that maximize the total reward collected, not just
+the reward on this one step — a small sacrifice now (fly slightly off
+target) can be worth it if it sets up a bigger reward later.
+
+**Expectation, in one line.** `E[X]` just means "the average value of `X`
+if you repeated this random process many times". If you flip a coin and win
+$1 on heads, $0 on tails, `E[winnings] = 0.5·1 + 0.5·0 = 0.5` — the
+long-run average payout, even though no single flip ever actually pays $0.50.
+**Why bigger batches help:** averaging `n` independent noisy samples shrinks
+the error of that average by a factor of `1/√n` — average over 4× more
+rollouts, and your estimate is roughly 2× more reliable (error halves, not
+quarters), which is why more parallel environments give cleaner gradients.
+
+**The Gaussian, and why the policy uses one.** `N(μ,σ²)` is the familiar bell
+curve: most likely value `μ`, spread `σ`. Sampling from it is
+`x = μ + σ·ε` where `ε` is a random number drawn from a STANDARD
+(`μ=0,σ=1`) bell curve — you can generate any Gaussian sample by scaling and
+shifting a standard one. This project's policy network doesn't output one
+fixed action per state; it outputs `(μ,σ)` and SAMPLES an action from
+`N(μ,σ)` — bigger `σ` means more exploration (trying varied actions), smaller
+`σ` means more deterministic (always close to `μ`).
+
+**Gradient descent, the mechanism all of this rides on.** To minimize some
+loss `L(θ)` (`θ` = all the network's weights, one big vector), compute its
+gradient `∇L` (which direction makes `L` go up fastest) and step the
+opposite way: `θ ← θ − lr·∇L` (`lr` = learning rate, how big a step). Neural
+networks are just very large parametrized functions `f(x;θ)`; "training"
+IS repeating this update, over and over, on different batches of data.
+
+**The log-derivative trick — the one algebra step that makes policy gradients
+possible.** We eventually need the gradient of an EXPECTATION (average
+reward over all the random action choices the policy could make), but you
+can't easily differentiate "the average over an infinite number of
+random dice rolls" directly. This one identity fixes that:
+```
+∇p(a)  =  p(a) · ∇log(p(a))          (chain rule on log, rearranged: ∇log(p) = ∇p/p, so ∇p = p·∇log(p))
+```
+Plugging that into an expectation over actions turns "gradient of an
+average" into "average of (something) times (gradient of a log-probability
+you CAN compute)" — this is exactly the shape of every policy-gradient
+formula below, so it's worth recognizing as one specific, derivable algebra
+trick, not a separate law of its own.
+
+### 0.4.B Basics
+
+**Return and discount — "total reward from here on", with distant rewards
+worth a little less.** `G_t = r_t + γ·r_{t+1} + γ²·r_{t+2} + ...` (`γ`, the
+discount, between 0 and 1) — a reward `k` steps in the future counts
+`γᵏ` as much as an immediate one. *Example:* `γ=0.97`, a reward 33 steps
+away: `0.97^33 ≈ 0.37` — already discounted to about a third of its face
+value. The **effective horizon** (roughly "how far ahead the agent actually
+cares about") is `≈ 1/(1−γ)`: at `γ=0.97` that's `1/0.03 ≈ 33` steps
+(≈0.56s at this project's 60Hz control rate) — much shorter than a typical
+3.7s flight, which is exactly why the reward needs dense, every-step
+progress signal (0.7) instead of relying on one distant "you win" bonus that
+this discount would barely see coming.
+
+**Value function: "how good is this state, on average, going forward?"**
+`V(s) = E[G_t | currently in state s]` — the expected return if you start
+from `s` and keep following the current policy. Nobody computes this by
+brute-force averaging every possible future; instead, a second neural
+network (the "critic") learns to PREDICT it, trained the ordinary supervised
+way: regress its output toward observed returns, exactly like fitting any
+other numeric prediction.
+
+**Advantage: "was this particular action better or worse than average from
+here?"** `A(s,a) = Q(s,a) − V(s)`, where `Q(s,a)` is "expected return if you
+take action `a` in state `s`, then follow the policy after". Subtracting the
+state's average value `V(s)` turns "how good was this" into "how much
+BETTER than typical was this specific choice" — a positive-vs-negative
+signal that's much less noisy to learn from than the raw return.
+
+**The policy-gradient theorem — using the trick from 0.4.P.** We want to
+increase the probability of actions that led to good outcomes, and decrease
+it for bad ones. Applying the log-derivative trick to the expected return
+gives:
+```
+∇J(θ) = E[ ∇log π(a|s;θ) · A(s,a) ]
+```
+Read the two halves separately: `∇log π(a|s;θ)` is "which direction in
+weight-space makes THIS action more likely" (pure calculus on the network,
+computable exactly); `A(s,a)` is "was this action actually good" (a single
+number, positive or negative). Multiplying them and averaging over many
+samples: nudge weights toward actions that turned out good, away from ones
+that turned out bad, scaled by HOW good or bad. Using the advantage here
+instead of the raw return `G_t` doesn't change what this converges to (you
+can subtract any state-only baseline without changing the expectation's
+value — the subtracted term integrates to zero over the action
+distribution), it only reduces the noise in the estimate.
+
+**GAE (Generalized Advantage Estimation) — a better way to estimate that
+advantage.** Define the one-step "surprise" `δ_t = r_t + γ·V(s_{t+1}) −
+V(s_t)` — actual reward-plus-next-value, minus what the critic predicted
+BEFORE seeing this step; positive means "better than the critic expected".
+The simplest advantage estimate is just `A_t = δ_t` — cheap, but only looks
+one step ahead, so it's very dependent on the critic being accurate right
+now. GAE instead adds up a whole DECAYING SERIES of future surprises:
+```
+A_t = δ_t + (γλ)·δ_{t+1} + (γλ)²·δ_{t+2} + ...
+```
+`λ∈[0,1]` controls how far ahead you trust: `λ=0` collapses back to the
+one-step version (low variance since it's a short sum, but biased toward
+whatever the critic currently believes); `λ=1` sums the FULL future (no
+bias from the critic at all, but noisier, since it's built from a long chain
+of noisy individual rewards). **Computing that infinite-looking sum
+efficiently** is a small derivation of its own: notice the SAME series,
+shifted one step, reappears starting from `A_{t+1}`:
+```
+A_t = δ_t + (γλ)·[δ_{t+1} + (γλ)·δ_{t+2} + ...] = δ_t + (γλ)·A_{t+1}
+```
+That's it — a clean recursive formula, `A_t = δ_t + γλ·A_{t+1}`, computed
+backward through a rollout starting from the LAST step (where there's no
+`A_{t+1}` yet, so it starts at just `δ_t`) and working toward the first.
+This is why `compute_gae` loops backward through time, not forward.
+
+**Actor-critic, put together.** "Actor" = the policy (picks actions).
+"Critic" = the value function (grades states, used to compute the advantage
+above). They can share a network trunk since both need similar features
+from the same observation (0.10). A critic that's biased (systematically
+wrong) biases the actor's whole training signal; a critic that's merely
+noisy (right on average, wrong per-sample) adds variance but not bias.
+
+**Trust regions and PPO — stopping one bad batch from wrecking the policy.**
+Because you collect a batch of experience with the OLD policy but then
+update it, and possibly reuse that same batch for several gradient steps,
+there's a risk the policy changes enough that the batch no longer reflects
+what it would actually do — the update becomes based on stale data. PPO
+guards against this two ways: (1) it computes the probability RATIO between
+new and old policy for the actions actually taken,
+`r(θ) = π_new(a|s)/π_old(a|s)`, and *clips* it to `[1−ε, 1+ε]` before
+multiplying by the advantage — so one single sample can't yank the policy
+arbitrarily far in one step. (2) if the measured KL divergence (0.9 — a
+formal "how different are these two probability distributions" number)
+between old and new policy exceeds a threshold partway through, it just
+stops updating on that batch early, rather than continuing to trust
+increasingly stale data.
+
+**Advantage normalization, and its hidden cost near a good policy.** Every
+batch's advantages are rescaled to have zero mean and a spread of exactly
+1 (subtract the batch mean, divide by the batch's own spread) — this keeps
+the update's SIZE consistent regardless of the raw reward's scale (a reward
+scaled in the thousands vs. the tens shouldn't need a totally different
+learning rate). The hidden cost: once a policy is ALREADY good, the true
+advantage of any action is close to zero (nothing much left to improve on),
+so what's actually being measured is mostly estimation noise — and
+normalizing rescales that noise back up to full size regardless. Combined
+with an optimizer (Adam, 0.8) that takes similarly-sized steps whether the
+underlying signal is real improvement or pure noise, the weights can
+**random-walk away from a good solution** even with zero true gradient to
+follow — exactly the mechanism behind the training-stage slide seen in runs
+v1-v4 (Part 12).
+
+**Exploration and entropy.** Since actions are sampled from `N(μ,σ)`, `σ`
+directly controls how much exploration happens. Left alone, gradient descent
+tends to shrink `σ` early (a more confident/deterministic policy usually
+scores a little better in the short term) — the **entropy bonus** adds a
+small reward for KEEPING `σ` larger, fighting that premature narrowing so
+the policy keeps trying varied actions long enough to find better ones,
+before that bonus is decayed away later in training (0.8.C) so the policy
+can commit to what it's learned.
+
+**Failure modes worth being able to name:** reward hacking (maximizing the
+reward function in a way that doesn't match the actual intended behavior),
+policy collapse (a sudden, hard-to-recover performance drop), critic lag (the
+value function hasn't caught up to a recently-changed policy yet, so its
+advantage estimates are stale), catastrophic forgetting (fine-tuning erases
+previously-good behavior), high-variance gradients (noisy updates that don't
+reliably point the same direction run to run), and an eval metric that
+differs from the training objective (the policy optimizes REWARD, which may
+not track whatever number you're using to judge "success" — 0.14).
+
+### 0.4.C In this project (current)
+- **Hyperparameters** (from `app/training/best_hparams_isaac.json`, Optuna
+  trial 137 with the changes documented in Part 12): `γ = 0.97` (must equal
+  `rewards.GAMMA`), `λ = 0.9066`, clip `ε = 0.2048`, `target_kl = 0.008642`,
+  10 epochs × 64 minibatches, `vf_coef = 0.2087`, `max_grad_norm = 1.347`,
+  entropy coefficient `0.01 → 0.002`, `lr = 1.451e-4`.
+- **Loop shape.** One *chunk* = `num_steps_per_chunk × num_envs` env-steps
+  (`128 × 16384 = 2,097,152`); one `isaac_ppo_train` call per chunk collects
+  that rollout and calls `ppo_update`, whose minibatch is
+  `2,097,152 / 64 = 32,768` samples.
+- **Advantage normalization** is `train.py:175`
+  (`(A − mean)/(std + 1e-8)`); the KL early-stop is checked once per *epoch*
+  (`train.py:240`), on the epoch's mean approximate KL.
+- **Observed behaviour.** Direct-policy runs early-stopped after epoch 1 on
+  almost every chunk (KL 0.01-0.03 against a 0.0086 target); residual-mode runs
+  had KL 0.002-0.003 and ran all 10 epochs.
+- **Detail (original notes):**
 
 - **MDP (Markov Decision Process)**: state `s`, action `a`, reward `r(s,a)`,
   transition `s' ~ P(·|s,a)`, discount `γ ∈ [0,1)`. The agent's job: learn a
@@ -232,6 +942,129 @@ u(t) = Kp·e(t) + Ki·∫e(t)dt + Kd·(de/dt)
 
 ## 0.5 Imitation learning: behavior cloning & DAgger
 
+**Ladder: P → B → C.**
+
+### 0.5.P Prerequisites
+
+**Supervised regression, the ordinary kind.** You have pairs `(input,
+correct_output)`, and you train a function `f(x;θ)` to output something
+close to `correct_output` when fed `x` — the usual gradient-descent training
+loop from 0.4.P, no reinforcement-learning trial-and-error needed, because
+you're TOLD the right answer directly at every training example.
+
+**Likelihood, and why "negative log-likelihood" is a loss you minimize.** A
+probabilistic model doesn't just predict one number — it predicts a whole
+PROBABILITY DISTRIBUTION over possible outputs (here: `N(μ,σ)`), and
+"likelihood" is how much probability-density that distribution assigns to
+the actually-observed correct answer. A good model should assign HIGH
+probability to what actually happened, so training maximizes likelihood —
+equivalently (since `log` is increasing, and it turns products of
+probabilities across many samples into sums, easier to work with),
+MINIMIZES the negative log of that likelihood (NLL). This is a completely
+general recipe, and 0.5.B applies it to a Gaussian output specifically.
+
+**Expert vs. student.** Here the "expert" is the hand-tuned PID controller
+(0.3) — it already knows a working policy. The "student" is the neural
+network being trained to copy it. Once trained, the student can (in
+principle) run without the PID at all.
+
+**Why "which states you visit" matters.** A policy doesn't just get graded
+in a vacuum — it generates its OWN sequence of states by acting, and only
+gets more experience in states it (or whoever generated the training data)
+actually reaches. If the student ever drifts to a state the expert rarely
+visited, there's no training data telling it what to do there — the seed of
+the problem in 0.5.B.
+
+### 0.5.B Basics
+
+**The plain BC objective.** Regress the expert's action on the state: show
+the network `(state, expert_action)` pairs and train it to predict
+`expert_action` from `state`. If you fix `σ` to some constant and only ever
+train `μ`, the Gaussian NLL from 0.5.P mathematically REDUCES to ordinary
+mean-squared error (`(a*−μ)²`) — a Gaussian NLL with fixed spread is just a
+fancier way of writing MSE. This project instead lets `σ` be LEARNED too,
+which is where the next point comes from.
+
+**Learned-`σ` NLL, derived from scratch, and its collapse.** For one action
+dimension, the Gaussian's negative log-density at the true target `a*` is:
+```
+L = ½·[ ((a*−μ)/σ)²  +  2·ln σ  +  ln(2π) ]
+```
+(this comes directly from writing out `−ln(N(a*; μ,σ))` and simplifying —
+take it as the standard formula for "how surprised is a Gaussian model by
+seeing `a*`"). Training adjusts BOTH `μ` and `σ` to shrink `L`. What does the
+optimal `σ` look like? Take the derivative of `L` with respect to `σ` and set
+it to zero (the standard "find the minimum" move from calculus):
+```
+dL/dσ = −(a*−μ)²/σ³ + 1/σ = 0
+      →  1/σ = (a*−μ)²/σ³
+      →  σ² = (a*−μ)²
+```
+(for a batch of many samples, this generalizes to `σ² = mean((a*−μ)²)` — the
+best-fit variance simply equals however much residual error is actually left
+over). **Now the problem:** the PID "expert" is a deterministic function — same
+state always gives the same action, zero true randomness. If the network's
+`μ` fits it well, the residual `(a*−μ)` shrinks toward 0, and the formula
+above says the LOSS-MINIMIZING `σ` shrinks right along with it, toward 0.
+But look at what happens to `L` itself as `σ→0`: the `2·ln σ` term goes to
+`−∞` — the loss keeps getting BETTER (more negative) the smaller `σ` gets,
+forever, with no floor. Nothing in this loss on its own stops `σ` from
+collapsing all the way to whatever floor the code happens to impose
+elsewhere (here, a `tanh` clamp, 0.10.B) — this exact mechanism is the root
+cause behind the std-collapse bug (5.1a, Part 12).
+
+**Covariate shift — the problem this project's imitation stage exists to
+avoid.** Plain BC only ever sees states the EXPERT visited. Once the trained
+student makes even a small mistake, it can end up in a state the expert
+rarely or never visited — no training signal there, so the student's next
+action there is closer to a guess, which can lead to an even less familiar
+state, and so on. This compounds: a classic result (Ross et al.) shows plain
+BC's total error can grow QUADRATICALLY with how long the episode runs
+(`O(εT²)`, `ε`=per-step error rate, `T`=episode length), versus only
+LINEARLY (`O(εT)`) for the fix below — the difference between errors adding
+up and errors snowballing.
+
+**DAgger (Dataset Aggregation) — the fix.** Instead of only training on the
+expert's own trajectory, run the STUDENT'S current policy, but at every
+state it visits, ask the expert "what would you have done here" and use
+THAT as the label; keep aggregating all rounds of this together and
+retraining. This directly generates corrective training data for exactly
+the states the student's own mistakes lead it into — attacking the
+covariate-shift problem at its source instead of hoping it doesn't happen.
+
+**BC/DAgger as a starting point for RL, not the end goal.** Pretraining a
+policy this way buys immediate competence (a policy that already does
+something reasonable, rather than starting from random weights) — but it
+carries four specific hazards forward into the RL stage: (i) the collapsed
+`σ` derived above; (ii) a critic (0.4.B) that was never trained at all
+during imitation and starts essentially random, needing its own warmup
+period before it can be trusted (0.10); (iii) fine-tuning can erode what was
+learned (0.13); (iv) the student can never exceed what the expert itself
+could do, unless the RL stage that follows actually improves on it.
+
+**Alternatives to plain BC-then-finetune, for context.** Residual learning
+(train the network to output only a small CORRECTION on top of the expert,
+0.13 — this project's actual fix); BC-regularized RL (add a penalty that
+keeps the policy close to the BC solution while still training with RL);
+or KL-to-reference regularization (a softer version of the same idea,
+measured in probability-distribution distance rather than raw action
+distance).
+
+### 0.5.C In this project (current)
+- **Pipeline:** `collect_demo_isaac.py` → `pretrain_bc.py` (Gaussian NLL) →
+  `dagger_isaac.py` → `app/control/pretrained_bc_dagger.pt`.
+- **In training:** the direct-policy path runs an on-policy imitation stage
+  (`_run_imitation_stage_isaac`, 8% of the budget since 2026-09-24) after
+  loading that checkpoint, then **resets `actor_log_std` to 0** (5.1a).
+  Residual mode (0.13) skips the stage entirely and uses the checkpoint only
+  for its trunk features (the actor head is zeroed).
+- **Quality of the copy.** The cloned policy matches the PID almost exactly on
+  success (≈ 0.95-0.98 grade in warmup) and on training reward (`recent_reward`
+  ≈ 62-67 for the clone vs ≈ 68 for the pure PID in the residual run's warmup)
+  — so imitation on 3-10 m is essentially lossless, and there is little left for
+  RL to add there.
+- **Detail (original notes):**
+
 - **Behavior cloning (BC)**: supervised regression — collect
   `(state, expert_action)` pairs from a working controller (here, tuned
   PID), train a network to predict `expert_action` from `state` via MSE or
@@ -270,6 +1103,114 @@ u(t) = Kp·e(t) + Ki·∫e(t)dt + Kd·(de/dt)
   degenerate.
 
 ## 0.6 Physics engines: PhysX / Isaac Sim / Isaac Lab basics
+
+**Ladder: P → B → C.**
+
+### 0.6.P Prerequisites
+
+**The simulation loop, as a repeating recipe.** Every fixed timestep `dt`:
+look at the current state, work out what forces are acting, integrate them
+into a new state (0.1.P), repeat. Everything in this project's physics (both
+the numpy version and the Isaac Lab version) is this same 4-step recipe run
+240 times a second.
+
+**Why GPUs make MANY copies of this fast, but not one copy faster.** A CPU
+has a few cores, each of which can run a DIFFERENT sequence of instructions
+very fast and flexibly. A GPU instead has thousands of small, simple cores
+that all run the SAME instruction at the same time, just on different data
+— like thousands of calculators all doing "multiply these two numbers"
+simultaneously, one pair per calculator. This is a great fit whenever you
+have "the exact same computation, repeated many times over independent
+copies of data" — which is exactly what "simulate 16,384 separate drones,
+all running the identical physics equations" looks like. It does nothing to
+speed up ONE single drone's simulation, though — that's still just one
+sequential chain of steps.
+
+**Tensors and batching — how you actually write "16,384 copies at once".**
+Instead of a Python `for` loop calling the physics function 16,384 times
+(slow — each call has overhead), you stack all 16,384 drones' states into
+one big array (a "tensor") with an extra dimension for "which drone", and
+write the physics math ONCE using array operations that apply to every
+drone simultaneously. `position + velocity·dt` on a `(16384, 3)` array does
+all 16,384 updates in a single instruction.
+
+**Why Python's own overhead matters here.** Every line of plain Python code
+(a loop iteration, reading a value out of a GPU tensor with `.item()`,
+waiting for the GPU to sync up with the CPU) costs somewhere between
+microseconds and milliseconds — tiny on its own, but if it happens once per
+physics tick, 240 times a second, per env, it can easily become the actual
+bottleneck, slower than the GPU math it's wrapped around. This is why "how
+many times does Python code run per second of simulated time" matters as
+much as raw physics speed (0.6.C, decimation).
+
+### 0.6.B Basics
+
+**Rigid-body solver pipeline, one tick.** Integrate forces into a new
+velocity → check for collisions → resolve any contact/joint constraints (not
+much of this here — this project's drone is a single free body, no joints)
+→ integrate the new velocity into a new position. Splitting a tick into
+several smaller "substeps" internally can make this more numerically
+accurate/stable, at the cost of more compute per tick.
+
+**Vectorized RL environments — running many independent episodes side by
+side.** `num_envs` copies of the same environment step together, in
+lockstep (all 16,384 advance one tick, then all 16,384 advance the next
+tick). Each copy tracks its OWN episode progress independently — one env can
+finish its episode (hit the target, or time out) while its neighbors are
+still mid-flight. When an env finishes, it's typically reset immediately
+within the same tick, which is why the OBSERVATION you get back for a
+just-finished env may already belong to its brand-new NEXT episode, not the
+one that just ended — a detail that matters for correctly crediting the
+final reward (0.4.B's truncation/termination bootstrap). Total throughput is
+`num_envs × (ticks per second per env)`.
+
+**Sample-budget arithmetic — the numbers you actually configure a training
+run with.** One "rollout" (batch of collected experience) is
+`num_envs × num_steps` total environment-steps (`num_steps` = how many
+ticks each env contributes before you stop and train on what you've got).
+That rollout gets split into `num_minibatches` pieces for the actual
+gradient updates, and you typically pass over the whole rollout
+`num_epochs` times, so the total number of gradient steps per rollout is
+`num_epochs × num_minibatches`. *Worked example, this project's actual
+numbers:* `num_envs=16384`, `num_steps=128` → rollout =
+`16384 × 128 = 2,097,152` steps; with `num_minibatches=64`, each minibatch
+is `2,097,152/64 = 32,768` samples; with `num_epochs=10`, that's
+`10 × 64 = 640` gradient steps per rollout. **The classic mistake:** some
+constants elsewhere in a project are defined PER-ENV (e.g. "1,000,000 steps
+per environment") while others are GRAND TOTAL across every parallel env —
+treating one as the other is an instant factor-of-`num_envs` error (here,
+possibly 100×+ off), which is why this project's own constants explicitly
+label which kind each one is.
+
+**Where the wall-clock time actually goes.** Roughly three things compete
+for time each tick: the GPU physics itself, any remaining per-tick Python
+code, and (separately) whatever evaluation/diagnostic code runs periodically.
+Amdahl's law, informally: however much of the total time is spent in the
+part that DOESN'T get faster when you add more parallel envs (e.g. a fixed
+per-chunk Python evaluation loop) puts a hard ceiling on how much adding
+more envs can actually help overall.
+
+**The sim-to-sim gap.** Two different simulators of "the same" physical
+system (here: the numpy oracle vs. Isaac Lab/PhysX) rarely behave IDENTICALLY
+— they may use different integration schemes, different effective control
+rates, or handle edge cases (like contacts) differently. A policy trained
+against one can end up subtly specialized to that particular simulator's
+quirks rather than to the true underlying physics, which is why this project
+diff-tests the two against each other (0.1.C, Part 8) rather than assuming
+they automatically agree.
+
+### 0.6.C In this project (current)
+- **Production shape:** `--num_envs 16384 --num-steps-per-chunk 128` →
+  2,097,152 steps per chunk, ~61 chunks for 128 M steps, about 1.6 min per
+  chunk. Chunk *count* matters: every fixed-chunk-count floor
+  (`MIN_WARMUP_CHUNKS = 16`, reset windows, the promotion gate at chunk 40+)
+  silently changes its share of the run if `num_envs` is raised without
+  lowering `num_steps_per_chunk` (Part 12, entry 1).
+- **Per-chunk evaluation is CPU-side numpy** (30 model + 30 PID episodes on
+  the numpy oracle), not Isaac — see the sim-to-sim caveat and the control-rate
+  difference (240 vs 60 Hz) in 0.1.C.
+- **Episode length:** `episode_length_s = MAX_POLICY_STEPS × PHYSICS_DT = 62.5 s`.
+- **Detail (original notes):**
 
 - **Isaac Sim / Kit / PhysX**: NVIDIA's GPU-accelerated physics+rendering
   stack. **PhysX** is the actual rigid-body solver (collision, contact,
@@ -311,6 +1252,133 @@ u(t) = Kp·e(t) + Ki·∫e(t)dt + Kd·(de/dt)
 
 ## 0.7 Potential-based reward shaping
 
+**Ladder: P → B → C.**
+
+### 0.7.P Prerequisites
+
+**Sparse vs. dense rewards.** A "sparse" reward gives feedback only rarely —
+e.g. a big bonus only at the exact moment the drone reaches the target, and
+0 every other step. A "dense" reward gives SOME feedback every single step
+(here: a little credit just for having moved closer since last tick).
+
+**A potential function.** Just a rule that assigns one number to every
+possible state — a "how good is this situation, ignoring how I got here"
+score. This project's potential is `φ(s) = −(distance to target)`: farther
+away scores lower (more negative), closer scores higher, and exactly at the
+target scores 0.
+
+**Telescoping sums — the algebra trick this section's proof rests on.** If
+you have a series of terms that are each "next value minus previous value",
+almost everything cancels when you add them up:
+```
+(a1−a0) + (a2−a1) + (a3−a2) = a3 − a0
+```
+*Why:* `−a1` from the first term cancels `+a1` from the second; `−a2` from
+the second cancels `+a2` from the third — everything in the MIDDLE cancels,
+leaving only the very first and very last terms. This one pattern is the
+entire proof behind the theorem in 0.7.B.
+
+### 0.7.B Basics
+
+**The sparse-reward problem, concretely.** If the ONLY reward is a bonus for
+hitting the target, then early in training (random, untrained actions) the
+drone essentially never reaches it — so almost every rollout returns nothing
+but zeros, giving the learning algorithm no signal at all about which random
+flailing was "closer to working" than which other flailing. Exploration and
+credit assignment (0.4.B) become extremely hard with no partial credit.
+
+**Reward shaping — adding partial credit, and the risk it creates.** The
+obvious fix is to add a bonus for PROGRESS (e.g. "+1 for every meter you got
+closer this step"). The danger: an arbitrarily-chosen bonus can change what
+the OPTIMAL behavior actually is — the agent might learn to farm the bonus
+in a way that doesn't match the real goal (e.g., wiggling back and forth to
+repeatedly collect a badly-designed "moved" reward).
+
+**Potential-based shaping — a specific recipe proven not to have that
+problem.** Ng, Harada & Russell (1999) showed that if your extra shaping
+reward, added on top of the real reward, has this exact form:
+```
+F(s, s') = γ·φ(s') − φ(s)
+```
+(`s`=state before the step, `s'`=state after, `γ`=discount from 0.4.B), then
+the shaping is *provably* transparent to the optimal policy — whatever
+sequence of actions was optimal WITHOUT the shaping term is still exactly
+optimal WITH it. **Here's the actual proof**, which is just the telescoping
+trick from 0.7.P applied to the full discounted sum of shaping rewards over
+an episode `s_0, s_1, ..., s_T`:
+```
+Σ_{t=0}^{T-1} γᵗ·F(s_t,s_{t+1})
+  = Σ γᵗ·(γ·φ(s_{t+1}) − φ(s_t))
+  = Σ γ^{t+1}·φ(s_{t+1})  −  Σ γᵗ·φ(s_t)
+  = [γφ(s_1) + γ²φ(s_2) + ... + γᵀφ(s_T)]  −  [φ(s_0) + γφ(s_1) + ... + γ^{T-1}φ(s_{T-1})]
+  = γᵀ·φ(s_T) − φ(s_0)                (every middle term appears once with + and once with −, and cancels)
+```
+The result, `γᵀφ(s_T) − φ(s_0)`, depends ONLY on the very first and very
+last state — never on which path of actions got you from one to the other.
+*Worked numeric check:* `T=2`, `γ=0.9`, states with `φ(s_0)=−10`,
+`φ(s_1)=−6`, `φ(s_2)=−2` (getting closer each step): shaping rewards are
+`F_0 = 0.9·(−6)−(−10) = 4.6` and `F_1 = 0.9·(−2)−(−6) = 4.2`. Discounted sum:
+`F_0 + γ·F_1 = 4.6 + 0.9·4.2 = 4.6+3.78 = 8.38`. Formula's shortcut:
+`γ²φ(s_2)−φ(s_0) = 0.81·(−2) − (−10) = −1.62+10 = 8.38` — matches, confirming
+the whole messy middle really did cancel.
+
+**This project deliberately breaks the theorem, twice — on purpose, not by
+accident.** (1) It uses a PLAIN difference `φ(s')−φ(s)` (no `γ` multiplying
+the first term) instead of the exact `γφ(s')−φ(s)` the theorem requires —
+because with PPO's own `γ<1` in there, standing PERFECTLY STILL at a
+non-target state (so `φ(s')=φ(s)`) would still yield a reward of
+`(γ−1)·φ(s)`, which is POSITIVE (since `φ` is negative and `γ−1` is
+negative, their product is positive) — a free reward for doing nothing,
+which the exact formula would reward every single step forever. Losing the
+strict "provably optimal-policy-invariant" guarantee is judged worth it to
+remove that standing-still exploit. (2) It normalizes `φ` by that episode's
+OWN starting distance (`φ(s) = −distance/start_dist`), so a 3m task and a
+10m task produce comparably-sized shaping signals — but this means `φ` is no
+longer a single, fixed function shared identically across every episode in
+the theorem's strict sense (it still IS one fixed function within any single
+episode, since `start_dist` doesn't change mid-episode — just not literally
+identical across different episodes' distributions).
+
+**Non-potential reward terms, i.e. the rest of the reward function.** Not
+everything has to be (or should be) potential-based — a one-time bonus for
+reaching a milestone, a penalty for going out of bounds, a small per-step
+time penalty: these are deliberate INCENTIVES layered on top, not attempts
+to preserve the theorem's guarantee.
+
+**Reward hacking / Goodhart's law.** Any reward function you write down is a
+PROXY for what you actually want. If maximizing the proxy ever diverges from
+achieving the real goal, a sufficiently good optimizer will find and exploit
+that gap — worth actively watching for whenever training behavior looks
+"technically correct but clearly not what was intended".
+
+**Reward scale interacts with everything else.** How big the reward numbers
+are affects the critic's value-loss scale (bigger rewards → bigger squared
+errors to regress, 0.4.B), how sensitive training is to the learning rate,
+and even how far ahead the effective discount horizon (0.4.B) reaches in
+practice — reward magnitude isn't a cosmetic choice.
+
+**The reward is not the same thing as whatever number you use to judge
+success.** PPO optimizes the training reward, full stop — it has no idea a
+separate "grade" metric even exists. If that grade doesn't track the reward
+closely, a policy can genuinely improve its reward while looking flat or
+worse on the grade (0.14) — always check whether the two actually agree
+before trusting either one alone.
+
+### 0.7.C In this project (current)
+- **Terms** (`rewards.py`): hit reward `HIT_REWARD = 50` at
+  `HIT_THRESHOLD = 0.25 m`; milestone bonuses `(10, 15, 20)` at fractions
+  `(0.25, 0.5, 0.75)` (their total plus the hit is `APPROACH_MILESTONE_BUDGET
+  = 96.72`, the max reward excluding time pressure, used to scale the per-step
+  time penalty); out-of-bounds `−1.5` (radius `OOB_RADIUS`), attitude `−1.0`;
+  zone-exit penalties `−1.0` / `−2.0` at radii 1.0 / 0.5 m; a stability penalty
+  `−0.1·(|vel|+|roll|+|pitch|)` inside the outer zone; `GAMMA = 0.97`.
+- **A finished successful episode returns roughly 65-90 reward** (the logged
+  `recent_reward`, a 10-episode window, is noisy — read 5+ chunk averages).
+- **The grade is not the reward.** `grade = success − 0.3·error_ratio −
+  0.1·grad_ratio` (`w_time = 0`), so speed is rewarded by the training reward
+  but ignored by the grade (0.14).
+- **Detail (original notes):**
+
 A shaping term `F(s,s') = γ·φ(s') - φ(s)` added to a reward is
 **policy-invariant** (Ng, Harada & Russell 1999) — the optimal policy under
 the shaped reward is provably identical to the optimal policy under the
@@ -333,6 +1401,841 @@ removing a standing-still exploit.
   episodes — the invariance guarantee still holds WITHIN one episode
   (`start_dist` is fixed once sampled), just not as a single global `φ`
   shared across the whole training distribution.
+
+## 0.8 Optimization: SGD, Adam/AdamW, learning-rate schedules, clipping, batch size
+
+**Ladder: P → B → C.**
+
+### 0.8.P Prerequisites
+
+**The loss as a landscape you're trying to walk downhill on.** Picture the
+loss `L(θ)` as a hilly terrain, where `θ` (all the network's weights) is
+your current position and `L` is your altitude. The gradient `∇L` points in
+the UPHILL direction, so `−∇L` points downhill — that's the direction every
+training step moves in. Real networks have huge, bumpy landscapes (many
+valleys, flat plateaus, saddle points) — training only ever finds A good
+valley, never provably THE best one.
+
+**Why a minibatch's gradient is noisy.** You compute the gradient using only
+a SAMPLE of data (a batch), not the entire dataset/all possible experience —
+so it's an estimate, not the exact true gradient, and (0.4.P) that
+estimate's error shrinks like `1/√batch_size` as the batch gets bigger.
+
+**Exponential moving average (EMA) — "a running average that forgets old
+data gradually".** `m ← β·m + (1−β)·x` (`β` close to 1, e.g. 0.9) mixes in
+a little of the newest value `x` each step while keeping most of the old
+running average `m`. This behaves like an average over roughly the last
+`1/(1−β)` samples — *example:* `β=0.9`: `1/(1−0.9)=10`, so it's roughly
+tracking the last 10 values; `β=0.999` tracks roughly the last 1000.
+
+### 0.8.B Basics
+
+**Plain gradient descent (SGD).** `θ ← θ − lr·g` (`g`=this step's gradient,
+`lr`=learning rate, a small constant you choose). The step size is directly
+PROPORTIONAL to the gradient — a big gradient gives a big step, a tiny
+(possibly mostly-noise) gradient gives a tiny step. **Momentum** is one fix
+for how noisy this can get: instead of stepping by the raw gradient, keep an
+EMA of past gradients and step by THAT — noise that points different
+directions from step to step partially cancels out in the average, while a
+consistent signal accumulates.
+
+**Adam — momentum on both the gradient AND its typical size.** Adam keeps
+TWO running averages: `m` (an EMA of the gradient `g` itself, `β₁=0.9`) and
+`v` (an EMA of `g²`, the gradient SQUARED, `β₂=0.999` — this tracks roughly
+how big the gradient typically is, ignoring its sign). The update (after a
+small correction for `m`/`v` starting at zero, "bias correction", omitted
+here for brevity) is:
+```
+θ ← θ − lr · m/√v
+```
+Two consequences that matter directly for this project:
+1. **The step size is roughly `lr`, no matter how small the true gradient
+   is.** Since you're dividing the gradient's running average `m` by an
+   estimate of its own typical SIZE `√v`, a consistently-tiny-but-nonzero
+   gradient still produces a step of roughly size `lr` (the "how big" cancels
+   out on both top and bottom) — unlike plain SGD, where a tiny gradient
+   automatically means a tiny step.
+2. **Pure noise still produces movement.** If the true gradient is exactly
+   0 (an optimum) and all you're measuring is symmetric random noise, `m`
+   and `v` still settle to characteristic nonzero values, and it works out
+   that `|m|/√v ≈ √((1−β₁)/(1+β₁)) = √(0.1/1.9) ≈ 0.23` — i.e. Adam still
+   takes steps of around a QUARTER of `lr`, in a random direction, every
+   single update, purely from noise. Repeated many times, this is a random
+   walk AWAY from the optimum, not a settling-down — the mechanism directly
+   behind the training-stage slide observed in this project (0.4.B, 0.13).
+
+**AdamW — fixing an interaction with weight decay.** "Weight decay"
+(shrinking weights slightly toward 0 every step, to discourage overly large
+weights) is normally added directly into the loss as an extra penalty term.
+But that penalty then gets fed through Adam's own `m`/`v` normalization
+along with everything else, distorting how much decay actually happens.
+AdamW instead applies the decay as its own SEPARATE step,
+`θ ← θ − lr·wd·θ`, outside Adam's normalization — decoupled, hence the name.
+
+**Learning-rate schedules — changing `lr` over the course of training.**
+Common patterns: warmup (start `lr` low, ramp it up over the first few
+steps, to avoid a big destabilizing jump before the network has settled at
+all), step decay (drop `lr` by a fixed factor at set points), and **cosine
+decay**, used here:
+```
+lr = lr_min + ½·(lr_max − lr_min)·(1 + cos(π·p))
+```
+`p∈[0,1]` is "how far through training you are" (0=start, 1=end). *Worked
+example:* `lr_max=1.451e-4`, `lr_min_ratio=0.1621` (so `lr_min =
+0.1621·1.451e-4 ≈ 2.35e-5`), at `p=0.5` (halfway):
+`cos(π·0.5)=cos(90°)=0`, so `lr = 2.35e-5 + ½·(1.451e-4−2.35e-5)·(1+0) =
+2.35e-5 + 6.14e-5 ≈ 8.5e-5` — roughly the midpoint between max and min, as
+you'd expect halfway through a smooth decay. **A subtlety worth knowing:**
+`cos` is a PERIODIC function — if you ever feed `p>1` into this formula
+without clamping it first, the schedule doesn't just keep decreasing, it
+starts climbing back up as `cos` cycles around again. Any code using this
+formula needs to clamp `p` to `[0,1]` itself; the formula won't do it for you.
+
+**Gradient clipping — capping how big any single step can be.** Compute the
+gradient's overall size (its "norm", `‖g‖` — think Pythagorean-theorem
+length across all its numbers combined), and if it exceeds some limit `c`,
+scale the WHOLE gradient down by `c/‖g‖` so its new size is exactly `c`
+(direction unchanged, just shorter). This caps rare huge spikes from
+blowing up training. Combined with Adam's own normalization (above), clipping
+mostly changes how different parameters' updates are weighted RELATIVE to
+each other during a spike, more than it changes the overall step size, since
+Adam was already roughly normalizing step size to `lr` regardless.
+
+**Batch size and learning rate — why "bigger batch, bigger lr" doesn't
+automatically apply here.** In ordinary supervised learning, common
+heuristics say to scale `lr` up (roughly linearly, or by `√batch_size`) when
+you increase the batch size, since a bigger batch's gradient is less noisy
+(0.8.P) and can support a bigger step. In THIS kind of RL training, the
+actual limiting factor is different: it's how far the policy's probability
+distribution is allowed to drift per update (measured by KL divergence,
+0.9), not gradient noise directly. A bigger batch gives a MORE COHERENT
+gradient (same underlying reasoning as 0.8.P: less noise) — and a more
+coherent gradient at the SAME `lr` pushes the policy further in a consistent
+direction, not less — so the usual "bigger batch → bigger lr is safe"
+heuristic can actively point the wrong way here (0.13).
+
+### 0.8.C In this project (current)
+- **Optimizer:** `AdamW(lr = 1.451e-4, weight_decay = 3.828e-6)`. At that
+  weight decay the decay term is ~5e-10 of a weight per step — negligible.
+- **Schedule** (`base_training_isaac.scheduled_lr`): flat `1.451e-4` through
+  critic warmup (the critic was still improving at chunk 16), then a cosine
+  over the warmup+PPO span down to a floor of `0.1621×`, times a 3-chunk ramp
+  (`1/3, 2/3, 1`) after each unfreeze (`UNFREEZE_LR_RAMP_CHUNKS`). Realized
+  values in the residual run: 4.2e-5 at the first training chunk → 1.2e-4
+  → 4.5e-5 at chunk 44.
+- **Clipping:** `max_grad_norm = 1.347`; pre-clip `grad_norm` averaged 8.0 in
+  the residual run (up to 18), so clipping was active every chunk.
+- **Steps per chunk:** direct-policy runs early-stopped after epoch 1 → 64
+  Adam steps per chunk; residual runs ran all 10 epochs → 640.
+- **Batch:** production minibatch 32,768 vs the Optuna search's 1,024 (32×).
+- **Evidence on lr** (Optuna, 100 trials, minibatch 1,024; `delta` =
+  post-unfreeze mean grade minus the trial's own baseline):
+
+  | lr bucket | n | mean delta |
+  |---|---|---|
+  | < 1e-5 | 28 | −0.37 |
+  | 1e-5 … 1e-4 | 59 | −0.26 |
+  | 1e-4 … 1e-3 | 8 | −0.23 |
+  | ≥ 1e-3 | 5 | ≈ −0.99 (collapsed) |
+
+  Inside the working band, lower lr did *worse* (Spearman lr-vs-delta +0.55;
+  likely because critic warmup is lr-limited); above 1e-3 everything
+  collapsed. Hence trial 137's `2.9e-4` was halved to `1.45e-4`, **not**
+  scaled up by the batch/step ratios (which would have put it near 1e-2).
+
+## 0.9 Probability and statistics for training and evaluation
+
+**Ladder: P → B → C.**
+
+### 0.9.P Prerequisites
+
+**Random variable, mean, variance.** A random variable is just "a number
+that comes out a bit differently each time you measure it" (a die roll, a
+hit-or-miss episode outcome). Its **mean** (`E[X]`, 0.4.P) is the long-run
+average; its **variance** measures how spread out the results are:
+`Var(X) = E[(X−mean)²]` — average squared distance from the mean. A useful,
+easy-to-derive fact used below: for a constant `c`, `Var(c·X) = c²·Var(X)`
+(scaling the variable by `c` scales its SPREAD-SQUARED by `c²`, since every
+`(X−mean)` term inside the square also gets scaled by `c`).
+
+**Independence, and why variances of independent things just ADD.** Two
+random variables are independent if knowing one tells you nothing about the
+other (two separate coin flips). For independent `X` and `Y`,
+`Var(X+Y) = Var(X)+Var(Y)` — no cross-terms to worry about, unlike with
+means of correlated things. This one fact is the entire engine behind the
+standard-error derivation below.
+
+**The binomial distribution.** `n` independent yes/no trials, each with
+success probability `p` (like `n` episodes, each either a "hit" or not).
+Each single trial, treated as a 0/1 number, has `Var = p(1−p)` — you don't
+need to derive this one, just recognize it (it peaks at `p=0.5`, where
+outcomes are most unpredictable, and shrinks to 0 as `p→0` or `p→1`, where
+the outcome is nearly certain either way).
+
+**Logarithms, briefly.** `ln(ab) = ln(a) + ln(b)` (turns multiplication into
+addition — this is exactly why "negative log-likelihood", 0.5.P, turns a
+PRODUCT of per-sample probabilities into a SUM). `ln` of a number close to 0
+is a large NEGATIVE number (`ln(0.01) ≈ −4.6`), which is why a model that's
+very rarely surprised (assigns high probability to what happens) achieves a
+loss close to 0, while one that's frequently very surprised (assigns tiny
+probability to what happens) can have a loss growing arbitrarily large.
+
+### 0.9.B Basics
+
+**Binomial noise in an evaluation — derived, not just quoted.** Say you run
+`n` episodes, each a Bernoulli trial (hit=1, miss=0) with true success rate
+`p`. Your MEASURED hit rate is `p̂ = (1/n)·(sum of the n outcomes)`. Using
+the two facts from 0.9.P: the sum of `n` independent trials has variance
+`n·p(1−p)` (variances add); dividing by `n` to get the average scales
+variance by `(1/n)² = 1/n²` (the scaling-by-constant rule), so
+`Var(p̂) = n·p(1−p)/n² = p(1−p)/n`. Taking the square root (variance → the
+more interpretable "typical spread" number, called standard error):
+```
+standard error(p̂) = √(p(1−p)/n)
+```
+*Worked examples:* `n=5, p=0.8`: `√(0.8·0.2/5) = √0.032 ≈ 0.179` — huge; on
+only 5 episodes, one single flipped outcome moves your measured rate by
+`1/5=0.2`, comparable to the whole noise band. `n=30, p=0.9`:
+`√(0.9·0.1/30) = √0.003 ≈ 0.055` — much tighter. Worst case is always
+`p=0.5` (variance `p(1−p)` peaks there): at `n=30`, `√(0.25/30) ≈ 0.091`.
+**The practical rule this justifies:** if two measured hit-rates differ by
+less than roughly this standard error, you cannot conclude one is really
+better — the gap could easily be pure sampling luck.
+
+**Averaging shrinks noise, but only removes NOISE, not real drift.** The
+mean of `k` independent, equally-noisy measurements has standard error
+`1/√k` times a single measurement's — same reasoning as above, generalized.
+But this only applies to measurements that are actually independent samples
+of the SAME underlying quantity; if the underlying quantity is itself
+changing over time (a policy genuinely getting better or worse), averaging
+those changing values together doesn't "clean up noise", it blurs together
+a real trend with whatever noise is also present. To measure pure noise, you
+need a period where the underlying thing you're measuring truly isn't
+changing (e.g. a frozen policy).
+
+**Entropy of a Gaussian — what it means, and the formula (stated, not fully
+derived — the derivation needs an integral beyond this section's scope).**
+Entropy measures "how spread out / unpredictable" a distribution is. For a
+1-D Gaussian `N(μ,σ)`, working through its definition gives:
+```
+H = ½·ln(2π·e·σ²) = ln(σ) + ½·ln(2πe) ≈ ln(σ) + 1.419      (in "nats", the natural-log unit of information)
+```
+Notice `μ` doesn't appear anywhere — entropy only depends on `σ` (how spread
+the bell curve is), never on WHERE it's centered, which makes sense: shifting
+a bell curve left or right doesn't change how "spread out" it is. *Numeric
+check:* `σ=0.0837` gives four independent dimensions each contributing
+`ln(0.0837)+1.419 ≈ −2.481+1.419 = −1.062`; four dimensions add up (entropy
+of independent things just adds, same logic as variance):
+`4·(−1.062) = −4.245`. **A frozen `σ` therefore mathematically GUARANTEES a
+frozen entropy** — if you ever see entropy dead flat over many training
+steps, `σ` itself must be dead flat too, whatever else is changing.
+
+**KL divergence between two Gaussians — derived.** KL divergence measures
+"how different is distribution `Q` from distribution `P`" (used by PPO's
+trust-region check, 0.4.B). For two Gaussians with the SAME `σ` but
+different means `μ1` (under `P`) and `μ2` (under `Q`), the general
+definition `KL(P‖Q) = E_P[ln(p(x)/q(x))]` simplifies with pure algebra:
+```
+ln(p(x)/q(x)) = −(x−μ1)²/(2σ²) − (−(x−μ2)²/(2σ²)) = [(x−μ2)² − (x−μ1)²] / (2σ²)
+```
+Expand both squares: `(x−μ2)²−(x−μ1)² = 2x(μ1−μ2) + (μ2²−μ1²)`. Now take the
+expectation under `P` (mean `μ1`), using only the fact that `E_P[x]=μ1` by
+definition of what "mean" means:
+```
+KL(P‖Q) = [2μ1(μ1−μ2) + (μ2²−μ1²)] / (2σ²)
+        = [μ1² − 2μ1μ2 + μ2²] / (2σ²)          (regroup the terms)
+        = (μ1−μ2)² / (2σ²)
+```
+So, writing `Δμ = μ1−μ2`: **`KL = Δμ²/(2σ²)`.** Notice `σ` is in the
+DENOMINATOR — a SMALLER `σ` makes the SAME mean shift produce a BIGGER KL.
+*Worked example:* `σ=0.0707`, `Δμ=0.02`: `KL = 0.02²/(2·0.0707²) =
+0.0004/0.01 = 0.04` — already about 4.7× over a `target_kl=0.0086` trust-
+region limit, from a genuinely tiny mean shift. This is exactly why small
+exploration noise makes PPO's KL check hypersensitive: the same actual
+change in behavior registers as a much bigger "distance moved" when `σ` is
+small.
+
+**Change of variables (used by the tanh-squash log-prob correction, 0.4).**
+When you transform a random variable through some function (`a=g(z)`), its
+probability DENSITY doesn't just carry over unchanged — it picks up a
+correction factor `|dg/dz|⁻¹` (how much the transformation stretches or
+compresses space at that point). Skipping this correction silently uses the
+wrong density wherever `g` isn't perfectly evenly-stretching.
+
+**Rank correlation (Spearman) — correlation that only cares about ORDER.**
+Instead of correlating the raw numbers, first replace every value with its
+RANK (1st smallest, 2nd smallest, ...), then correlate those ranks. This
+makes it robust to any relationship that's consistently increasing or
+decreasing but not necessarily a straight line. On noisy real-world data with
+around 100 points, a value with `|ρ|<0.2` is weak enough to be
+indistinguishable from noise — don't read much into it.
+
+**Correlation is not causation — and time is the classic trap.** If two
+things both steadily trend in the same direction over time (e.g. both
+increase as training progresses), they'll show a strong correlation with
+each other even if NEITHER one is causing the other — both are just riding
+the same underlying trend (here: elapsed training time). *Example from this
+project:* `value_loss` (falling as the critic learns) correlated with grade
+at `ρ = +0.67/+0.84/+0.92` across three runs — tempting to read as "a better
+critic causes a better grade", but both are simply trending together over
+the SAME training run, which isn't proof of either causing the other.
+
+**Selection bias, a.k.a. "winner's curse".** If you run many noisy trials
+and pick the single best-scoring one, that measured score is inflated by
+BOTH genuine quality AND simple luck — the trial that happened to get lucky
+on top of being decent will usually beat one that was slightly better but
+had average luck. The "winner's" TRUE quality is usually a bit lower than
+its measured score suggested.
+
+### 0.9.C In this project (current)
+- `N_DIAGNOSTIC_EPISODES = 30` (raised from 10 on 2026-09-24 because 10 was
+  noisy enough to false-trigger resets); the Optuna objective used **5**, so
+  its grades were quantized in steps of 0.2 (Part 12, entry 6).
+- **Measured eval noise:** the pooled spread of grade over frozen-actor chunks
+  (same policy every chunk) is ≈ 0.06 per chunk, so means of 12 chunks resolve
+  differences of only ≈ 0.04. `analyze_optuna_isaac.py` prints this number and
+  counts how many trials are within it of the best (10 of 100).
+- **Check on the entropy formula:** at `σ = 0.0837` four dimensions give
+  `4 × (1.419 + ln 0.0837) = −4.245`, and the logged `entropy_loss`
+  (`−entropy`) is `+4.244`. ✔
+- **Grade noise budget:** a 30-episode grade moves by one episode = 0.033 of
+  success — read trends over 5+ chunks.
+
+## 0.10 Neural-network design for actor-critic
+
+**Ladder: P → B → C.**
+
+### 0.10.P Prerequisites
+
+**A linear layer, spelled out.** `y = W·x + b` — `x` is the input vector,
+`W` a matrix of learnable weights, `b` a learnable offset vector, `y` the
+output. This is nothing more than "a weighted sum of the inputs, plus an
+offset", computed for every output number at once via matrix multiplication.
+
+**Why you need a nonlinearity between layers.** Stacking two linear layers
+back to back, with NOTHING in between, is mathematically still just ONE
+linear layer (`W2·(W1·x+b1)+b2` is itself of the form `W'x+b'`) — no matter
+how many you stack, you'd never get anything more expressive than a single
+linear function. Inserting a nonlinear function (`tanh`, `ReLU`) between
+layers is what actually lets a deep stack represent CURVED, non-linear
+relationships.
+
+**Backpropagation, in one sentence.** It's just the chain rule from
+calculus, applied layer by layer backward through the network, to compute
+how the FINAL loss depends on every single weight — however deep the
+network, this is one mechanical, repeatable algebra procedure, not a
+different technique per layer.
+
+**Universal approximation, informally.** A wide-enough network with one
+hidden layer can, in principle, approximate any reasonably smooth function
+arbitrarily well. In practice, depth (more layers) and width (bigger layers)
+trade off — more capacity to represent complex functions, at the cost of
+being harder to train.
+
+### 0.10.B Basics
+
+**The MLP trunk.** A stack of Linear+nonlinearity layers that turns the raw
+observation (a 23-number vector describing the drone's state) into
+"features" — a transformed representation the later heads (below) actually
+use to make decisions.
+
+**Deriving `tanh`'s derivative, and why saturation matters.**
+`tanh(x) = (eˣ−e⁻ˣ)/(eˣ+e⁻ˣ)`; its derivative works out (a standard calculus
+result) to `tanh'(x) = 1 − tanh(x)²`. Plugging in a few values shows the
+shape: `tanh'(0)=1` (steepest, most sensitive to change), `tanh'(2)≈0.071`,
+`tanh'(3)≈0.0099`, `tanh'(5)≈1.8e-4` — the derivative collapses toward 0 as
+`|x|` grows ("saturation"). **Why this matters for training:** a parameter's
+gradient gets MULTIPLIED by this derivative on its way back through the
+`tanh` (chain rule, 0.10.P) — so a parameter sitting several units deep in
+the flat tail has its incoming gradient shrunk by that same tiny factor,
+making it move extremely slowly. Combine this with Adam's behavior (0.8.B:
+its step size is roughly `lr` regardless of how small the underlying
+gradient is, so a smaller gradient just means MORE steps needed, not zero
+movement) — escaping a deep tail can take tens to hundreds of training
+chunks with a perfectly consistent gradient direction, and considerably
+longer with a NOISY gradient direction (which is the realistic case). Worse:
+whatever quantity is computed FROM the saturated parameter (here, the policy's
+`σ`, next paragraph) is itself multiplied by that same near-zero derivative,
+so it can look completely frozen in the logs even while Adam is technically
+still nudging the underlying raw parameter. This exact chain is the
+mechanism behind the `actor_log_std` collapse (0.5.B, 5.1a).
+
+**How this project's policy `σ` is actually computed.** Rather than have
+the network directly output a std value (which would need to be forced
+positive and bounded some other way), it keeps one learnable raw number per
+action dimension and squashes it:
+```
+log σ = log_std_min + ½·(log_std_max − log_std_min)·(tanh(raw) + 1)
+```
+Since `tanh(raw)` is always between −1 and +1, `(tanh(raw)+1)` is always
+between 0 and 2, and the whole expression is always between `log_std_min`
+and `log_std_max` — the squash guarantees `σ` stays in a safe, bounded range
+no matter what value the raw parameter takes, including deep in a saturated
+tail. *Worked example:* `raw=0` (right in `tanh`'s most sensitive region):
+`tanh(0)=0`, so `log σ = log_std_min + ½·(log_std_max−log_std_min)` — exactly
+the MIDPOINT of the allowed range. With this project's `[−3.0,−2.3]`:
+midpoint `= (−3.0+−2.3)/2 = −2.65`, giving `σ = e^{−2.65} ≈ 0.0707` — matching
+the observed reset value exactly, and landing in `tanh`'s live, fast-moving
+middle rather than a saturated tail.
+
+**Sharing one trunk between the actor and critic — a trade-off, not a free
+lunch.** Using the SAME trunk features for both the action-choosing head
+and the value-predicting head saves parameters and lets both benefit from
+whatever useful features either one discovers. The cost: gradients from
+BOTH heads flow back into that same shared trunk and reshape it — a critic
+that's learning aggressively (often a much bigger raw loss than the actor's)
+can push the shared features in directions that help ITS job at some cost to
+the actor's. Using fully separate networks, or having the critic read the
+trunk's output through a `.detach()` (a command that says "use this value,
+but don't let gradients flow backward through it") removes that
+interference, at the cost of a weaker critic (it no longer benefits from
+whatever the actor's gradient would have taught the shared features).
+
+**"Freezing" a parameter, precisely.** Setting `requires_grad_(False)` on a
+parameter tells the framework "don't bother computing a gradient for this
+one" — the optimizer, seeing no gradient (`.grad is None`) for it, simply
+skips updating it that step. Important edge case: if you freeze
+EVERY SINGLE parameter in the network, there's nothing left with a gradient
+anywhere in the whole computation, so calling backward() on the loss
+actually errors out (there's no path for gradients to flow through at all) —
+which is why a genuinely "no updates happen at all, not even to the critic"
+period needs a different mechanism (`skip_update`: just don't call the
+update function at all that chunk) rather than freezing every parameter.
+
+**Why initialization is a real design choice, not an afterthought.**
+Starting a layer's weights at exactly 0 (rather than the network's usual
+small-random initialization) makes that layer's OUTPUT exactly 0 regardless
+of its input — a deliberate "start as a no-op, let training build up from
+there" choice, used directly by this project's residual-policy mode (0.13):
+zeroing the action-output head means the policy starts as EXACTLY the
+baseline controller, with zero risk of an untrained random output making
+things immediately worse.
+
+**Checkpoints are just named tensors.** Saving a model's weights produces a
+"state dict" — essentially a lookup table from layer-name strings to weight
+tensors. Loading it back into a DIFFERENT but related architecture (e.g. one
+with a dropout layer inserted, shifting every later layer's internal index)
+requires matching keys up carefully by their actual role, not blindly by
+position — mismatched key names silently load garbage or nothing at all
+into the wrong layers.
+
+### 0.10.C In this project (current)
+- **Architecture** (`train.ActorCritic`): observation 23-d → 4 × `Linear(64)`
+  with `Tanh` between the first three → ReLU → heads `actor_mean`
+  (64→4), `critic_head` (64→1), plus `actor_log_std` (4 free numbers).
+  Parameter count = `1,536 + 3·4,160 + 260 + 65 + 4 = 14,345`.
+- **Std parametrization values:** `log_std_min = −3.0` (hard-coded floor,
+  `σ = 0.0498`), `log_std_max = −2.3` (tuned; `σ = 0.1003`); raw 0 sits at the
+  midpoint `σ = 0.0707`.
+- **`detach_critic`** (flag, default off): `critic_head(x.detach())`.
+- **Freeze phases:** run start (`skip_update` for 3 chunks), critic warmup (16
+  chunks: `shared`, `actor_mean`, `actor_log_std` frozen), post-reset warmup (2
+  chunks).
+- **Residual mode** zero-initializes `actor_mean` after loading the
+  checkpoint; `--residual-resume` keeps a previously learned head.
+
+## 0.11 Curriculum learning, staging and promotion gates
+
+**Ladder: P → B → C.**
+
+### 0.11.P Prerequisites
+
+You need the RL training loop (0.4) and one new idea: instead of one fixed
+task, this project trains against a WHOLE RANGE of tasks at once — the
+target is placed somewhere between `distance_low` and `distance_high` meters
+away, a different random distance every episode. "Widening the range" later
+just means changing those two numbers and continuing training from the same
+weights, rather than starting over.
+
+### 0.11.B Basics
+
+**Curriculum learning, the idea.** Train on an EASY version of the task
+first (here: close targets, 3-10m), then widen to a harder range (3-30m,
+then further), continuing from the same weights each time instead of
+starting from scratch. This helps whenever the hard version alone would give
+the network too little useful learning signal to make progress from a
+random start — the easy version bootstraps a reasonable starting point.
+
+**Transfer and forgetting — the two things that can happen when you widen
+the range.** Usually, weights that already work well on the easy range
+"transfer" — they're a good starting point for the harder range too, since
+the underlying skill (fly toward a target) is similar. But if training then
+runs for a long time almost entirely on FAR targets, the network can slowly
+lose whatever made it good at NEAR targets, simply because it's no longer
+seeing enough of that kind of example — this is called catastrophic
+forgetting, and it's a real risk any time you fine-tune a network on a
+narrower slice of what it originally learned.
+
+**Deciding when a stage is actually "done" — the promotion gate.** You can't
+just check the grade once and call it good — a single evaluation is noisy
+(0.9: a 30-episode grade can easily wobble ±0.05-0.09 just from luck). This
+project instead requires a WINDOW: several CONSECUTIVE checkpoints, all
+above a threshold on average, with a floor so even the single worst one in
+the window isn't a disaster — much harder to satisfy by pure luck than one
+good number.
+
+**Why stop training right when the gate fires, instead of continuing.**
+Continuing to train past a genuinely good, stable point risks exactly the
+slow drift described in 0.13 (a well-trained policy random-walking away from
+where it was) — stopping there and moving on to the next, harder stage both
+saves compute and locks in the checkpoint before that drift has a chance to
+happen.
+
+**Why the baseline controller has to keep up with the curriculum.** This
+project's PID teacher/base-controller only has hand-tuned gains for specific
+DISTANCES (0.3.C's gain ladder). Widening the training range to include
+distances the PID has never been tuned for means it gives bad guidance (or,
+in residual mode, a bad BASE action) for exactly the new, harder part of the
+range — so widening the curriculum and extending the gain ladder have to
+happen together, not the RL range alone.
+
+### 0.11.C In this project (current)
+- **Stages:** 3-10 m → 3-30 m → later 3 m-3 km. The PID gain ladder has to
+  reach each stage (currently to 250 m; 3 km needs new entries).
+- **Promotion gate** (`base_training_isaac`, constants `SOLID_*`): 5
+  consecutive chunks, every one at loop-chunk index ≥ 40, averaging ≥ 0.8 with
+  none below 0.6 (the same avg/min shape as the plotting leaderboard).
+  Training starts at chunk 16, so 40 means ≥ 24 PPO chunks; the earliest firing
+  is chunk 44. On firing it writes `<checkpoint-dir>/SOLID.json` (window
+  grades, the best-graded checkpoint in the window) and stops the stage
+  (`--no-stop-when-solid` to continue). If it never fires it prints the best
+  qualifying window. Flags: `--solid-grade / --solid-min-chunk / --solid-window`.
+- **Result:** the residual 3-10 m run fired at chunk 44 (window grades 0.880,
+  0.921, 0.921, 0.951, 0.922 → mean 0.919), promoting `model_92274688.pt`;
+  none of the direct-policy runs (v1-v4) ever passed it.
+- **Carrying the correction forward:** `--residual-resume` keeps the loaded
+  actor head so the next stage starts from the learned correction instead of
+  zero.
+
+## 0.12 Hyperparameter optimization
+
+**Ladder: P → B → C.**
+
+### 0.12.P Prerequisites
+
+You need: evaluation noise (0.9 — a single measured grade can be wrong by
+±0.05-0.09 from luck alone) and selection bias/winner's curse (0.9 — picking
+the best of many noisy trials overstates how good it really is). Also worth
+knowing before this section: a full production training run here takes about
+1.5 hours; a single hyperparameter SEARCH trial (smaller scale, fewer steps)
+takes only minutes — the entire point of a search is to try many
+combinations cheaply before committing to one at full scale.
+
+### 0.12.B Basics
+
+**Grid search vs. random search — why random usually wins.** Grid search
+tries every combination on a fixed grid of values (e.g. every combination of
+5 learning rates × 5 batch sizes = 25 trials) — wasteful if, say, only the
+learning rate actually matters, since you're repeating the same few
+meaningfully-different LR values 5 times over for no benefit. Random search
+instead samples every hyperparameter independently at random each trial —
+for the same trial budget, it tries more DISTINCT values of whichever
+hyperparameter actually matters, since it's not wasting trials repeating
+values of the ones that don't.
+
+**Bayesian search / TPE — using past trials to guide future ones.** Rather
+than sampling blindly, keep a model of "which hyperparameter values tend to
+score well" and bias new trials toward those. This project's search uses TPE
+(Tree-structured Parzen Estimator): split all COMPLETED trials into a "good"
+group (best-scoring) and a "bad" group (the rest), fit a separate rough
+probability model of each group's hyperparameter values, and propose new
+trials where the ratio `p(good)/p(bad)` is highest — i.e., "values that look
+like what good trials tend to have, and unlike what bad trials tend to
+have". Crucially, TPE only learns from trials that actually FINISHED with a
+real score — a trial that crashed or errored contributes literally nothing
+to this model, good or bad.
+
+**Pruning — stopping bad trials early to save time.** If a trial partway
+through is already scoring below the median of previous trials AT THE SAME
+POINT in training, a pruner can just kill it early, rather than waste the
+rest of its budget on something already likely to lose. This only makes
+sense if the objective is smooth/stable enough that "behind at the midpoint"
+reliably predicts "behind at the end" — a wildly noisy objective would prune
+trials that would have recovered.
+
+**Why the objective function you choose matters more than the search
+algorithm.** Whatever number the search is told to maximize, it WILL find
+ways to maximize — including ways you didn't intend, if the number is noisy
+or gameable. *Concretely, from this project's own search:* the objective
+originally returned the grade of just the LAST evaluated checkpoint. Since
+each evaluation used only 5 episodes (0.9: quantized in steps of 0.2, easy
+to get a lucky 5/5), many trials scored well simply by ending on a lucky
+final measurement, not by actually training a policy that reliably held up.
+The fix: score something that actually reflects what you care about —
+here, "does the grade HOLD relative to where this trial's own policy started",
+averaged over several checkpoints, not one lucky snapshot.
+
+**Hyperparameters found at small scale don't automatically transfer to a
+bigger run.** A search run with fewer parallel environments and a shorter
+budget has a genuinely different EFFECTIVE BATCH SIZE (0.6.B) than the real
+production run — anything whose right value depends on batch size (`lr`,
+gradient-clipping threshold, value-loss weighting) needs to be re-checked,
+not just copied over (0.8.B explains exactly why bigger batch does NOT
+simply mean "safe to raise `lr`" in this setting). Hyperparameters that are
+expressed as FRACTIONS of the schedule (e.g. "decay to 16% of the peak by
+the end") or as trust-region limits (`target_kl`) tend to transfer more
+reliably, since they're less tied to the raw step-count/batch-size details
+of the search run.
+
+**Winner's curse, applied here.** Report a hyperparameter search's best
+measured trial as an OPTIMISTIC estimate, not a guarantee — some of its
+apparent advantage over the next-best trials is real, and some is simply
+that it got a luckier evaluation than an equally-good trial might have
+(0.9).
+
+### 0.12.C In this project (current)
+- **Study:** 100 completed trials (a separate 100 failed instantly on a
+  mlflow soft-deleted-experiment error and carry no information), 256 envs,
+  2 M steps, 28 chunks per trial (16 frozen-actor + 12 PPO), 5 diagnostic
+  episodes, phase split pulled live from `base_training_isaac`'s constants.
+- **What went wrong with the objective:** it returned the *last* chunk's grade
+  from 5 episodes (steps of 0.2). 14 of 100 trials got a lucky final 5/5
+  (0.94-0.955); trial 162, reported best at 0.955, has a post-unfreeze mean of
+  0.70 and ranks **27th** by robust delta.
+- **What the study really showed** (`app/guidance/analyze_optuna_isaac.py`):
+  mean baseline (frozen actor) 0.926 → mean post-unfreeze 0.599; **0 of 100
+  trials held within −0.05 of their baseline**; the top trials share a tight
+  `log_std_max` (−1.7…−2.1) and `lr` in the flat 1e-4…1e-3 band; the ranking
+  among the top 10 is within measurement noise. Trial 137 (baseline 0.974,
+  post-mean 0.861, 67% of post-unfreeze chunks ≥ 0.9) was the most consistent.
+- **Transfer decisions:** `lr` halved (not scaled up by the 32× batch ratio);
+  `ent_coef_end_frac` (0.83) converted to an absolute `ent_coef_end`.
+- **Lessons recorded:** aggregate over chunks, use ≥ 20 eval episodes, score
+  relative to baseline, keep the search's phase split identical to production
+  by importing the same constants/functions (`entropy_coef_at`,
+  `scheduled_lr`), and give the search enough post-unfreeze chunks (12 was too
+  few to see learning).
+
+## 0.13 Fine-tuning a good initialization: drift, anchoring and residual policies
+
+**Ladder: P → B → C.**
+
+### 0.13.P Prerequisites
+
+This section leans on several earlier ones directly: PPO and advantage
+normalization rescaling noise to full size (0.4.B); Adam still taking steps
+from pure noise near an optimum (0.8.B); BC's std collapse (0.5.B); shared
+trunks and gradient interference (0.10.B); and how small `σ` makes KL
+hypersensitive (0.9.B). If any of those feel shaky, that's the section to
+revisit first — this one is about combining them into "why does a GOOD
+policy get worse during further training, and what do you do about it".
+
+### 0.13.B Basics
+
+**Putting the pieces together: why fine-tuning a near-optimal policy can
+make it WORSE.** Once a policy is already good at a task, the TRUE
+advantage of any action is close to 0 (0.4.B — nothing much left to
+improve). But advantage NORMALIZATION rescales whatever's left — mostly
+estimation noise at this point — back up to full size (0.4.B), and Adam
+converts that noise into fixed-size random steps regardless of how tiny the
+real signal is (0.8.B). The result: the weights take a genuine RANDOM WALK
+away from a good solution, even though there's no real improvement signal
+pulling them anywhere in particular — and for a precision task (hit within
+0.25m), any wander at all costs real performance. Other things that can make
+this worse (though which one dominates in any given case is something you'd
+have to check empirically, not assume): a shared trunk being reshaped by the
+critic's own (often much larger) gradient (0.10.B); exploration noise (`σ`)
+sitting bigger than the task's actual precision needs; and a training
+reward that isn't perfectly aligned with whatever metric you're using to
+judge success (0.7.B/0.14).
+
+**Remedies, from mild to strong.**
+- **Lower the learning rate.** Shrinks EVERY step, including the useless
+  noise-driven ones — helps, but doesn't remove the underlying random walk,
+  just slows it down.
+- **More or cleaner data.** A cleaner (less noisy) advantage estimate has
+  less pure-noise component to accidentally amplify.
+- **Freeze or detach parts of the network** (0.10.B) — stops specific
+  gradients from reaching specific weights at all.
+- **Checkpoint selection / early stopping** (0.11.B) — since drift happens
+  over time, just don't keep training (or don't keep the LATEST checkpoint)
+  past the point where it was actually good.
+- **Anchoring** — add an extra penalty term to the loss that punishes the
+  policy's action for straying too far from some REFERENCE action (e.g. what
+  the original BC-trained policy, or the PID, would have done):
+  ```
+  L = L_PPO + β · E[ ((a_π − a_ref) / range)² ]
+  ```
+  Read it as: normal PPO loss, PLUS `β` times the average SQUARED, scaled
+  distance between the policy's action `a_π` and the reference action
+  `a_ref`. This is a SOFT leash — nothing stops the policy from straying far
+  if PPO's own gradient pushes hard enough against the penalty, but the
+  bigger `β` is, the more it costs to stray, and the tether length works out
+  to roughly `1/β` (double `β`, the penalty for the same deviation doubles,
+  so the policy settles at roughly half the deviation for the same PPO
+  gradient strength). Not implemented in this project (yet) — see Part 12.
+- **Residual policy learning** — instead of a soft penalty, change the
+  ACTION ITSELF structurally: `a = a_base + s·π(s)` (`a_base` = the
+  reference/baseline controller's action, `s` = a small fixed scale, `π(s)`
+  = the network's output). This is a HARD leash: no matter what the weights
+  do, the executed action can never be more than `s` times the action
+  range away from `a_base` — not a preference, an actual mathematical bound.
+
+**Residual policy learning's properties, worked through.** (1) If the
+network's output is exactly 0, the executed action IS `a_base` exactly — so
+the WORST case (an untrained or drifted network outputting near-0) is "as
+good as the baseline controller", not "broken". (2) The deviation from the
+baseline is bounded by `s × action_range` no matter how far training drifts
+the weights — *this project's actual numbers:* `s=0.1`, so the correction
+can never exceed 10% of the full action range, whatever the network learns.
+(3) Since sampled actions include the SAME exploration noise `σ` as always,
+but it now only affects the SMALL correction term, its real-world effect on
+the executed action is also scaled down by `s` — a bonus reduction in how
+much exploration noise disturbs behavior. (4) The cost: total achievable
+performance is capped somewhere near `baseline + s·range` — if the true
+optimal action needs a bigger correction than `s` allows, this architecture
+literally cannot reach it, and everything now depends on the baseline
+controller being decent to begin with (its tuning, and whether it even
+covers the task range at all, 0.11.B).
+
+**Why zero-initializing the correction head specifically matters.** Setting
+the output head's weights to exactly 0 at the START of residual training
+makes property (1) above true from the very first step, not just
+eventually — training begins EXACTLY at baseline performance, with nothing
+to lose, and only gradually adds a correction as it finds one that helps. As
+a side effect, since the head's output starts at 0, the trunk's influence on
+the actual executed action starts at 0 too (it only matters once the head's
+weights grow away from 0), which also blunts how much the critic's
+gradients through the shared trunk can disturb the actor early on (0.10.B).
+
+**Anchoring and residual learning aren't rivals — they compose.** Anchoring
+is a soft PENALTY added to the loss; residual learning is a hard structural
+CONSTRAINT on what the action can even be. You could add an anchoring-style
+penalty ON TOP of a residual architecture — e.g. penalizing the correction's
+own size, `β·E[(s·π(s))²]` — which is just anchoring applied specifically to
+the correction term rather than to the whole action.
+
+### 0.13.C In this project (current)
+- **Direct-policy runs v1-v4 (2026-09-24 → 09-26)** all show the same shape:
+  grade ≈ 0.95 for 5-10 chunks after unfreeze, then a slide to 0.4-0.7 with
+  resets only partially recovering it; the last (v4) went 0.96 → 0.5 by 77 M
+  steps. Ruled out as sole causes: frozen `log_std` (fixed), entropy/std creep
+  (v3's std stayed 0.071 → 0.072 yet drifted anyway), the LR profile.
+- **Residual mode** (`--residual-scale 0.1`; `base_training_isaac.PidResidualEnv`):
+  `env_action = pid_action + 0.1 × policy_action`; head zeroed; imitation
+  stage skipped; diagnostics apply the same composition; PID gains re-selected
+  per episode exactly as the imitation stage does. Smoke test: with a zero
+  correction the wrapped env hit in 98% of episodes vs a raw zero-action
+  reward of −3.1.
+- **Result (`res_v1`, 3-10 m):** grade 0.971 in warmup (pure PID) → 0.927
+  over 29 training chunks (min 0.841; 26 of 29 ≥ 0.9; 0 resets); success
+  0.987 → 0.983, final distance 0.258 → 0.260, hit time 3.70 → 3.64 s. The
+  0.04 grade gap is the grad-norm term of the grade formula (`grad_norm`
+  averaged 8.0 ⇒ about −0.05), not lower success. It held, but did **not
+  improve on the PID** — on 3-10 m the PID is at the ceiling.
+- **Also implemented:** `--detach-critic` (untested as a fix on its own),
+  `--residual-resume`. **Not implemented:** anchoring, a separate critic
+  network.
+
+## 0.14 Experiment tracking and reading training curves (MLflow)
+
+**Ladder: P → B → C.**
+
+### 0.14.P Prerequisites
+
+You need two things from earlier sections: how noisy a single measurement
+is (0.9 — a single chunk's grade can wobble ±0.05-0.09 from luck alone, so
+don't over-read one data point), and what each logged quantity actually
+means (grade/success from 0.7, loss/gradient-norm/KL from 0.4 and 0.8,
+std/entropy from 0.9 and 0.10) — a graph is only as useful as your
+understanding of the number it's plotting.
+
+### 0.14.B Basics
+
+**Three different JOBS a graph can be doing — and you need to know which.**
+1. **Outcome graphs** answer "is the policy actually good?" (grade, success
+   rate, final distance). These are what you ultimately care about.
+2. **Diagnostic graphs** answer "is the TRAINING PROCESS healthy?" (loss
+   values, gradient norm, KL divergence). These don't matter for their own
+   sake — they help EXPLAIN why an outcome graph looks the way it does.
+3. **Schedule graphs** answer "did the plan I configured actually execute?"
+   (learning rate over time, entropy coefficient over time). These should
+   just match what you intended — if they don't, something's misconfigured,
+   before you even get to judging the training itself.
+Always look at outcome graphs FIRST to know if there's a problem at all, then
+use diagnostic/schedule graphs to figure out WHY.
+
+**Never read a number in isolation — compare it to a reference.** A grade of
+"0.93" means nothing on its own. Is that close to the best this task can
+possibly score? Compare against the PID teacher's own measured grade on the
+identical scenarios — "0.93 vs. the PID's 0.95" tells you the policy is
+nearly matching a hand-tuned expert, while "0.93 vs. the PID's 0.98" would
+tell a different story.
+
+**Look at TRENDS across several points, not one point.** Since any single
+measurement is noisy (0.9), average 5+ consecutive chunks before drawing a
+conclusion, and when comparing two different runs, plot them on the SAME
+graph (overlaid) rather than eyeballing two separate graphs side by side —
+small offsets are much easier to misjudge when they're not directly next to
+each other.
+
+**Use a log scale for anything that spans a huge range.** If a quantity
+(like gradient norm, or a loss value) can be anywhere from 0.1 to 50 across
+a run, a normal (linear) axis squashes all the small, actually-interesting
+variation down near zero and makes big spikes look like the ONLY thing
+happening. A log-scale axis instead makes each MULTIPLICATIVE change (e.g.
+"halved" or "doubled") look like the same-sized visual step no matter where
+on the scale it happens, which usually matches what actually matters.
+
+**Some jumps are supposed to happen — know which ones.** When training
+switches from one phase to another (e.g. the actor unfreezing at chunk 16),
+several graphs will jump on purpose, by design — the question isn't "did it
+jump", it's "did it jump the RIGHT way and by roughly the expected amount".
+
+**A real failure usually shows up as a COMBINATION of graphs moving
+together, not one graph alone.** A single graph looking a bit off could just
+be noise; several graphs telling a consistent story (e.g. grade falling
+WHILE gradient norm is rising WHILE success rate is falling) is much stronger
+evidence of a real, specific problem — see the combination table in 0.14.C.
+
+### 0.14.C In this project (current)
+Metrics are logged with `step = timesteps` (the UI's x-axis) from the training
+loop (`log_metrics_safe`), mirrored to `<checkpoint-dir>/metrics.csv` and the
+shared `runs/isaac_training_metrics.json`; `stage` is a tag. MLflow UI:
+`python -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db` (run from
+the project root). Warmup lasts 16 chunks (~33 M steps); eval = 30 episodes.
+
+**Is the policy good?** (these decide)
+
+| Graph | Good | Bad |
+|---|---|---|
+| `grade` | flat 0.92-0.97 (ceiling ≈ 0.96-0.99) | slides (v4: 0.96 → 0.5) |
+| `success_rate` | ≥ 0.95, ≈ `pid_success_rate` (≈ 0.98) | < 0.8 |
+| `outcome_hit` | 29-30 of 30 | falling |
+| `outcome_oob/_attitude-*/_timeout` | 0-1 | rising counts show *how* it fails |
+| `avg_final_dist` | ≈ 0.25 (the floor: every episode hit, 0.3.C) | > 0.30 = misses |
+| `avg_hit_time_sec` | ≈ 3.5-3.7 s; lower is good only if success holds | dropping while success falls = rushing (v4) |
+| `pid_*` | the reference to match, not a health signal | – |
+| `best_grade` | a staircase that only rises | – |
+| `reset_triggered` | 0 | any |
+
+**Is learning healthy?** (diagnostics)
+
+| Graph | Good | Bad |
+|---|---|---|
+| `value_loss` | falls through warmup, flattens; may fall more after unfreeze (res_v1: 39 → 7) | jumps (resets do this) or oscillates |
+| `approx_kl` | 0.002-0.015 (target 0.0086) | steadily ≥ 3× target (0.02-0.07 in old direct runs) |
+| `grad_norm` | ≈ 0 in warmup, jumps at unfreeze, then eases (clip = 1.35, so always clipped) | keeps rising while grade falls (v2: 2 → 5) |
+| `recent_reward` | flat or slightly up | falling > 10%; **noisy** (10-episode window) |
+| `policy_loss` | tiny (≈ ±0.005), mean-zero (advantages are normalized) | NaN / huge |
+| `entropy_loss` | drifts slowly | exactly flat in training (frozen std) |
+| `effective_std_mean` | slow smooth drift inside 0.05-0.10 | flat in training = frozen; 0.0498 = collapsed; sawtooth = resets |
+| `total_param_norm` | smooth growth | jumps = big updates or resets |
+
+**Schedules:** `lr` flat 1.45e-4 in warmup then ramp + cosine; `ent_coef` flat
+0.01 in warmup then decays to 0.002.
+
+**Grade components:** `error_ratio` ≈ 0.01 (higher = misses); `grad_ratio`
+costs up to −0.1 (it explains res_v1's 0.97 → 0.93); `time_ratio` is logged
+but weighted 0.
+
+**Failure signatures:** grade ↓ with `grad_norm` ↑ = drift; `hit_time` ↓ with
+success ↓ = rushing; `effective_std_mean` dead flat in training = the
+saturated-std bug; `value_loss` spikes = a reset just happened.
+
+**Companion tools:** `app/guidance/analyze_optuna_isaac.py` (rank Optuna trials
+by *holding* performance, prints the noise floor, writes a CSV) and
+`plot_grad_norm_3d` (7.1) for the gradient-norm landscape.
 
 ## Part 0 practice questions
 
@@ -492,6 +2395,164 @@ removing a standing-still exploit.
     claim (all intermediate `V` estimates cancel at `λ=1`, leaving only a
     baseline subtraction). `λ=0`'s `0.95` depends directly on `V(s_1)` too,
     not just `V(s_0)` — more exposed to a miscalibrated critic. — 0.4.
+
+</details>
+
+## Part 0b practice questions (theory 0.8-0.14)
+
+1. **(own words, ≤5 sentences)** Why does Adam random-walk near an optimum
+   even though the true gradient is ≈ 0? Give the size of a pure-noise step.
+2. **(trace a scenario)** Peak `lr = 1.451e-4`, floor ratio `0.1621`, cosine
+   over the PPO stage only (progress `p = 0.5`). What is `lr`? What would an
+   unclamped `p = 1.5` give, and why does that matter?
+3. **(why this over alternative)** Optuna's best trial had `lr = 2.9e-4` at
+   minibatch 1,024; production uses minibatch 32,768. Why was `lr` halved
+   instead of scaled up by 32× (or 64×)?
+4. **(numbers)** Standard error of a hit-rate from 5 episodes at `p = 0.8`,
+   and from 30 episodes at `p = 0.9`. What does the first imply about the
+   Optuna objective?
+5. **(trace)** Policy `σ = 0.0707`; PPO moves the mean by `Δμ = 0.02` (raw
+   units). KL under equal-σ Gaussians? Compare with `target_kl = 0.0086`.
+6. **(own words)** Across v1/v2/v3, `value_loss` correlates +0.67/+0.84/+0.92
+   with grade. Why is that *not* proof that critic learning damages the actor?
+7. **(trace)** `actor_log_std` raw = −5 with `log_std ∈ [−3, −2.3]`. What is
+   `σ`, what is `tanh'(−5)`, and why does the logged `effective_std` stay
+   bit-identical for a whole run even though Adam is updating the parameter?
+8. **(what breaks)** If every parameter were frozen (`requires_grad_(False)`)
+   and `isaac_ppo_train` still ran a normal update, what would happen — and
+   what does the code do instead for the run-start "no update" chunks?
+9. **(trace the gate)** Window grades (chunks 40-44):
+   (a) `[0.82, 0.78, 0.81, 0.79, 0.84]`, (b) `[0.95, 0.95, 0.95, 0.95, 0.55]`,
+   (c) chunks 38-42. Does the promotion gate fire in each? Why is 40 (not 20)
+   the minimum chunk?
+10. **(own words)** Optuna reported trial 162 as best (0.955). Give three
+    reasons that is misleading and one better ranking metric.
+11. **(what breaks)** A hundred trials fail instantly with "Cannot set a
+    deleted experiment". What does TPE learn from them, and what is the state
+    of the study afterwards?
+12. **(numbers)** Residual mode: `residual_scale = 0.1`, thrust range ±14.715
+    N, torque range ±0.5 N·m. The PID commands thrust delta `+2.0 N`. What is
+    the range of the executed thrust and the largest torque correction? What
+    is the executed thrust if the policy outputs 0?
+13. **(why this over alternative)** Residual policy vs anchoring loss vs
+    just lowering the lr: what does each buy, and what does each cost?
+14. **(own words)** `res_v1` held its grade (0.927 vs 0.971 baseline). What
+    does that result show, what does it *not* show, and what explains the
+    0.04 gap?
+15. **(read the graph)** Over 15 chunks: grade 0.95 → 0.6, success 0.98 → 0.6,
+    `avg_hit_time` 3.7 → 3.1 s, `recent_reward` roughly flat, `grad_norm`
+    2 → 5. Name the failure signature and two hypotheses to test.
+16. **(numbers)** Grade for success = 1.0, `error_ratio = 0.01`,
+    `grad_norm = 8` (`grad_norm_ceiling = 50`, weights 1.0/0.3/0.1). Then for
+    `grad_norm = 0.15`.
+17. **(PID)** Derive `kp_pos, kd_pos` for a 20 m target from first principles
+    (ζ = 0.85, ε = 0.05 m, `SETTLE_TIME_FRACTION = 0.5`,
+    `steps_for_dist(20)`). Then compute the saturation ratio at 30 m for the
+    30 m gains and for the 3 m gains (`g·max_tilt = 2.943`).
+18. **(cross-file)** Trace which flags and code paths change when you add
+    `--residual-scale 0.1 --residual-resume` to `train_isaac.py`, in order.
+
+<details><summary>Model answers</summary>
+
+1. At an optimum the *expected* gradient is ≈ 0 but each minibatch's gradient
+   is still noise of unchanged size. Adam normalizes by the gradient's own
+   scale (`m̂/√v̂`), so the step doesn't shrink with the signal: for zero-mean
+   noise `|m̂|/√v̂ ≈ √((1−β₁)/(1+β₁)) = √(0.1/1.9) ≈ 0.23`, i.e. random steps of
+   ~0.23·lr per update, which accumulate as a random walk. Advantage
+   normalization (`train.py:175`) makes the noise full-size to begin with. — 0.8,
+   0.4.
+2. `factor = 0.1621 + ½·(1−0.1621)·(1+cos(π·0.5)) = 0.1621 + 0.41895·1 =
+   0.5811` → `lr ≈ 8.43e-5`. Unclamped `p = 1.5`: `cos(1.5π) = 0`, factor 0.581
+   again — cosine is periodic, so an un-clamped progress makes the LR
+   *oscillate back up* instead of decaying. Hence `training_progress_at`
+   clamps to `[0,1]`. — 0.8.
+3. Because the search's ≥ 1e-3 trials all collapsed (mean grade ≈ −0.02) and
+   lr < 1e-5 was worst; the flat band is 1e-4…1e-3. With Adam the step per
+   update is ≈ lr regardless of batch, and a cleaner large-batch gradient makes
+   each step *more coherent*, so the same lr moves the policy further per
+   chunk — bigger batch does not license a bigger lr in PPO. Scaling by 32-64×
+   would have landed at ~1e-2, deep in the collapsed zone. 1.45e-4 sits at the
+   low edge of the flat band (also ~3× more post-unfreeze steps in production).
+   — 0.8, 0.13.
+4. `√(0.8·0.2/5) = 0.179`; `√(0.9·0.1/30) = 0.055`. With 5 episodes one failed
+   episode moves success by 0.2, so the last-chunk grade the objective returned
+   is dominated by luck (grades cluster at ≈ 0.96 / 0.76 / 0.35). — 0.9, 0.12.
+5. `KL = Δμ²/(2σ²) = 0.0004 / (2·0.004998) = 0.040` — about 4.7× the 0.0086
+   target from a shift of only 0.02 raw units. Small σ makes the KL check
+   hypersensitive, which is why early-stopping fires after one epoch. — 0.9.
+6. Both curves trend monotonically with time (value_loss falls as the critic
+   fits, grade falls as PPO drifts), so any two such curves correlate strongly
+   (time is a confounder). Resets add non-monotone events (value_loss jumps up,
+   grade recovers) but they also restore the actor's weights, so that is not an
+   isolated critic effect either. It is a hypothesis to test (e.g. with
+   `--detach-critic`), not a finding. — 0.9, 0.13.
+7. `log σ = −3 + 0.35·(tanh(−5)+1) ≈ −3 + 0.35·(9.1e-5) ≈ −3.00003` → `σ ≈ 0.0498`
+   (the floor). `tanh'(−5) = 1 − tanh² ≈ 1.8e-4`. Adam still updates the raw
+   value (≈ lr per step at most), but σ depends on it only through `tanh'`, so
+   the *logged* σ changes by ~1e-8 relative and looks bit-identical; getting
+   out would need several raw units of movement at ≤ lr per step. — 0.10.
+8. `loss.backward()` fails ("element 0 of tensors does not require grad and
+   does not have a grad_fn") because nothing in the graph needs gradients. The
+   run-start chunks therefore use `isaac_ppo_train(skip_update=True)`, which
+   collects the rollout and never calls `ppo_update`. — 0.10.
+9. (a) mean 0.808 ≥ 0.8, min 0.78 ≥ 0.6 → fires at chunk 44. (b) mean 0.87 but
+   min 0.55 < 0.6 → does not fire (one crash disqualifies the window).
+   (c) chunks 38-42 start below 40 → the rule requires *every* chunk of the
+   window at index ≥ 40, so it cannot fire there. 40 = at least 24 PPO chunks
+   after the unfreeze at 16; 20 would promote a checkpoint that is just the
+   warmup (imitation/PID) policy plus a few PPO steps. — 0.11.
+10. (i) It returned only the last chunk from 5 episodes (quantized ±0.2, luck);
+    (ii) its post-unfreeze mean was 0.70 and last-7 mean 0.55 — the final 5/5
+    was a spike; (iii) it hardly differs from 13 other trials with the same lucky
+    5/5. Better: rank by delta (post-unfreeze mean − own frozen baseline) or the
+    trailing-5 mean; 162 ranks 27th, 137 ranks near the top. — 0.12.
+11. Nothing: failed trials have no objective value, TPE only models completed
+    ones. Cause: a soft-deleted mlflow experiment name can't be reused; the
+    study's trial counter still advanced (trial numbers started at 100), and the
+    study.db kept the 100 FAIL rows harmlessly. Fix: purge the experiment or
+    restore it. — 0.12.
+12. Correction range = `0.1 × 14.715 = ±1.47 N` thrust and `0.1 × 0.5 = ±0.05
+    N·m` torque, so executed thrust ∈ [0.53, 3.47] N; if the policy outputs 0
+    the executed thrust is exactly 2.0 N (pure PID). — 0.13.
+13. Residual: hard bound on deviation, starts as the PID, noise ×0.1; costs a
+    ceiling near `base + s·range` and dependence on the base controller.
+    Anchoring: soft penalty `β·E[(a−a_pid)²]` — flexible, but needs a teacher
+    action at every state, tuning β, and doesn't bound drift. Lower lr: slows
+    drift but starves the critic warmup and doesn't remove it (the drift
+    continued while lr fell to 2e-5). — 0.13.
+14. Shows: with the correction capped at ±10% and starting at the PID, PPO did
+    not slide (26/29 chunks ≥ 0.9, no resets) and passed the gate at chunk 44.
+    Does not show improvement over the PID: success 0.987 → 0.983, final
+    distance 0.258 → 0.260, hit time 3.70 → 3.64 s (within noise). The 0.04
+    gap is the grad-norm penalty (mean `grad_norm` 8.0 → `grad_ratio` ≈ 0.53 →
+    −0.053), not lower success. — 0.13, 0.14.
+15. "Rushing": speed up while success and precision fall, with a flat reward.
+    Hypotheses: (1) the training reward includes time pressure while the grade
+    ignores time (`w_time = 0`), so PPO trades success for speed; (2) an
+    Isaac-vs-numpy mismatch — the policy specializes to Isaac physics
+    (60 Hz control, PhysX) while the numpy oracle evaluates it at 240 Hz.
+    Test (2) by evaluating the same checkpoints in Isaac
+    (`scripts/isaac_lab/diagnose_model_isaac.py`). — 0.14, 0.6.
+16. `grad_ratio = ln(1+8)/ln(1+50) = 2.197/3.932 = 0.559` → grade =
+    `1.0 − 0.3·0.01 − 0.1·0.559 = 0.941`. For `grad_norm = 0.15`:
+    `ln(1.15)/ln(51) = 0.140/3.932 = 0.0356` → `1 − 0.003 − 0.0036 = 0.993`.
+    — 0.14.
+17. `steps_for_dist(20) = max(1800, 750·20/3) = 5000` ticks = 20.83 s;
+    `t_s = 0.5·20.83 = 10.42 s`; `ωₙ = ln(20/0.05)/(0.85·10.42) = 5.991/8.854 =
+    0.677`; `kp = ωₙ² = 0.458`, `kd = 2·0.85·0.677 = 1.15`. Saturation at 30 m:
+    30 m gains `0.232·30/2.943 = 2.4×` (starts saturated, desaturates near the
+    target); 3 m gains `1.65·30/2.943 = 16.8×` (violently over-demanding).
+    — 0.3.
+18. (1) `train_isaac.py` parses both flags and passes `residual_scale=0.1,
+    residual_resume=True` to `train()`; (2) `train()` loads the `--bc-checkpoint`
+    (a residual checkpoint, e.g. `SOLID.json`'s `model_…pt`) with
+    `load_bc_checkpoint`; (3) because `residual_scale > 0` it wraps the env in
+    `PidResidualEnv` and, because `residual_resume`, **keeps** `actor_mean`
+    instead of zeroing it; (4) `imitation_timesteps_grand = 0` so the imitation
+    stage is skipped; (5) `actor_log_std` is still reset to 0; (6) each chunk's
+    rollout runs through the wrapper (`pid + 0.1·action`), and
+    `diagnose_with_model` applies the same composition with per-episode gains;
+    (7) the promotion gate applies as usual. — 0.13, 0.11.
 
 </details>
 
@@ -998,6 +3059,17 @@ tuned PID's max achievable `reward_func` total (temporarily patching
 `APPROACH_MILESTONE_BUDGET` to 0 to avoid a self-referential measurement) —
 the number to hand-copy into `rewards.APPROACH_MILESTONE_BUDGET`.
 
+**Update (2026-09-25).** `DISTANCES` is now `(3, 10, 20, 30, 50, 100, 150, 250)`.
+`20` and `30` were added for the 3-30 m curriculum stage: nearest-neighbour
+lookup (`assign_gains_by_distance`) puts every target on the closest key, and
+with only `10` and `50` between 3 and 100 the midpoint was exactly 30 m, so
+almost the whole 10-30 m span used the 10 m gains — tuned for a ~3× smaller
+step budget. Re-running `python -m app.control.tune_pid` regenerates both
+`best_pid_gains_per_dist.json` and the generic `best_pid_gains.json` (whose key
+is the middle element of `DISTANCES`, now `50`, was `100`). Gains at 30 m are
+6× softer than at 10 m (`kp_pos` 0.232 vs 1.43) — long-range episodes are slow
+by design (0.3.C).
+
 ## 3.4 `verify_pid.py`
 
 Standalone script: loads `best_pid_gains_per_dist.json`, runs
@@ -1100,6 +3172,12 @@ log-prob correction** (0.4):
 ```python
 log_prob = dist.log_prob(raw_action).sum(-1) - torch.log(half_range·(1-squashed²)+1e-6).sum(-1)
 ```
+
+**Update (2026-09-27).** `ActorCritic(..., detach_critic=False)` — when True the
+value head reads `x.detach()`, so value-loss gradients never reach the trunk the
+actor also reads (0.10). It is a plain Python flag (not saved in checkpoints).
+Parameter count of the production network: 14,345 (0.10.C). `log_std_max` is
+now tuned (−2.3) while `log_std_min = −3.0` stays the hard-coded floor.
 
 ## 4.2 `RolloutBuffer` / `compute_gae`
 
@@ -1241,6 +3319,87 @@ dimension is normalized by its OWN learned variance, so thrust (large
 magnitude) doesn't dominate yaw torque (small magnitude) in the loss.
 `weights`, if given, is a per-sample loss weight (DAgger's recency
 weighting plugs in here) — `None` reproduces plain uniform BC.
+
+## 5.1a `actor_log_std` collapses to the floor under this loss (found 2026-09-24)
+
+**Symptom**: `runs/base_training_isaac_3_10_fix/metrics.csv`'s
+`effective_std_mean` is bit-identical (`0.049787...`) on EVERY logged row,
+from the very first `critic_warmup` checkpoint through the last `training`
+row 126M steps later. `entropy_loss` is likewise frozen at exactly `6.3242`
+the whole run — for a Gaussian, differential entropy is a function of `std`
+alone (`0.5*log(2*pi*e*sigma^2)`), independent of the mean, so a frozen std
+necessarily means frozen entropy regardless of anything the mean/actor is
+doing. `0.049787...` is exactly `exp(DEFAULT_LOG_STD_MIN) = exp(-3.0)` (Part
+4.1's `log_std` clamp floor) — i.e. `tanh(actor_log_std) ≈ -1`, fully
+saturated at the LOW end of the clamp.
+
+**Root cause, traced end to end**: `pretrain_behavior_cloning`'s Gaussian NLL
+(5.1 above) scores BOTH the mean and `actor_log_std` against the PID
+teacher's action. The teacher is a deterministic controller — same state,
+same action, every time — so the imitation targets carry no actual variance
+for a Gaussian to represent. Minimizing NLL against a target with no spread
+is minimized by shrinking `std` toward zero (tighter density around a
+correctly-predicted point = lower loss), and nothing in `pretrain_bc.py` or
+`dagger.py` counteracts that pull. Over enough BC/DAgger epochs,
+`actor_log_std`'s raw (pre-tanh) value gets driven deeply negative until
+`tanh` saturates at `-1`. `load_bc_checkpoint` (Part 4, `app/guidance/
+train.py`) then loads that saturated value into the Isaac PPO run verbatim,
+same as every other weight — nothing about loading a BC checkpoint
+special-cases `actor_log_std`.
+
+**Why this wrecks PPO once loaded**: once `actor_log_std` is pinned at the
+floor, its raw (pre-`tanh`) value sits several units deep in the saturated
+tail, where `tanh' ≈ 1e-4`. (Precision, added 2026-09-27: Adam moves each
+parameter by at most ~`lr` per step *whatever* the gradient's size, so it is
+not that the gradient is exactly zero — it is that covering several units of
+raw distance at ≤ `lr` per step takes tens to hundreds of chunks even with a
+consistent gradient sign, far more with the noise the sign actually has, while
+`σ`'s sensitivity to the raw value is `tanh'`, so the logged `effective_std`
+looks bit-identical.) In practice PPO inherits a policy that can never adjust
+its own exploration noise, up or down, for the rest of the run. Worse, a near-zero std makes the PPO probability ratio
+(`π_new/π_old`) hypersensitive to tiny mean shifts (dividing by a tiny std
+amplifies any log-prob difference), so the very first real gradient step
+after ANY actor-unfreeze overshoots `target_kl` badly and craters the grade.
+This is directly visible at both unfreeze points in that run's `metrics.csv`:
+critic-warmup-end unfreeze (`approx_kl` jumps `0.075 -> 0.235` against
+`target_kl=0.0245`, grade `0.834 -> 0.403`) and the post-reset unfreeze later
+in the same run — the same signature both times, because it's the same
+frozen-std cause both times, not two unrelated instabilities.
+
+**This is NOT the same knob as `PARAMS['log_std_max'] = -0.9`.** That's the
+CEILING of the clamp, deliberately tightened (from a looser default) to stop
+a fully-trained policy from lingering with too much exploration noise near a
+missed target instead of committing to a final corrective approach (see
+`base_training.py`'s `ENT_COEF_START`/`END` comment, 2026-09-17 discussion).
+`DEFAULT_LOG_STD_MIN = -3.0` (the FLOOR) was never touched by that decision
+and isn't meant to be a resting value the parameter starts pinned at before
+training even begins — the floor exists so std can't collapse to literal
+zero (degenerate log-prob), not so a pre-trained checkpoint arrives already
+sitting on it with no gradient able to move it.
+
+**Fix, and a first attempt that didn't survive**: the first fix reset
+`actor_log_std` right after `load_bc_checkpoint`. That alone doesn't hold —
+`train()` runs its OWN on-policy imitation stage next
+(`_run_imitation_stage_isaac`, `IMITATION_FRACTION` of the budget), which
+calls the SAME `pretrain_behavior_cloning` Gaussian NLL against the SAME
+deterministic PID teacher, and re-collapses `actor_log_std` right back down
+before `critic_warmup` ever starts — confirmed in
+`runs/base_training_isaac_3_10`, where `effective_std_mean` was still
+pinned at `~exp(-3.0)` for the entire run despite that first reset. The reset
+has to happen AFTER `_run_imitation_stage_isaac`, immediately before the
+`actor_frozen`/critic-warmup freeze locks the value in for good: reset
+`actor_log_std` to `torch.zeros_like(...)` — its original
+`ActorCritic.__init__` value. `tanh(0) = 0` sits at the MIDPOINT of
+`[log_std_min, log_std_max]` (`≈ exp(-1.95) ≈ 0.142` for the `[-3.0, -0.9]`
+band above), squarely in `tanh`'s near-linear, gradient-carrying region. This
+keeps the (legitimately good) `shared`/`actor_mean`/`critic_head` weights —
+both the BC-loaded ones and whatever the on-policy imitation stage further
+refined them to — and only discards the collapsed `actor_log_std`, which was
+never a meaningful calibrated exploration setting to begin with, just an
+artifact of imitating a variance-free teacher, twice over. It does not touch
+or loosen `log_std_max=-0.9` — PPO can still only ever move `actor_log_std` within
+that same deliberately-narrow band; this fix just stops it from starting the
+run already glued to the wrong end of it.
 
 ## 5.2 `collect_demonstrations.py`
 
@@ -1403,6 +3562,30 @@ run against a plain `BaseDroneEnv`, not the Isaac env, since both are
 policy-quality checks (N deterministic episodes), not physics throughput,
 and the numpy oracle is diff-tested to track the Isaac physics closely.
 
+**Update (2026-09-27) — what `base_training_isaac.train()` does now** (see
+Part 12 for the story behind each item):
+- **Budget split:** imitation `IMITATION_FRACTION = 0.08` (was 0.15; skipped
+  entirely in residual mode), critic warmup = `max(1%, 16 chunks)`, PPO = the
+  rest. Chunk size is `--num-steps-per-chunk × num_envs`.
+- **Run start:** the first `RUN_START_FROZEN_CHUNKS = 3` chunks are
+  rollout-only (`skip_update=True`).
+- **`actor_log_std` reset to 0** after the imitation stage, before the warmup
+  freeze locks it in (5.1a).
+- **Schedules** live in shared helpers so the Optuna objective can't drift:
+  `training_progress_at`, `entropy_coef_at` (held through warmup, then linear
+  start → end), `scheduled_lr` (flat through warmup, then the original
+  full-span cosine × the unfreeze ramp).
+- **Soft reset** (8.7) now `RESET_DEGRADE_MARGIN = 0.4`, `RESET_BLEND_ALPHA =
+  0.75`, then `RESET_WARMUP_CHUNKS = 2` critic-only chunks.
+- **Promotion gate** `SOLID_*` → `SOLID.json` + early stop (0.11.C).
+- **Residual mode** `--residual-scale S` (`PidResidualEnv`), `--residual-resume`,
+  `--detach-critic` (0.13.C).
+- **Logging:** `metrics.csv` per run, the shared `runs/isaac_training_metrics.json`
+  (one key per run, `_append_json_row`), MLflow to `mlflow_isaac.db`.
+- **Diagnostics** use 30 episodes and, in residual mode, apply the same
+  PID+correction composition as training (`diagnose_with_model(residual_scale,
+  gains_by_dist)`).
+
 ## 6.3 `diagnostics.py`
 
 `_run_diagnostic_episodes`: shared rollout/outcome-counting loop.
@@ -1519,6 +3702,21 @@ breakdown, with **streak-window shading**: `_streak_windows` finds runs of
 doesn't read as "converged"), `vs_pid_baseline.png` (bar chart, RL final
 checkpoint vs. classical PID on 4 metrics). `plot_dagger_history`: raw
 pair-count imbalance + per-distance hit-rate across DAgger rounds.
+
+**Update (2026-09-27).** `plot_grad_norm_3d` is now a **landscape-style plot**:
+x = timesteps, y = `grade` (was `lr`, which is a fixed function of time and so
+cannot define a surface), z = `grad_norm`; a jet-coloured surface with mesh
+lines, contour lines projected on the floor, the run's path as a black line
+with a start dot and an arrowhead. **The surface is interpolated** (a
+Gaussian-kernel smooth of the logged chunks that relaxes to the mean away from
+any logged point); only the path is data — the title says so. Implementation
+notes worth knowing: the start marker and arrowhead are `Line3D` artists
+because matplotlib depth-sorts patches/collections against each other (a
+surface polygon can hide a scatter marker or a patch arrow) whereas lines draw
+last; the arrowhead is built in unit-cube coordinates so it looks the same size
+despite timesteps ~1e8 vs grade ~1. New helper script
+`app/guidance/analyze_optuna_isaac.py` ranks Optuna trials by holding
+performance (0.12.C); reading every MLflow graph is 0.14.C.
 
 ## 7.2 `mlflow_utils.py`
 
@@ -2222,3 +4420,394 @@ considering yourself defense-ready:
 
 If any box is below a 2, go reread that Part's file walkthrough before
 your next self-quiz pass.
+
+---
+
+# PART 12 — Case study: what we actually did, in order (2026-09-19 → 2026-09-27)
+
+Every entry is **symptom → evidence → diagnosis → change → status**. The point
+of reading this is not the individual fixes but the *method*: each one was
+found by checking a number, and several first explanations were wrong.
+
+## 12.1 The one-paragraph summary
+The goal was a 3-10 m controller that stays good, so the curriculum can move to
+3-30 m and later 3 km. Direct-policy PPO fine-tuned from a PID-imitating
+network reached ~0.95 grade and then **slid to 0.4-0.7 in every run** (v1-v4).
+Along the way we found and fixed a genuine bug (the BC/DAgger NLL collapsed
+`actor_log_std` to its floor, twice), fixed schedule bugs (entropy and LR were
+decaying during a warmup where they cannot act), showed that the Optuna
+"best trial" was luck, ruled out several causes of the slide, and finally
+changed the *architecture of the problem*: the network now learns a small
+correction on top of the PID (residual mode). That run (`res_v1`) held its
+grade and passed a new promotion gate at chunk 44. It did not beat the PID —
+on 3-10 m the PID is already at the ceiling — so the payoff is expected on
+3-30 m.
+
+## 12.2 Entries
+
+**1. Chunk arithmetic (2026-09-24).** *Symptom:* raising `--num_envs` to 16384
+gave only ~30 chunks. *Evidence:* `chunk_grand_steps = NUM_STEPS_PER_CHUNK ×
+num_envs` (256 × 16384 = 4,194,304); `n_chunks = total / chunk`; and
+`MIN_WARMUP_CHUNKS = 16` is a fixed *count*, so warmup alone was over half the
+run. *Change:* `--num-steps-per-chunk` (128 → 2,097,152/chunk, ~61 chunks).
+*Side traps found on the way:* a duplicate `--num-envs` flag aliasing
+`--num_envs` (argparse maps both to one dest), a dead `num_envs` parameter that
+`train()` immediately overwrote with `unwrapped.num_envs`, and a shell command
+whose missing trailing `\` silently dropped the last flag. *Lesson:* floors
+expressed in chunk counts must be re-derived whenever chunk size changes.
+
+**2. PID gain ladder (2026-09-25).** Added `20` and `30` to
+`tune_pid.DISTANCES` and regenerated the gains (3.3 update, 0.3.C).
+
+**3. Diagnostics, resets and warmup (2026-09-24).** `N_DIAGNOSTIC_EPISODES`
+10 → 30 (10 false-triggered resets); reset margin 0.15 → 0.25 (later 0.4);
+`RESET_WARMUP_CHUNKS = 2` (a reset also drags the critic back, so it needs its
+own warmup); `RUN_START_FROZEN_CHUNKS = 3` rollout-only chunks via a new
+`skip_update` flag on `isaac_ppo_train` (freezing *every* parameter breaks
+`backward()`, 0.10.B); a shared `runs/isaac_training_metrics.json`;
+`IMITATION_FRACTION` 0.15 → 0.08.
+
+**4. The frozen exploration std (2026-09-24/25) — the real bug.**
+*Symptom:* in the retrained "fix" run the grade peaked (0.929) but *only during
+critic warmup*, then degraded; `effective_std_mean` was `0.049787` (= `exp(−3)`
+exactly) on **every** row and `entropy_loss` was frozen at `6.3242`.
+*Diagnosis:* `pretrain_bc.py` scores `actor_log_std` with Gaussian NLL against a
+deterministic PID, whose optimum is `σ → 0` (0.5.B); `load_bc_checkpoint`
+loaded the collapsed value; PPO could then neither move it nor explore.
+*First attempt* (reset right after loading the checkpoint) **did not work** —
+the run's own on-policy imitation stage runs the same NLL and re-collapsed it
+before the warmup freeze. *Fix that worked:* reset to 0 *after* the imitation
+stage, just before the freeze (`σ` starts at the clamp midpoint and moves
+freely). Full write-up: 5.1a. *Status:* fixed (first row now `σ = 0.0837` →
+later `0.0707` with `log_std_max = −2.3`).
+
+**5. Optuna (2026-09-25).** *Symptom:* trial 162 reported best (0.955) but its
+curve looked odd. *Evidence:* 0/100 trials held their grade after unfreeze;
+`analyze_optuna_isaac.py`; details in 0.12.C. *Change:* the search objective now
+mirrors production (imports the same constants/schedules); a robust ranking
+script; trial 137's hyperparameters ported with `lr` halved and
+`ent_coef_end_frac` converted to an absolute value. *Also:* a soft-deleted
+mlflow experiment made 100 trials fail instantly; the experiment's rows were
+purged (backup kept) — TPE ignores failed trials, so nothing was lost.
+
+**6. Schedules (2026-09-26).** *Symptom:* `ent_coef` sat at 0.01664 for the
+whole training stage. *Diagnosis:* the schedule counted warmup chunks in its
+progress and, with `end/start = 0.83`, hit its floor ~10 chunks into a warmup
+where the actor is frozen. *Change:* `entropy_coef_at` (held through warmup, then
+linear over the PPO stage). LR was made flat through warmup; that shifted the
+training-stage LR up (mid-run +45%) and v2 drifted faster, so `scheduled_lr`
+keeps the flat warmup but returns to the original full-span cosine afterwards.
+
+**7. The direct-policy runs v1-v4 (2026-09-24 → 26).**
+
+| run | config change | training mean grade | shape |
+|---|---|---|---|
+| v1 | std fix, reset margin 0.25/α 0.5 | 0.765 | 0.90 → 0.7; 4 resets |
+| v2 | flat-warmup LR, entropy schedule, margin 0.4/α 0.75 | 0.723 | first 11 chunks 0.92, then 0.65; 2 resets |
+| v3 | `log_std_max −2.3`, `ent 0.01→0.002` | slide to 0.44 by chunk ~35 | std stayed 0.071 → 0.072 |
+| v4 | same as v3 (turned out `residual_scale = 0`) | 0.96 → 0.5 by 77 M | slide repeats |
+
+*What was ruled out:* the frozen std (fixed), std/entropy creep (v3), the LR
+profile (v1↔v2 differ, both slide). *What was checked:* PPO's own training
+reward also falls late (v2: 66 → 48), so it is not just a grade-vs-reward
+mismatch; `grad_norm` jumps 0.13-0.15 → 2.1-2.4 at unfreeze in all three
+runs; `value_loss` vs grade correlates +0.67/+0.84/+0.92 (time-confounded).
+*Hypotheses not yet separated:* (a) noise-driven random walk via normalized
+advantages + Adam (0.13.B), (b) critic gradients reshaping the shared trunk,
+(c) a numpy-oracle-vs-Isaac gap (v4's `avg_hit_time` fell while success fell —
+"rushing" — with the eval running at 240 Hz vs 60 Hz training control).
+Test (c) with `scripts/isaac_lab/diagnose_model_isaac.py` (not run yet).
+
+**8. Promotion gate (2026-09-26).** Built after the goal was clarified as "move
+to 3-30 m only when 3-10 m is solid (≥ 0.8) at chunk ≥ 40" (0.11.C). Replay on
+the saved runs: v1's best qualifying window averaged 0.754, v2's 0.638 —
+neither would have fired.
+
+**9. Residual mode (2026-09-26/27).** `--residual-scale S` wraps the env
+(`PidResidualEnv`): `action = pid + S × policy`, head zeroed, imitation skipped,
+eval composed identically (0.13). Tested first in isolation: a smoke test in
+real Isaac (64 envs) — raw zero-action reward −3.1 vs 86.8 wrapped with zero
+correction (98% hit) vs 88.1 with a ±30% random correction — and then an
+end-to-end 20-chunk run through the whole `train()` loop (no errors; the gate
+correctly reported "cannot fire"). `--detach-critic` was implemented alongside.
+*Result `res_v1` (3-10 m, scale 0.1, 45 chunks, 94 M steps):* grade 0.971
+(warmup, pure PID) → 0.927 (training), 26/29 chunks ≥ 0.9, min 0.841, 0 resets,
+gate fired at chunk 44 (window 0.880-0.951, mean 0.919), promoting
+`model_92274688.pt`. Success 0.987 → 0.983, hit time 3.70 → 3.64 s, final
+distance 0.258 → 0.260 — held, not improved. *Design flaw found on review and
+fixed:* residual mode zeroed the actor head after loading *any* checkpoint,
+which would have erased the correction learned at 3-10 m when seeding 3-30 m;
+`--residual-resume` keeps the loaded head.
+
+**10. Tooling.** Landscape-style `plot_grad_norm_3d` (7.1 update),
+`analyze_optuna_isaac.py`, and the MLflow reading guide (0.14.C).
+
+**11. `record_run.py`/`serve_run.py` had no idea residual mode exists
+(2026-09-27).** *Symptom:* every checkpoint from `3_10_res_v1`, `3_30_v1` and
+`3_50_v1` (all residual, confirmed via mlflow `residual_scale=0.1`) scored
+0/75 in the "Run Full Evaluation" tool — every episode timed out. *Diagnosis:*
+`run_episode` fed the model's raw output straight to the drone
+(`action = model.scale_action(mean)`); a residual checkpoint's actor head only
+ever learned a small correction (zero-initialized, ×0.1 at training time), so
+alone it means "hover, don't steer" — confirmed by the numpy env sharing the
+same delta-from-hover action convention as Isaac (0.1.C). Nothing was wrong
+with the checkpoints. *Fix:* `run_episode` (and `record_checkpoint`/
+`evaluate_checkpoint`/`rank_checkpoints`, the CLI, and the web API/UI) gained
+a `residual_scale`/`gains_by_dist` path that composes
+`pid_action + residual_scale·model_action` exactly like `PidResidualEnv`,
+re-selecting PID gains by distance and resetting integrators each episode
+(reusing `_select_pid_teacher`). The web UI also gained a same-page hint that
+fires when the selected checkpoint's path looks like a residual run and the
+scale field is still 0. *Status:* implemented, syntax-checked; not yet run
+against a real checkpoint (this tool's deps live in the WSL-native `.venv`,
+unreachable from the Windows-side session that made the edit) — verify with
+`evaluate_checkpoint(..., residual_scale=0.1)` before trusting a "0/75" or
+"75/75" reading from this tool again. *Lesson, same shape as entry 6:* a
+second, independent code path (an eval/demo tool, not the training loop)
+silently assumed the OLD architecture; whenever the action interface changes,
+every consumer of a checkpoint has to be checked, not just the training loop.
+
+## 12.3 Things that were wrong along the way, and how they were caught
+1. **A false "LR spike" alarm.** A diagnostic print truncated values to 7
+   characters and cut the exponent (`1.3e-05` → `1.3`). Caught by re-reading the
+   raw column. *Rule:* never truncate numbers you are about to interpret.
+2. **"The fix worked" declared before checking.** The first std-reset run still
+   showed a flat `σ` from the very first (frozen-actor) row — impossible if the
+   reset had held — first suspected stale code, then traced to the imitation
+   stage re-collapsing it (entry 4).
+3. **A misleading magnitude.** The critic term in the loss was ~1,450× the policy
+   loss; that is a *loss value*, not a *gradient* (advantages are zero-mean, so
+   the policy loss value is ≈ 0 by construction). Discarded.
+4. **"Saturated tanh has no gradient."** Imprecise with Adam (step ≈ lr
+   regardless of gradient size); the accurate statement is about *distance*
+   (0.10.B, 5.1a note).
+5. **Reward claims.** "PID reward ≈ 87 vs the clone's 62-67" came from a biased
+   sample (only episodes that finished inside a short window). In runs, the
+   pure-PID warmup `recent_reward` is ≈ 68 vs ≈ 62-67 for the clone — nearly
+   equal — and the predicted 85-90 was wrong. The residual mode's advantage is
+   the hard bound on drift, not a better start.
+6. **A run that wasn't the run being discussed.** v4 was assumed to be residual
+   mode; mlflow's logged params (`residual_scale = 0.0`) and its first timestep
+   (12.3 M instead of 2.1 M — the imitation stage ran) showed it wasn't.
+   *Rule:* verify a run's identity from its logged params before analysing it.
+7. **Unclamped cosine progress** (a periodic function) briefly made the LR
+   oscillate; progress is now clamped (`training_progress_at`).
+8. **Matplotlib depth sorting** hid the plot's arrow and start marker behind the
+   surface; both are drawn as lines.
+
+## 12.4 Numbers to know cold
+| Quantity | Value |
+|---|---|
+| Plant | 1.5 kg, I = (0.02, 0.02, 0.04), arm 0.22 m, `dt = 1/240`, `decimation = 4` (60 Hz) |
+| Network | 23 → 4×64 tanh MLP, 14,345 params, `σ ∈ [0.0498, 0.1003]`, start 0.0707 |
+| Production shape | 16,384 envs × 128 steps = 2,097,152 / chunk; ~61 chunks; minibatch 32,768 |
+| Phases | run-start 3 chunks rollout-only; warmup 16 chunks; PPO after; gate at chunk ≥ 44 |
+| PPO | γ 0.97, λ 0.9066, clip 0.2048, target_kl 0.0086, 10 epochs × 64 minibatches, `vf_coef` 0.2087, clip-norm 1.347 |
+| Optimizer | AdamW, lr 1.451e-4 (flat warmup → cosine to 0.1621×), wd 3.8e-6 |
+| Entropy | 0.01 → 0.002 (over the PPO stage only) |
+| Reset (safety net) | margin 0.4 below best, blend 0.75, 2 critic-only chunks after |
+| PID (3-10 m) | success ≈ 0.98, final dist ≈ 0.26 m, hit time ≈ 3.7 s (220 policy steps) |
+| Hit threshold | 0.25 m (so `avg_final_dist` floor ≈ 0.25); PID designed to 0.05 m |
+| Grade | `success − 0.3·err − 0.1·grad_ratio`; ceiling ≈ 0.96-0.99 |
+| Eval noise | 30 episodes → ±0.05-0.09 per chunk; 12-chunk means resolve ≈ 0.04 |
+| `res_v1` | grade 0.971 → 0.927; 26/29 chunks ≥ 0.9; gate at chunk 44; checkpoint `model_92274688.pt` |
+
+## 12.5 Open items and what to do next
+- **3-30 m stage** with `--residual-scale 0.1 --residual-resume --bc-checkpoint
+  <SOLID.json checkpoint>`; per-chunk eval will be slower (30 m episodes are
+  31 s long).
+- **3 m-3 km:** extend the PID gain ladder past 250 m; re-check saturation
+  behaviour (0.3.B) at those ranges.
+- **Unresolved:** the cause of the direct-policy slide (hypotheses a-c above).
+  Cheapest decisive test: evaluate a late v4 checkpoint in Isaac.
+- **Known mismatch:** the numpy evaluation runs the PID at 240 Hz while Isaac
+  runs it at 60 Hz with a held action; the residual grade is evaluated on the
+  numpy side.
+- **Not implemented:** anchoring loss, a separate critic network. **Deployment
+  note:** the ONNX export contains only the policy; a residual policy needs the
+  PID too.
+- **Gate default:** it stops the stage at the first solid window; use
+  `--no-stop-when-solid` to keep training.
+
+## Part 12 practice questions
+
+1. **(trace)** 16,384 envs, 256 steps/env, 128 M total steps, `MIN_WARMUP_CHUNKS
+   = 16`. How many chunks, and what fraction is warmup? What single flag fixes
+   it, and to what value do you set it?
+2. **(own words)** State the root cause of the frozen exploration std and explain
+   why the first fix (reset after `load_bc_checkpoint`) failed.
+3. **(numbers)** What did the Optuna study actually show, in three numbers?
+4. **(own words)** How can you tell from artifacts alone whether a run used
+   residual mode?
+5. **(why)** Why does the promotion gate require chunk ≥ 40 rather than the first
+   good window?
+6. **(own words)** What is established and what is only hypothesized about why
+   direct-policy runs slide? Name the cheapest decisive test.
+7. **(trace)** `res_v1`: baseline 0.971, post-unfreeze mean 0.927. Which delta
+   bucket is that, and why isn't the result evidence of *learning*?
+8. **(own words)** Name three claims made during this work that turned out
+   wrong and how each was caught.
+9. **(what breaks)** You start 3-30 m from `res_v1`'s checkpoint with
+   `--residual-scale 0.1` but *without* `--residual-resume`. What is lost?
+10. **(design)** What would you need to change to go from 3-30 m to 3 km?
+
+<details><summary>Model answers</summary>
+
+1. `chunk = 256·16384 = 4,194,304`; `128 M / 4.19 M ≈ 30` chunks; warmup =
+   16 of 30 (53%). `--num-steps-per-chunk 128` gives 2,097,152 per chunk: ≈ 61 chunks when
+   the whole budget goes through the chunk loop (residual mode), 56 in direct mode
+   because 8% of the budget goes to the imitation stage first. — 12.2(1).
+2. BC/DAgger's Gaussian NLL against a deterministic teacher has its optimum at
+   `σ → 0`, so the loaded checkpoint's `actor_log_std` sat at the clamp floor
+   (`σ = exp(−3) = 0.0498`), where the tanh parametrization is flat. The first
+   fix reset it right after loading, but `train()` then ran its own on-policy
+   imitation stage — the same NLL — which re-collapsed it before the warmup
+   freeze. Resetting after the imitation stage, immediately before the freeze,
+   works. — 12.2(4), 5.1a.
+3. 0/100 trials held within −0.05 of their own baseline; mean baseline 0.926 →
+   mean post-unfreeze 0.599; the reported best (162) ranks 27th (and 10 trials
+   are within measurement noise of the true best). — 12.2(5), 0.12.C.
+4. The first `metrics.csv` timestep (≈ 2.1 M = one chunk, not ≈ 12.3 M, because
+   no imitation stage ran); ~61 chunks; mlflow params `residual_scale` and
+   `detach_critic`; the log line `PID-residual mode: env_action = pid + …`.
+   — 12.3(6).
+5. The first chunks after unfreeze are essentially the warmup (imitation/PID)
+   policy plus a few PPO steps and always look good; requiring ≥ 24 PPO chunks
+   (chunk ≥ 40, training starts at 16) makes the promoted checkpoint one PPO
+   has actually shaped and that has survived the period where the slide
+   appears. — 0.11.
+6. Established: PPO's own reward falls late, `grad_norm` jumps at unfreeze,
+   std/entropy creep and the LR profile are not the sole cause. Hypothesized:
+   noise-driven drift, trunk interference by the critic, and a numpy-vs-Isaac
+   eval gap. Cheapest decisive test: evaluate an early and a late v4
+   checkpoint directly in Isaac (`diagnose_model_isaac.py`); if the late one
+   still succeeds there, the "slide" is an evaluation-simulator effect.
+   — 12.2(7).
+7. Delta = 0.927 − 0.971 = −0.044 → the "held (≥ −0.05)" bucket, which no Optuna
+   trial reached. Not learning: success (0.987 → 0.983), final distance
+   (0.258 → 0.260) and hit time (3.70 → 3.64 s) are unchanged within noise; the
+   PID is at the ceiling on 3-10 m, so "held" is the achievable result there.
+   — 12.2(9), 0.13.C.
+8. E.g. (1) a "spike" that was string truncation of `1.3e-05` — caught by
+   re-reading the raw column; (2) "saturated tanh has no gradient" — refined
+   because Adam's step is ≈ lr regardless of gradient size; (3) "PID reward 87
+   vs clone 62-67" — caught by comparing with the run's own warmup reward
+   (~68) and finding the smoke test's sample was biased. — 12.3.
+9. The learned correction (the actor head) is zeroed, so training restarts from
+   a pure PID plus the loaded trunk/critic; the 3-10 m corrections are lost.
+   `--residual-resume` keeps the head. — 12.2(9), 0.13.
+10. Extend `tune_pid.DISTANCES` and regenerate gains past 250 m (settling time
+    and saturation change regime), check the step budget
+    (`steps_for_dist(3000) = 750,000` ticks ≈ 52 min sim), raise
+    `distance_high`/OOB radius (`max(20, 3·d)`), re-derive chunk/floor
+    arithmetic, expect much slower per-chunk evaluation, and possibly widen the
+    curriculum in more stages (3-30 → 3-100 → …). — 12.5, 0.11.
+
+</details>
+
+---
+
+# PART 13 — K14 grading-rubric compliance (checked 2026-09-27)
+
+Source: the two official documents at
+`meyda.education.gov.il/files/CSIT/K14/procedure-for-project-K14.pdf` (the
+procedure — project domains, requirements, proposal format, defense format)
+and `.../project-criterias-K14-714918.pdf` (the grading rubric — point table
++ automatic-failure conditions), both current as of 2026-09-27. Quotes below
+are translated from the original Hebrew; re-check the source PDFs directly
+for anything decision-critical — **this section is not a substitute for
+your advisor's sign-off**, only a code-fact check against the rubric text.
+
+## 13.1 Which track this project is
+The procedure lists three project domains; this project is **מידת מכונה**
+(machine learning) — collect data, build/train a deep-learning model, tune
+it, deploy it, analyze errors. (The other two domains — OS/networks/security,
+and "algorithmic problem in advanced engineering technology" — have their own
+separate requirement lists; this section only checks the ML-track ones, since
+that is what this codebase actually is.)
+
+## 13.2 Checked against the ML-track requirement list (procedure PDF, p.4)
+Every bullet is "must include ALL of the following stages":
+
+| Requirement | Status | Where |
+|---|---|---|
+| Collect, prepare and analyze data | done | `collect_demonstrations.py`, `collect_demo_isaac.py` |
+| Data reliability check (heterogeneous data, bias) | partial | target pairs are sampled uniformly (`build_uniform_omni_eval_pairs`); no explicit bias/heterogeneity analysis written up |
+| Build and train a deep-learning model | done | `ActorCritic` + hand-written PPO (0.4.C, 0.10.C) — no RL library used |
+| Monitor and track performance metrics | done | MLflow + `metrics.csv` + the plotting suite (0.14) |
+| **Deployment on >= 2 machines with a logical/parallel/serial pipeline** (transfer learning alone doesn't count; a multi-output single model doesn't count either) | **not done** | see 13.4 |
+| Efficiency: hyperparameter tuning, callbacks, justification -- **"do not settle for automatic tools such as Optuna"** | partial | Optuna search exists (0.12.C) but its results were shown to be noise-dominated and the ported hyperparameters were hand-justified (0.8.C) -- that reasoning needs to be **written up in the project book**, not left in chat history |
+| Error analysis and success metrics | done | grade formula (0.7.C), `analyze_optuna_isaac.py`, Part 12's per-run tables |
+| Layered architecture: interface / logic / data (MVVM/MVP/MVC) | unclear | the codebase is organized by module (`environmental`/`control`/`training`/`guidance`), not explicitly in this pattern -- map it explicitly in the book or restructure |
+| System-limits performance analysis, load analysis, multi-user handling | **not done** | no load/limits analysis exists; `serve_run.py` is explicitly documented as single-request, no-auth, dev-only |
+| Smart use of OOP | done | `ActorCritic`, `TorchPIDController`, `PidResidualEnv`, `BaseDroneEnv`, etc. |
+| "A student who uses ONLY black boxes will lose points" | clear | PPO/GAE/reward/PID are all hand-written; PyTorch/Isaac Lab are the numerical/physics substrate, not the core algorithm |
+
+## 13.3 Checked against the automatic-failure conditions (criteria PDF, bottom table)
+Quoted, then the finding:
+
+1. *"If the project has no algorithm meeting the required criteria -- failing
+   grade."* -- Not applicable; PPO/GAE/ActorCritic is a real, substantial,
+   hand-written algorithm.
+2. *"If the project doesn't match the approved project proposal -- failing
+   grade."* -- **Unverified here** -- I do not have your submitted proposal
+   text. The procedure says the proposal states only the PROBLEM, not the
+   solution method ("בהצעת הפרוייקט תוגדר מה הבעיה אך לא כיצד או איך פותרים
+   אותה"), so a residual/PID architecture is very unlikely to conflict with
+   a problem-only proposal -- but confirm your specific wording.
+3. *"If the project contains only library functions with no White-Box work
+   -- deduct 30%."* -- Not applicable (13.2's OOP/black-box row).
+4. *"If the whole project is one API for the core solution, with no
+   integration -- failing grade."* -- Not applicable; this is a from-scratch
+   simulator, not an API wrapper.
+5. *"If the student cannot explain the core algorithm and/or doesn't master
+   the project -- failing grade."* -- Mitigated by this guide's existence, not
+   guaranteed -- the P->B->C ladders (Part 0) and Part 12's case study exist
+   specifically so you can explain PPO/GAE/the residual design and its
+   trade-offs, and say plainly what you tried that didn't work and why.
+6. *"Lack of generalization, heavy `if` use, deep nesting -- deduct 15%."* --
+   Not audited in this pass; a normal code-quality review would catch this.
+7. *"Lack of documentation -- deduct 10%."* -- Partially mitigated: this guide
+   and the module docstrings are substantial, but the rubric is grading the
+   **project book**, which is a separate document you still have to write.
+8. **"The project must include ONE of: (a) two programming languages with
+   real functional integration between them, or (b) at least one compiled
+   (non-interpreted) language (C#, Java, C++, Go, Rust, ...) -- otherwise,
+   failing grade."** -- **Not met.** Every student-written file in this
+   repo is Python (64 `.py` files; zero `.cpp`/`.cs`/`.java`/`.go`/`.rs`,
+   confirmed by directory listing). This is the one finding in this whole
+   section with a hard, unambiguous automatic-failure consequence as
+   currently written.
+
+## 13.4 The recommended fix for 13.3's item 8 (and 13.2's deployment gap)
+Both gaps share one fix. `export_onnx.py` already exports trained checkpoints
+to ONNX; `serve_run.py` already has a serving layer. If the actual
+**inference/serving** step -- loading the ONNX model and running it -- were
+implemented as a real second component in a compiled language (e.g. ONNX
+Runtime's C++ or C# API) instead of Python `torch.load`, with real functional
+integration (the Python training/evaluation side calling it, not two
+disconnected demos):
+- it satisfies rubric item 8(a) directly, reusing work already done;
+- it can double as the missing ">=2 machines with a pipeline" deployment
+  item (13.2) if the compiled inference component runs as its own service
+  the Python side talks to over a socket/HTTP, rather than in-process.
+
+This is scoped but not trivial -- it is new code in a new language, not a
+one-line change, and should be planned as its own piece of work, not done
+casually alongside training experiments.
+
+## 13.5 What to actually do with this section
+- Confirm 13.3 item 8's wording and consequence with your advisor before
+  treating it as certain -- the source PDF text is unambiguous, but you are
+  the one accountable for how it is currently graded/updated.
+- If confirmed, treat the ONNX/compiled-inference component (13.4) as its
+  own planned task, not an afterthought.
+- Write up the Optuna-insufficiency reasoning (0.8.C, 0.12.C) explicitly in
+  the project book, in the student's own words -- the rubric names Optuna
+  specifically as an insufficient tool on its own.
+- Map the module layout onto interface/logic/data (or restructure) and state
+  that mapping explicitly in the architecture section of the book.
+- Re-read your own submitted project proposal and confirm this architecture
+  (residual PID+RL, Isaac Lab, hand-written PPO) doesn't contradict its
+  wording, per automatic-failure condition 2.
+

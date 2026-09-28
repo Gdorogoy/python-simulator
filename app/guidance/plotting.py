@@ -332,55 +332,85 @@ def plot_grad_norm(csv_path, output_dir="plots_final"):
     print(f"[plot_grad_norm] wrote {output_dir}/grad_norm.png")
 
 
-def plot_grad_norm_3d(csv_path, output_dir="plots_final"):
-    """3D view of grad_norm over training: x=timesteps, y=lr, z=grad_norm -- shows whether
-    gradient spikes line up with where the LR schedule was at the time, not just when.
-    The trajectory is colored by grad_norm itself (a 'hot' colormap, dark->red->yellow as
-    it spikes) via a Line3DCollection, and interpolated to a denser point count so the
-    natural chunk-to-chunk noise reads as a continuous wavy ribbon instead of straight segments."""
-    from matplotlib.colors import Normalize
-    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+def plot_grad_norm_3d(csv_path, output_dir="plots_final", y_col="grade"):
+    """Landscape-style 3D view of grad_norm: x=timesteps, y=`y_col` (default grade), z=grad_norm, drawn as a
+    jet-colored surface with contour lines projected on the floor and this run's path (start dot ... arrowhead)
+    riding on top -- the way a loss-landscape descent is usually drawn.
 
+    The SURFACE IS INTERPOLATED, not a measured landscape: a Gaussian-kernel smooth of the logged
+    (timesteps, y, grad_norm) chunks that relaxes to the mean grad_norm away from any logged chunk, so
+    only the path itself is data. (y=lr, the old choice, gives no surface at all: lr is a fixed function of
+    timesteps, so the run only ever visits a single curve of that plane.)"""
     rows = _read_csv(csv_path)
-    if not rows:
-        print(f"[plot_grad_norm_3d] no rows found in {csv_path}")
+    if len(rows) < 4:
+        print(f"[plot_grad_norm_3d] need >= 4 rows in {csv_path}, found {len(rows)}")
         return
 
     os.makedirs(output_dir, exist_ok=True)
-    timesteps = np.array([float(r["timesteps"]) for r in rows])
-    grad_norm = np.array([float(r.get("grad_norm", 0.0) or 0.0) for r in rows])
-    lr = np.array([float(r.get("lr", 0.0) or 0.0) for r in rows])
+    col = lambda name: np.array([float(r.get(name, 0.0) or 0.0) for r in rows])
+    t, y, z = col("timesteps"), col(y_col), col("grad_norm")
 
-    if len(timesteps) >= 4:
-        dense_t = np.linspace(timesteps[0], timesteps[-1], len(timesteps) * 8)
-        lr_d = np.interp(dense_t, timesteps, lr)
-        grad_d = np.interp(dense_t, timesteps, grad_norm)
-    else:
-        dense_t, lr_d, grad_d = timesteps, lr, grad_norm
+    def unit(v):
+        return (v - v.min()) / (np.ptp(v) or 1.0)
+    tn, yn = unit(t), unit(y)
+    sig_t, sig_y, prior_w = 0.05, 0.10, 0.02
 
-    points = np.array([dense_t, lr_d, grad_d]).T.reshape(-1, 1, 3)
-    segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    norm = Normalize(grad_d.min(), grad_d.max() if grad_d.max() > grad_d.min() else grad_d.min() + 1)
-    lc = Line3DCollection(segments, cmap="hot", norm=norm)
-    lc.set_array(grad_d[:-1])
-    lc.set_linewidth(2.2)
+    def surface(px, py):
+        w = np.exp(-0.5 * (((px[..., None] - tn) / sig_t) ** 2 + ((py[..., None] - yn) / sig_y) ** 2))
+        return (w @ z + prior_w * z.mean()) / (w.sum(-1) + prior_w)
 
-    fig = plt.figure(figsize=(9, 7))
+    g = np.linspace(0, 1, 80)
+    GX, GY = np.meshgrid(g, g)
+    GZ = surface(GX, GY)
+    to_t = lambda u: t.min() + u * (np.ptp(t) or 1.0)
+    to_y = lambda u: y.min() + u * (np.ptp(y) or 1.0)
+    X, Y = to_t(GX), to_y(GY)
+
+    dense = np.linspace(0, 1, len(t) * 8)
+    order = np.argsort(tn)
+    pt, py_ = np.interp(dense, tn[order], tn[order]), np.interp(dense, tn[order], yn[order])
+    pz = surface(pt, py_)
+    z_range = max(GZ.max() - GZ.min(), 1e-9)
+    floor = GZ.min() - 0.35 * z_range
+    lift = 0.02 * z_range
+
+    fig = plt.figure(figsize=(11, 8.5))
     ax = fig.add_subplot(111, projection="3d")
-    ax.add_collection3d(lc)
-    ax.set_xlim(dense_t.min(), dense_t.max())
-    ax.set_ylim(min(lr_d.min(), lr_d.max()), max(lr_d.min(), lr_d.max()))
-    ax.set_zlim(grad_d.min(), grad_d.max())
-    ax.set_facecolor("black")
-    fig.patch.set_facecolor("white")
+    surf = ax.plot_surface(X, Y, GZ, cmap="jet", rstride=1, cstride=1, linewidth=0.2,
+                           edgecolor=(0, 0, 0, 0.25), antialiased=True, alpha=0.96)
+    ax.contour(X, Y, GZ, zdir="z", offset=floor, cmap="jet", levels=8, linewidths=1.3)
+    ax.plot(to_t(pt), to_y(py_), pz + lift, color="black", linewidth=2.4, zorder=10)
+    ax.plot([to_t(pt[0])], [to_y(py_[0])], [pz[0] + lift], marker="o", markersize=10, color="black", linestyle="none", zorder=11)  # a Line3D, not scatter: scatter is depth-sorted with the surface and can vanish behind it
+    # Arrowhead = two line segments, not a patch/quiver: Axes3D depth-sorts patches and collections
+    # against each other, so the big surface polygon gets drawn over a patch arrow; lines (zorder) draw last.
+    # Geometry is built in unit-cube coordinates (each axis scaled to 0..1) so the head looks the same size
+    # despite timesteps ~1e8 vs grade ~1, then mapped back to data units.
+    z_top = GZ.max() + 0.05 * z_range
+    to_zn = lambda v: (v - floor) / (z_top - floor)
+    from_zn = lambda u: floor + u * (z_top - floor)
+    k = max(2, len(pt) // 25)
+    tip = np.array([pt[-1], py_[-1], to_zn(pz[-1] + lift)])
+    direction = tip - np.array([pt[-k], py_[-k], to_zn(pz[-k] + lift)])
+    if np.linalg.norm(direction) > 1e-9:
+        direction /= np.linalg.norm(direction)
+        side = np.cross(direction, [0.0, 0.0, 1.0])
+        side = side / np.linalg.norm(side) if np.linalg.norm(side) > 1e-6 else np.array([1.0, 0.0, 0.0])
+        for sign in (1, -1):
+            wing = tip - 0.10 * direction + sign * 0.05 * side
+            ax.plot([to_t(wing[0]), to_t(tip[0])], [to_y(wing[1]), to_y(tip[1])],
+                    [from_zn(wing[2]), from_zn(tip[2])], color="black", linewidth=3.6,
+                    solid_capstyle="round", zorder=12)
 
+    ax.set_zlim(floor, z_top)
     ax.set_xlabel("timesteps")
-    ax.set_ylabel("lr")
+    ax.set_ylabel(y_col)
     ax.set_zlabel("grad_norm (pre-clip)")
-    ax.set_title("Gradient norm vs. LR schedule over training")
-    fig.colorbar(lc, ax=ax, shrink=0.6, pad=0.1, label="grad_norm")
+    ax.set_title("Gradient-norm landscape (interpolated surface; black path = this run)", fontsize=11)
+    ax.view_init(elev=27, azim=-62)
+    fig.colorbar(surf, ax=ax, shrink=0.55, pad=0.08, label="grad_norm")
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "grad_norm_3d.png")); plt.close(fig)
+    fig.savefig(os.path.join(output_dir, "grad_norm_3d.png"), dpi=130)
+    plt.close(fig)
     print(f"[plot_grad_norm_3d] wrote {output_dir}/grad_norm_3d.png")
 
 

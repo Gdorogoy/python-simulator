@@ -1,0 +1,13 @@
+{
+  "lr": 0.0001451,
+  "lam": 0.9066,
+  "clip_eps": 0.2048,
+  "vf_coef": 0.2087,
+  "target_kl": 0.008642,
+  "max_grad_norm": 1.347,
+  "log_std_max": -2.3,
+  "ent_coef_start": 0.01,
+  "ent_coef_end": 0.002,
+  "weight_decay": 3.828e-06,
+  "lr_min_ratio": 0.1621
+}

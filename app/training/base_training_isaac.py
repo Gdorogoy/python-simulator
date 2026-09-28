@@ -45,9 +45,17 @@ from app.training.base_training import (
     DEFAULT_DISTANCE_LOW, DEFAULT_DISTANCE_HIGH, DEFAULT_BC_CHECKPOINT_PATH,
 )
 
+# Overrides the imported value -- the soft-reset trigger below reads grade off
+# N_DIAGNOSTIC_EPISODES eval episodes, and 10 is noisy enough to false-trigger.
+N_DIAGNOSTIC_EPISODES = 30
+
 # GRAND TOTAL env-steps across ALL parallel envs, not per-env like base_training.py's TOTAL_TIMESTEPS.
 TOTAL_TIMESTEPS_ISAAC = 128_000_000
-IMITATION_FRACTION = 0.15
+# Lowered from 0.15 -- at 128M total_timesteps that was 19.2M steps (15%) of pure
+# imitation before critic_warmup/PPO even start, bigger than it needs to be now that
+# actor_log_std gets reset right after this stage anyway (see the reset above), so
+# there's less riding on imitation alone to hand off a well-calibrated actor.
+IMITATION_FRACTION = 0.08
 WARMUP_FRACTION = 0.01
 NUM_ENVS_ISAAC_DEFAULT = 4096
 NUM_STEPS_PER_CHUNK = 256
@@ -67,8 +75,60 @@ DEFAULT_CHECKPOINT_DIR_ISAAC = "runs/base_training_isaac"
 # the best checkpoint instead of letting PPO drift indefinitely away from it.
 # alpha=1 would be a hard reset; alpha<1 keeps some of the drifted weights.
 RESET_SUSTAIN_CHUNKS = 5
-RESET_DEGRADE_MARGIN = 0.15
-RESET_BLEND_ALPHA = 0.5
+# 0.25/0.5 fired 4 resets in runs/base_training_isaac_3_10_v1 and each one only recovered the grade to
+# ~0.75-0.83 while blending the critic back toward the (worse) early one (value_loss +5..8 every time).
+# 0.4 makes it a collapse-only safety net (trigger ~0.57 with best ~0.97; that run's worst trailing-5
+# mean was 0.65, so it would have fired 0 times); 0.75 pulls back harder when it does fire.
+RESET_DEGRADE_MARGIN = 0.4
+RESET_BLEND_ALPHA = 0.75
+# Critic-only chunks right after a reset fires, before resuming joint actor+critic
+# updates -- the blend also yanks the critic back, so it needs the same kind of
+# recalibration window the run-start warmup exists for.
+RESET_WARMUP_CHUNKS = 2
+# Rollout-only chunks at the very start of the post-imitation loop, before the
+# critic-warmup stage or anything else -- no gradient updates at all (not even
+# critic). Needs isaac_ppo_train's skip_update, not requires_grad freezing --
+# freezing every param leaves nothing for backward() to hook into.
+RUN_START_FROZEN_CHUNKS = 3
+# Promotion gate: a stage counts as "solid" -- ready to seed the next distance range -- once SOLID_WINDOW
+# consecutive chunks, ALL at loop-chunk index >= SOLID_MIN_CHUNK, average >= SOLID_GRADE with none below
+# SOLID_WINDOW_MIN_GRADE (same avg/min shape as plotting._print_suitable_weights). The chunk index counts
+# warmup (training starts at chunk MIN_WARMUP_CHUNKS = 16), so 40 means >= 24 PPO chunks of real training:
+# it keeps a checkpoint that is just the imitation policy (~0.95 grade, first few post-unfreeze chunks)
+# from being promoted as if PPO had produced it.
+SOLID_GRADE = 0.8
+SOLID_MIN_CHUNK = 40
+SOLID_WINDOW = 5
+SOLID_WINDOW_MIN_GRADE = 0.6
+
+
+def training_progress_at(ppo_timesteps_done: int, warmup_timesteps_grand: int, ppo_total_timesteps_grand: int) -> float:
+    """0 through critic warmup, then 0 -> 1 across the PPO stage alone. Both the entropy and LR schedules
+    run on this: the actor is frozen during warmup, so any schedule that started counting at chunk 0
+    was just burning itself down where it can't act (entropy hit its floor ~10 chunks into warmup and
+    sat flat all training; LR had already decayed ~14% by unfreeze)."""
+    return min(1.0, max(0.0, (ppo_timesteps_done - warmup_timesteps_grand) / max(1, ppo_total_timesteps_grand)))
+
+
+def scheduled_lr(ppo_timesteps_done: int, warmup_timesteps_grand: int, post_imitation_timesteps_grand: int,
+                 base_lr: float, min_ratio: float) -> float:
+    """Flat at base_lr through critic warmup (nothing to decay for -- only the critic trains, and it was
+    still improving at chunk 16), then the cosine over the FULL warmup+PPO span from that point on. That
+    second part is deliberately the original profile, not one spanning the PPO stage alone: v2 (cosine over
+    training only) ran ~45% higher lr mid-run than v1 and drifted faster late (chunks 12-40 mean grade
+    0.648 vs 0.731)."""
+    if ppo_timesteps_done < warmup_timesteps_grand:
+        return base_lr
+    return cosine_lr(base_lr, ppo_timesteps_done / post_imitation_timesteps_grand, min_ratio=min_ratio)
+
+
+def entropy_coef_at(ppo_timesteps_done: int, warmup_timesteps_grand: int, ppo_total_timesteps_grand: int,
+                    start: float, end: float) -> float:
+    """Held at `start` through critic warmup, then linear start -> end across the PPO stage. Reaches `end`
+    exactly at the end of the run for any end/start ratio (the old max(end, start*(1-progress)) only did
+    when end << start)."""
+    return start + (end - start) * training_progress_at(ppo_timesteps_done, warmup_timesteps_grand,
+                                                         ppo_total_timesteps_grand)
 
 
 def _select_pid_teacher_isaac(env, pid: TorchPIDController, gains_by_dist: dict, env_ids):
@@ -84,6 +144,52 @@ def _read_kinematics(env):
     roll, pitch, yaw = math_utils.euler_xyz_from_quat(quat_wxyz)
     target_local = unwrapped._desired_pos_w - unwrapped._terrain.env_origins
     return pos, vel, ang_vel, roll, pitch, yaw, target_local
+
+
+class PidResidualEnv:
+    """Gym-env wrapper: the policy's action becomes a small CORRECTION on top of the per-distance PID.
+        env_action = pid_action + residual_scale * policy_action
+    policy_action is the usual tanh-scaled action in [action_low, action_high], centered on 0 (the bounds
+    are symmetric), so a policy that outputs ~0 IS the PID -- PPO starts at PID performance by construction
+    and can only add corrections of at most residual_scale x the action range, which also bounds how far
+    drift can take it and shrinks the exploration noise's effect by the same factor. The env clamps the
+    final action itself (_pre_physics_step). PID state is handled exactly as the imitation stage does:
+    gains re-picked by start distance and integrators cleared for every env that just reset. Everything
+    else (unwrapped, spaces, close, ...) is delegated to the wrapped env."""
+
+    def __init__(self, env, gains_by_dist: dict, residual_scale: float):
+        self.env = env
+        self._gains_by_dist = gains_by_dist
+        self._residual_scale = residual_scale
+        unwrapped = env.unwrapped
+        self._pid = TorchPIDController(unwrapped.num_envs, unwrapped.device, **next(iter(gains_by_dist.values())))
+        self._all_env_ids = torch.arange(unwrapped.num_envs, device=unwrapped.device)
+        self._reinit_pid(self._all_env_ids)
+
+    def __getattr__(self, name):
+        if name == "env":
+            raise AttributeError(name)
+        return getattr(self.env, name)
+
+    def _reinit_pid(self, env_ids):
+        _select_pid_teacher_isaac(self.env, self._pid, self._gains_by_dist, env_ids)
+        self._pid.reset(env_ids)
+
+    def reset(self, *args, **kwargs):
+        out = self.env.reset(*args, **kwargs)
+        self._reinit_pid(self._all_env_ids)
+        return out
+
+    def step(self, action):
+        with torch.no_grad():
+            pos, vel, ang_vel, roll, pitch, yaw, target_local = _read_kinematics(self.env)
+            pid_action = self._pid.compute_action(pos, vel, ang_vel, roll, pitch, yaw, target_local,
+                                                   self.env.unwrapped._desired_yaw_w, dt=1 / 240)
+        obs, reward, terminated, truncated, extras = self.env.step(pid_action + self._residual_scale * action)
+        done_ids = torch.nonzero(terminated | truncated, as_tuple=False).squeeze(-1)
+        if len(done_ids) > 0:
+            self._reinit_pid(done_ids)
+        return obs, reward, terminated, truncated, extras
 
 
 def _run_imitation_stage_isaac(env, model, steps_budget_per_env: int, gains_by_dist: dict,
@@ -183,12 +289,61 @@ def _append_csv_row(row: dict, csv_path: str):
         writer.writerow(row)
 
 
+METRICS_JSON_PATH = "runs/isaac_training_metrics.json"
+
+
+def _append_json_row(row: dict, json_path: str, run_key: str):
+    """Local mlflow-style log, one shared file across every run: {"runs":
+    {run_key: {metric_name: [value_per_chunk, ...], ...}}}. Rewrites the whole
+    file each call (not a real append) -- simplest way to stay valid JSON
+    without a streaming writer; fine at this scale (one number per metric per
+    chunk, a few hundred chunks per run)."""
+    os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+    if os.path.isfile(json_path):
+        with open(json_path) as f:
+            data = json.load(f)
+    else:
+        data = {"runs": {}}
+    run_data = data["runs"].setdefault(run_key, {})
+    for k, v in row.items():
+        run_data.setdefault(k, []).append(v)
+    tmp_path = json_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, json_path)  # atomic -- a crash mid-write can't corrupt the real file
+
+
 def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE_HIGH,
           checkpoint_dir=DEFAULT_CHECKPOINT_DIR_ISAAC, bc_checkpoint_path=DEFAULT_BC_CHECKPOINT_PATH,
-          total_timesteps=TOTAL_TIMESTEPS_ISAAC, seed=None, hparams_override: dict | None = None):
+          total_timesteps=TOTAL_TIMESTEPS_ISAAC, seed=None, hparams_override: dict | None = None,
+          num_steps_per_chunk: int = NUM_STEPS_PER_CHUNK,
+          solid_grade: float = SOLID_GRADE, solid_min_chunk: int = SOLID_MIN_CHUNK,
+          solid_window: int = SOLID_WINDOW, stop_when_solid: bool = True,
+          residual_scale: float = 0.0, detach_critic: bool = False, residual_resume: bool = False):
     """Runs one fixed-range training stage against a live Isaac env (build it yourself via
     gym.make(...) and pass it in). hparams_override optionally overrides any PARAMS key
-    or the module-level entropy/weight-decay/lr-floor constants; unrecognized keys are ignored."""
+    or the module-level entropy/weight-decay/lr-floor constants; unrecognized keys are ignored.
+
+    residual_scale > 0: PID-residual mode. The policy learns a correction on top of the per-distance PID
+    (PidResidualEnv: env_action = pid + residual_scale * policy_action; eval applies the same composition).
+    The BC checkpoint's trunk is still loaded, but actor_mean is zeroed so the correction starts at exactly 0
+    (= pure PID), and the imitation stage is skipped (it would just re-fit actor_mean to the PID's actions,
+    which as a correction would double the PID). 0 = the original direct-policy training.
+    residual_resume: the loaded checkpoint is itself a residual-mode one (e.g. the previous distance stage's
+    SOLID.json checkpoint), so keep its actor head -- the learned correction -- instead of zeroing it.
+    Zeroing is only right when the checkpoint is a direct-policy BC/DAgger one (its head outputs full PID
+    actions, which as a correction would double the PID).
+    detach_critic: value-head gradients don't reach the shared trunk (ActorCritic.detach_critic).
+
+    Promotion gate (solid_*): once solid_window consecutive chunks, all at loop-chunk index >=
+    solid_min_chunk, average >= solid_grade (none below SOLID_WINDOW_MIN_GRADE), writes
+    <checkpoint_dir>/SOLID.json naming the checkpoint to seed the next range from and, if
+    stop_when_solid, ends the stage there. If it never fires, prints the best qualifying window.
+
+    num_steps_per_chunk: per-env rollout length per PPO chunk -- chunk_grand_steps =
+    num_steps_per_chunk * env.unwrapped.num_envs, so n_chunks (and every fixed-chunk-count
+    floor: MIN_WARMUP_CHUNKS, RESET_SUSTAIN_CHUNKS, etc.) shrinks as num_envs grows unless
+    this is scaled down to compensate. Defaults to the module constant for backward compat."""
     hparams_override = hparams_override or {}
     run_start = datetime.now()
     print(f"[train_isaac] run started at {run_start.isoformat(timespec='seconds')}")
@@ -226,7 +381,8 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
 
     model = ActorCritic(obs_dim, action_dim, unwrapped.single_action_space.low, unwrapped.single_action_space.high,
                          hidden=p["hidden"], num_hidden_layers=p["num_hidden_layers"],
-                         dropout=p["dropout"], log_std_max=p["log_std_max"]).to(device)
+                         dropout=p["dropout"], log_std_max=p["log_std_max"],
+                         detach_critic=detach_critic).to(device)
 
     if os.path.exists(bc_checkpoint_path):
         load_bc_checkpoint(model, bc_checkpoint_path, map_location=device)
@@ -234,9 +390,22 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
     else:
         print(f"[train_isaac] no BC checkpoint at {bc_checkpoint_path}, starting imitation from random init")
 
-    chunk_grand_steps = NUM_STEPS_PER_CHUNK * num_envs
+    if residual_scale > 0:
+        if not residual_resume:
+            with torch.no_grad():
+                model.actor_mean.weight.zero_()
+                model.actor_mean.bias.zero_()
+        env = PidResidualEnv(env, gains_by_dist, residual_scale)
+        head_note = ("actor head KEPT from the loaded residual checkpoint (--residual-resume)" if residual_resume
+                     else "actor_mean zeroed (correction starts at 0)")
+        print(f"[train_isaac] PID-residual mode: env_action = pid + {residual_scale} * policy_action, "
+              f"{head_note}, imitation stage skipped")
+    if detach_critic:
+        print("[train_isaac] detach_critic: value loss no longer trains the shared trunk")
 
-    imitation_timesteps_grand = int(IMITATION_FRACTION * total_timesteps)
+    chunk_grand_steps = num_steps_per_chunk * num_envs
+
+    imitation_timesteps_grand = 0 if residual_scale > 0 else int(IMITATION_FRACTION * total_timesteps)
     warmup_timesteps_grand = int(WARMUP_FRACTION * total_timesteps)
     warmup_timesteps_grand = max(warmup_timesteps_grand, MIN_WARMUP_CHUNKS * chunk_grand_steps)
     ppo_total_timesteps_grand = total_timesteps - imitation_timesteps_grand - warmup_timesteps_grand
@@ -248,6 +417,21 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
         print(f"[train_isaac] imitation stage: {imitation_timesteps_grand} grand-total steps "
               f"({imitation_steps_per_env} per env)")
         model = _run_imitation_stage_isaac(env, model, imitation_steps_per_env, gains_by_dist)
+
+    # Both load_bc_checkpoint AND _run_imitation_stage_isaac (via pretrain_behavior_cloning's
+    # Gaussian NLL, same call used by the offline BC/DAgger scripts) score actor_log_std
+    # against a deterministic PID teacher -- zero true variance in the target, so NLL is
+    # minimized by collapsing std toward the log_std_min floor. Resetting only after
+    # load_bc_checkpoint (tried first) doesn't survive this on-policy imitation stage
+    # re-collapsing it right back down -- verified in runs/base_training_isaac_3_10_fixed
+    # (effective_std_mean still pinned ~exp(-3.0) the WHOLE run despite that earlier reset).
+    # Reset here instead, as the last thing before the critic-warmup freeze locks it in:
+    # tanh(0)=0 sits at the midpoint of [log_std_min, log_std_max], in tanh's live gradient
+    # region, so PPO actually gets to choose an exploration level instead of inheriting a
+    # frozen imitation-stage artifact. Keeps the actor_mean/critic weights untouched.
+    with torch.no_grad():
+        model.actor_log_std.zero_()
+    print("[train_isaac] actor_log_std reset to 0 post-imitation, pre-critic-warmup-freeze")
 
     # Actor frozen for warmup_timesteps_grand worth of chunks, then unfrozen -- the
     # same isaac_ppo_train call used for the rest of training also IS the warmup.
@@ -266,10 +450,13 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
     eval_env = BaseDroneEnv(reward_func, target_pairs=target_pairs,
                              max_steps=steps_for_dist(distance_high))
 
-    start_run(experiment_name="base-training-isaac",
-              run_name=f"base_training_isaac_{distance_low:g}_{distance_high:g}")
+    run_name = f"base_training_isaac_{distance_low:g}_{distance_high:g}"
+    run_key = f"{run_name}_{run_start.strftime('%Y%m%d_%H%M%S')}"  # unique even if the same range is rerun
+    start_run(experiment_name="base-training-isaac", run_name=run_name)
     mlflow.set_tag("run_start_time", run_start.isoformat(timespec="seconds"))
-    log_params_safe({**p, "num_envs": num_envs, "total_timesteps": total_timesteps,
+    log_params_safe({**p, "num_envs": num_envs, "num_steps_per_chunk": num_steps_per_chunk,
+                      "residual_scale": residual_scale, "detach_critic": detach_critic,
+                      "total_timesteps": total_timesteps,
                       "distance_low": distance_low, "distance_high": distance_high,
                       "bc_checkpoint_path": bc_checkpoint_path, "checkpoint_dir": checkpoint_dir,
                       "seed": seed, "n_target_pairs": len(target_pairs),
@@ -288,8 +475,29 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
     best_grade = float("-inf")
     best_ckpt_path = None
     grade_history = []
+    post_reset_frozen_chunks_left = 0
+    pending_post_reset_unfreeze = False
+    chunk_grades = {}  # loop-chunk index -> (grade, checkpoint path), for the promotion gate
+    solid_info = None
+    if n_chunks < solid_min_chunk + solid_window:
+        print(f"[train_isaac] WARNING: n_chunks={n_chunks} < solid_min_chunk({solid_min_chunk}) + "
+              f"solid_window({solid_window}) -- the promotion gate can never fire this run")
     for chunk in range(n_chunks):
-        if actor_frozen and ppo_timesteps_done >= warmup_timesteps_grand:
+        run_start_frozen = chunk < RUN_START_FROZEN_CHUNKS
+        if run_start_frozen and chunk == 0:
+            print(f"[train_isaac] chunks 0-{RUN_START_FROZEN_CHUNKS - 1}: rollout only, "
+                  f"no gradient updates (run-start settle)")
+        if post_reset_frozen_chunks_left > 0:
+            post_reset_frozen_chunks_left -= 1
+            if post_reset_frozen_chunks_left == 0:
+                pending_post_reset_unfreeze = True
+        elif pending_post_reset_unfreeze:
+            for param in model.parameters():
+                param.requires_grad_(True)
+            chunks_since_unfreeze = 0
+            pending_post_reset_unfreeze = False
+            print(f"[train_isaac] post-reset critic warmup done at {timesteps_done} steps -- actor unfrozen")
+        elif actor_frozen and ppo_timesteps_done >= warmup_timesteps_grand:
             for param in model.parameters():
                 param.requires_grad_(True)
             actor_frozen = False
@@ -300,21 +508,22 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
 
         stage = "critic_warmup" if ppo_timesteps_done < warmup_timesteps_grand else "training"
 
-        progress = ppo_timesteps_done / post_imitation_timesteps_grand
-        current_ent_coef = max(ent_coef_end, ent_coef_start * (1 - progress))
-        current_lr = cosine_lr(p["lr"], progress, min_ratio=lr_min_ratio)
+        current_ent_coef = entropy_coef_at(ppo_timesteps_done, warmup_timesteps_grand,
+                                            ppo_total_timesteps_grand, ent_coef_start, ent_coef_end)
+        current_lr = scheduled_lr(ppo_timesteps_done, warmup_timesteps_grand, post_imitation_timesteps_grand,
+                                   p["lr"], lr_min_ratio)
         if chunks_since_unfreeze is not None and chunks_since_unfreeze < UNFREEZE_LR_RAMP_CHUNKS:
             current_lr *= (chunks_since_unfreeze + 1) / UNFREEZE_LR_RAMP_CHUNKS
         for group in optimizer.param_groups:
             group["lr"] = current_lr
 
         model, optimizer, episode_rewards, last_losses, ppo_obs = isaac_ppo_train(
-            env, total_timesteps=chunk_grand_steps, num_steps=NUM_STEPS_PER_CHUNK,
+            env, total_timesteps=chunk_grand_steps, num_steps=num_steps_per_chunk,
             gamma=p["gamma"], lam=p["lam"], lr=current_lr, model=model, optimizer=optimizer,
             ent_coef=current_ent_coef, target_kl=p["target_kl"], num_epochs=p["num_epochs"],
             batch_size=max(1, chunk_grand_steps // p["num_minibatches"]),
             clip_eps=p["clip_eps"], vf_coef=p["vf_coef"], max_grad_norm=p["max_grad_norm"],
-            initial_obs=ppo_obs,
+            initial_obs=ppo_obs, skip_update=run_start_frozen,
         )
         timesteps_done += chunk_grand_steps
         ppo_timesteps_done += chunk_grand_steps
@@ -330,7 +539,8 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
         torch.save(model.state_dict(), ckpt_path)
         export_onnx_model(model, obs_dim, ckpt_path[:-3] + ".onnx")
 
-        outcomes = diagnose_with_model(model, eval_env, N_DIAGNOSTIC_EPISODES)
+        outcomes = diagnose_with_model(model, eval_env, N_DIAGNOSTIC_EPISODES,
+                                       residual_scale=residual_scale, gains_by_dist=gains_by_dist)
         # reward_func never sets hover_success, so counting "Hit" too keeps this comparable to pid_success_rate.
         success_rate = (outcomes["hover_success"] + outcomes.get("Hit", 0)) / N_DIAGNOSTIC_EPISODES
         grade, breakdown = compute_grade(
@@ -354,6 +564,17 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
                         model, optimizer, best_ckpt_path, RESET_BLEND_ALPHA, current_lr, weight_decay, device)
                     reset_triggered = True
                     grade_history = []  # cooldown: need a fresh sustain window before resetting again
+
+                    # Blend also moved the critic -- give it RESET_WARMUP_CHUNKS
+                    # critic-only chunks before the actor trains again, same
+                    # reasoning as the run-start warmup.
+                    for param in model.shared.parameters():
+                        param.requires_grad_(False)
+                    model.actor_mean.weight.requires_grad_(False)
+                    model.actor_mean.bias.requires_grad_(False)
+                    model.actor_log_std.requires_grad_(False)
+                    post_reset_frozen_chunks_left = RESET_WARMUP_CHUNKS
+                    print(f"[train_isaac] freezing actor for {RESET_WARMUP_CHUNKS} chunks (post-reset critic warmup)")
 
         pid_outcomes = diagnose_with_pid(eval_env.pid_teacher, eval_env, N_DIAGNOSTIC_EPISODES,
                                           gains_by_dist=gains_by_dist)
@@ -397,10 +618,47 @@ def train(env, distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE
                           step=timesteps_done)
         mlflow.set_tag("stage", stage)
         _append_csv_row(row, metrics_csv)
+        _append_json_row(row, METRICS_JSON_PATH, run_key)
         print(f"[train_isaac] {timesteps_done}/{total_timesteps}  stage={stage}  ent_coef={current_ent_coef:.4f}  "
               f"lr={current_lr:.2e}  grad_norm={grad_norm:.3f}  grade={grade:.4f}  best_grade={best_grade:.4f}  "
               f"reset={reset_triggered}  success_rate={success_rate:.2f}  outcomes={outcome_counts}  "
               f"pid_success_rate={pid_success_rate:.2f}  pid_avg_final_dist={pid_avg_final_dist:.2f}")
+
+        chunk_grades[chunk] = (grade, ckpt_path)
+        window_start = chunk - solid_window + 1
+        if solid_info is None and stage == "training" and window_start >= solid_min_chunk:
+            window = [(c, *chunk_grades[c]) for c in range(window_start, chunk + 1)]
+            w_grades = [g for _, g, _ in window]
+            if float(np.mean(w_grades)) >= solid_grade and min(w_grades) >= SOLID_WINDOW_MIN_GRADE:
+                pick_chunk, pick_grade, pick_ckpt = max(window, key=lambda w: w[1])
+                solid_info = {
+                    "solid_at_chunk": chunk, "window_chunks": [window_start, chunk],
+                    "window_grades": [round(g, 4) for g in w_grades],
+                    "window_mean": round(float(np.mean(w_grades)), 4), "window_min": round(min(w_grades), 4),
+                    "checkpoint": pick_ckpt, "checkpoint_chunk": pick_chunk, "checkpoint_grade": round(pick_grade, 4),
+                    "distance_low": distance_low, "distance_high": distance_high,
+                }
+                with open(os.path.join(checkpoint_dir, "SOLID.json"), "w") as f:
+                    json.dump(solid_info, f, indent=2)
+                mlflow.set_tag("solid_at_chunk", str(chunk))
+                print(f"[train_isaac] SOLID at chunk {chunk}: chunks {window_start}-{chunk} average "
+                      f"{solid_info['window_mean']:.3f} (min {solid_info['window_min']:.3f}) >= {solid_grade} -- "
+                      f"promote {pick_ckpt} (chunk {pick_chunk}, grade {pick_grade:.3f}) via "
+                      f"--bc-checkpoint; details in {checkpoint_dir}/SOLID.json")
+                if stop_when_solid:
+                    break
+
+    if solid_info is None:
+        eligible = [(float(np.mean([chunk_grades[c][0] for c in range(s, s + solid_window)])), s)
+                    for s in range(solid_min_chunk, max(chunk_grades, default=-1) - solid_window + 2)
+                    if s in chunk_grades]
+        if eligible:
+            best_mean, best_start = max(eligible)
+            print(f"[train_isaac] NOT solid: best {solid_window}-chunk window at chunk >= {solid_min_chunk} "
+                  f"was chunks {best_start}-{best_start + solid_window - 1}, average {best_mean:.3f} "
+                  f"(need >= {solid_grade}, none below {SOLID_WINDOW_MIN_GRADE})")
+        else:
+            print(f"[train_isaac] NOT solid: run never had {solid_window} chunks at index >= {solid_min_chunk}")
 
     if ckpt_path:
         mlflow.log_artifact(ckpt_path)

@@ -47,7 +47,10 @@ from app.training.eval_matrix import build_eval_pairs, run_eval_matrix, make_pid
 # regardless of target distance, so gains tuned tight for a short error can't
 # close a long one, while gains loose enough for long range overshoot on short
 # ones. Solve a separate gains set per distance instead.
-DISTANCES = (3, 10, 50, 100, 150, 250)
+# 20/30 added for the 3-30m curriculum stage -- without them, nearest-neighbor
+# lookup (assign_gains_by_distance) snapped almost the whole 10-30m span to the
+# 10m bucket's gains, tuned for a much tighter settle-time budget than that span.
+DISTANCES = (3, 10, 20, 30, 50, 100, 150, 250)
 
 G = 9.81
 MAX_TILT_RAD = 0.3  # must match PIDController's default

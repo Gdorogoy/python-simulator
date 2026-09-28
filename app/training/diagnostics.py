@@ -68,15 +68,31 @@ def _run_diagnostic_episodes(env, n_episodes, get_action, label, on_reset=None):
     return outcomes
 
 
-def diagnose_with_model(model, env, n_episodes):
+def diagnose_with_model(model, env, n_episodes, residual_scale=0.0, gains_by_dist=None):
+    """residual_scale > 0: the model's (deterministic mean) action is a CORRECTION on top of the per-distance
+    PID -- executed action = clip(pid_action + residual_scale * model_action), the same composition
+    base_training_isaac.PidResidualEnv applies during training -- so the grade measures the policy that is
+    actually being trained. Needs gains_by_dist (same per-episode gain swap diagnose_with_pid does)."""
+    if residual_scale > 0:
+        from app.environmental.subproc_vec_base_drone_env import _select_pid_teacher
+
     def get_action(obs):
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
             mean, std, _ = model.forward(obs_t)
             action = model.scale_action(mean)
-        return action.squeeze(0).cpu().numpy()
+        action = action.squeeze(0).cpu().numpy()
+        if residual_scale > 0:
+            pid_action = env.pid_teacher.compute_action(env.drone_state, env.target_pos, env.target_yaw)
+            action = np.clip(np.asarray(pid_action) + residual_scale * action,
+                             env.action_space.low, env.action_space.high)
+        return action
 
-    return _run_diagnostic_episodes(env, n_episodes, get_action, label="model")
+    def on_reset():
+        _select_pid_teacher(env, gains_by_dist)
+
+    return _run_diagnostic_episodes(env, n_episodes, get_action, label="model",
+                                    on_reset=on_reset if residual_scale > 0 else None)
 
 
 def diagnose_with_pid(pid, env, n_episodes, gains_by_dist=None):

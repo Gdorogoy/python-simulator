@@ -19,10 +19,15 @@ def cosine_lr(base_lr, progress, min_ratio=0.01):
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, action_low, action_high,
                  hidden: int = 64, num_hidden_layers: int = 4, dropout: float = 0.0,
-                 log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX):
+                 log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX,
+                 detach_critic: bool = False):
+        """detach_critic: the value head reads the shared trunk's features through .detach(), so value-loss
+        gradients never reach the trunk the actor also reads (only the actor loss trains it). Off by default;
+        it's a plain flag, not a parameter, so it isn't saved in checkpoints."""
         super().__init__()
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        self.detach_critic = detach_critic
 
         # num_hidden_layers Linear layers, Tanh(+Dropout) between all but the
         layers = []
@@ -51,7 +56,7 @@ class ActorCritic(nn.Module):
         action_mean = self.actor_mean(x)
         log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (torch.tanh(self.actor_log_std) + 1)
         action_std = torch.exp(log_std)
-        state_value = self.critic_head(x).squeeze(-1)
+        state_value = self.critic_head(x.detach() if self.detach_critic else x).squeeze(-1)
         return action_mean, action_std, state_value
 
     def scale_action(self, raw_action):
@@ -554,6 +559,7 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
                      value_clip_eps: float | None = None, adaptive_kl_lr: bool = False,
                      distill_teacher_fn=None, distill_coef: float = 0.0,
                      initial_obs: "torch.Tensor | None" = None,
+                     skip_update: bool = False,
                      ):
     """Same interface/semantics as vec_ppo_train, but drives an Isaac Lab DirectRLEnv directly:
     torch tensors in/out, GPU-resident, num_envs = env.unwrapped.num_envs.
@@ -565,6 +571,11 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
     on the same env, so it skips a full env.reset() -- a reset every call corrupts reward-shaping
     state and randomizes episode_length_buf, silently wrecking short-chunk training (see
     PROJECT_DEFENSE_GUIDE.md Part 8.5.1). None (default) does a fresh reset, fine for one-off calls.
+
+    skip_update: collect rollouts (advancing the env, filling episode_rewards) but never call
+    ppo_update -- for a rollout-only settle period where the whole model must stay byte-identical,
+    which plain requires_grad freezing can't do (backward() has no leaf to differentiate through
+    if every param is frozen). last_losses is returned as {} in this case.
 
     Returns (model, optimizer, episode_rewards, last_losses, final_obs) -- final_obs feeds the next call's initial_obs."""
     unwrapped = env.unwrapped
@@ -652,16 +663,19 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
         )
         flat_teacher_actions = buf_teacher_actions.reshape(-1, action_dim) if buf_teacher_actions is not None else None
 
-        last_losses = ppo_update(model, optimizer, flat_buffer, advantages.reshape(-1), returns.reshape(-1),
-                   clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef, num_epochs=num_epochs,
-                   batch_size=batch_size, max_grad_norm=max_grad_norm,
-                   global_timesteps_done=global_timesteps_offset + timesteps_done,
-                   global_total_timesteps=global_total_timesteps, target_kl=target_kl,
-                   value_clip_eps=value_clip_eps,
-                   distill_target_actions=flat_teacher_actions, distill_coef=distill_coef)
+        if skip_update:
+            last_losses = {}
+        else:
+            last_losses = ppo_update(model, optimizer, flat_buffer, advantages.reshape(-1), returns.reshape(-1),
+                       clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef, num_epochs=num_epochs,
+                       batch_size=batch_size, max_grad_norm=max_grad_norm,
+                       global_timesteps_done=global_timesteps_offset + timesteps_done,
+                       global_total_timesteps=global_total_timesteps, target_kl=target_kl,
+                       value_clip_eps=value_clip_eps,
+                       distill_target_actions=flat_teacher_actions, distill_coef=distill_coef)
 
-        if adaptive_kl_lr:
-            current_lr = adaptive_kl_lr_step(optimizer, current_lr, last_losses["approx_kl"], target_kl)
+            if adaptive_kl_lr:
+                current_lr = adaptive_kl_lr_step(optimizer, current_lr, last_losses["approx_kl"], target_kl)
 
     return model, optimizer, episode_rewards, last_losses, obs
 

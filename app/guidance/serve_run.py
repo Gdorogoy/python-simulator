@@ -41,6 +41,11 @@ class RecordRequest(BaseModel):
     distance_low: float = 3.0
     distance_high: float = 10.0
     seed: int | None = None
+    # > 0 if the checkpoint was trained with --residual-scale (base_training_isaac.py PID-residual
+    # mode) -- must match the value training used, or the composed action is wrong (see
+    # record_run.RESIDUAL_GAINS_PATH's comment: feeding a residual checkpoint's raw output alone
+    # means "hover, don't steer", so every episode times out regardless of checkpoint quality).
+    residual_scale: float = 0.0
 
 
 class EvaluateRequest(RecordRequest):
@@ -54,6 +59,7 @@ class RankRequest(BaseModel):
     seed: int | None = None
     n_scenarios: int = N_EVAL_SCENARIOS
     top_n: int = 5
+    residual_scale: float = 0.0
 
 
 @app.get("/api/checkpoints")
@@ -71,7 +77,8 @@ def api_record(req: RecordRequest):
     out_name = f"{uuid.uuid4().hex}.mp4"
     out_path = os.path.join(RECORDINGS_DIR, out_name)
     stats = record_checkpoint(checkpoint, out_path, distance_low=req.distance_low,
-                               distance_high=req.distance_high, seed=req.seed)
+                               distance_high=req.distance_high, seed=req.seed,
+                               residual_scale=req.residual_scale)
     return {"video_url": f"/recordings/{out_name}", "checkpoint": checkpoint, **stats}
 
 
@@ -83,7 +90,8 @@ def api_evaluate(req: EvaluateRequest):
         raise HTTPException(404, f"checkpoint not found: {checkpoint}")
 
     result = evaluate_checkpoint(checkpoint, n_scenarios=req.n_scenarios, distance_low=req.distance_low,
-                                  distance_high=req.distance_high, seed=req.seed)
+                                  distance_high=req.distance_high, seed=req.seed,
+                                  residual_scale=req.residual_scale)
     summary_name = f"{uuid.uuid4().hex}.txt"
     with open(os.path.join(RECORDINGS_DIR, summary_name), "w") as f:
         f.write(result["summary_text"])
@@ -99,7 +107,8 @@ def api_rank(req: RankRequest):
         raise HTTPException(404, f"no .pt files in {req.dir}")
 
     result = rank_checkpoints(checkpoints, n_scenarios=req.n_scenarios, distance_low=req.distance_low,
-                               distance_high=req.distance_high, seed=req.seed, top_n=req.top_n)
+                               distance_high=req.distance_high, seed=req.seed, top_n=req.top_n,
+                               residual_scale=req.residual_scale)
     summary_name = f"{uuid.uuid4().hex}.txt"
     with open(os.path.join(RECORDINGS_DIR, summary_name), "w") as f:
         f.write(result["summary_text"])
@@ -143,7 +152,12 @@ HTML_PAGE = """<!doctype html>
     <label>Seed (optional)</label>
     <input id="seed" type="number" style="width:100%">
   </div>
+  <div>
+    <label>Residual scale (0 = direct policy)</label>
+    <input id="residualScale" type="number" value="0" step="0.05" min="0" style="width:100%">
+  </div>
 </div>
+<div id="residualHint" style="font-size:12px;color:#a60;margin-top:2px;"></div>
 
 <button id="runBtn" onclick="runRecord()">Record &amp; Play</button>
 <button id="evalBtn" onclick="runEvaluate()">Run Full Evaluation (75 scenarios)</button>
@@ -176,6 +190,24 @@ async function loadCheckpoints() {
   if (data.checkpoints.length === 0) {
     sel.innerHTML = '<option value="">(no .pt checkpoints found under runs/ or app/control/)</option>';
   }
+  sel.onchange = updateResidualHint;
+  updateResidualHint();
+}
+
+function residualScale() {
+  return parseFloat(document.getElementById('residualScale').value) || 0;
+}
+
+// Best-effort nudge, not a guarantee: a checkpoint from a run trained with --residual-scale > 0
+// evaluates as "hover, don't steer" if residual_scale is left at 0 here (see record_run.py's
+// RESIDUAL_GAINS_PATH comment) -- path naming is the only signal this page has, so this is a hint,
+// not a check; always confirm against the run's own logged residual_scale (mlflow/metrics.csv).
+function updateResidualHint() {
+  const cp = (document.getElementById('checkpoint').value || '').toLowerCase();
+  const hint = document.getElementById('residualHint');
+  hint.textContent = (residualScale() === 0 && /res(idual)?[_-]?v?\d*[\\/]/.test(cp))
+    ? "This checkpoint's path looks like a residual-mode run -- if it was trained with --residual-scale, set the same value above or every episode will just hover."
+    : '';
 }
 
 async function runRecord() {
@@ -193,6 +225,7 @@ async function runRecord() {
     distance_low: parseFloat(document.getElementById('distLow').value),
     distance_high: parseFloat(document.getElementById('distHigh').value),
     seed: document.getElementById('seed').value ? parseInt(document.getElementById('seed').value) : null,
+    residual_scale: residualScale(),
   };
 
   try {
@@ -228,6 +261,7 @@ async function runEvaluate() {
     distance_low: parseFloat(document.getElementById('distLow').value),
     distance_high: parseFloat(document.getElementById('distHigh').value),
     seed: document.getElementById('seed').value ? parseInt(document.getElementById('seed').value) : null,
+    residual_scale: residualScale(),
   };
 
   try {
@@ -263,6 +297,7 @@ async function runRank() {
     distance_low: parseFloat(document.getElementById('distLow').value),
     distance_high: parseFloat(document.getElementById('distHigh').value),
     seed: document.getElementById('seed').value ? parseInt(document.getElementById('seed').value) : null,
+    residual_scale: residualScale(),
   };
 
   try {
