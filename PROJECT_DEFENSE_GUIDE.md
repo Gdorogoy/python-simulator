@@ -33,6 +33,31 @@ Scope: every active `.py` file under `app/`, excluding `__pycache__`,
    submission and again before the oral defense (the rubric's "מעמד הצגת
    הפרויקט" section is literally an oral exam on this codebase).
 
+## References
+
+Every `[Rn]` marker in Part 0 points here. The K14 rubric requires citing
+sources for theoretical background (procedure PDF, "רקע תיאורטי / ספרות
+מקצועית — יש לציין מקורות") — this list is that citation set; copy it
+directly into the project book's bibliography section.
+
+- **[R1]** Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O.
+  (2017). *Proximal Policy Optimization Algorithms*. OpenAI. — the PPO
+  algorithm itself: the clipped surrogate objective and the trust-region
+  motivation behind it (0.4).
+- **[R2]** Ng, A. Y., Harada, D., & Russell, S. (1999). *Policy Invariance
+  Under Reward Transformations: Theory and Application to Reward Shaping*.
+  — the potential-based shaping theorem and its telescoping-sum proof (0.7),
+  and this project's two deliberate departures from it.
+- **[R3]** Rajeswaran, A., Kumar, V., Gupta, A., Vezzani, G., Schulman, J.,
+  Todorov, E., & Levine, S. (2018). *Learning Complex Dexterous Manipulation
+  with Deep Reinforcement Learning and Demonstrations*. — DAPG, cited as the
+  "BC-regularized RL" alternative to this project's residual-policy fix
+  (0.13); not implemented here, referenced for context only.
+- **[R4]** Ross, S., Gordon, G., & Bagnell, D. (2011). *A Reduction of
+  Imitation Learning and Structured Prediction to No-Regret Online
+  Learning*. — the `O(εT²)` vs. `O(εT)` regret bound motivating DAgger over
+  plain behavior cloning (0.5).
+
 ---
 # PART 0 — Prerequisite theory
 
@@ -890,7 +915,7 @@ not track whatever number you're using to judge "success" — 0.14).
   `λ=0` → pure one-step TD (low variance, high bias); `λ=1` → full Monte
   Carlo return minus baseline (high variance, low bias, since it never
   bootstraps off a possibly-wrong value estimate).
-- **PPO (Proximal Policy Optimization)**: policy gradient with a **clipped
+- **PPO (Proximal Policy Optimization)** (Schulman et al. 2017 [R1]): policy gradient with a **clipped
   surrogate objective** that prevents any single update from moving the
   policy too far from what collected the data (off-policy correction ratio
   `r(θ) = π_new(a|s)/π_old(a|s)` gets clipped to `[1-ε, 1+ε]`):
@@ -1018,7 +1043,7 @@ avoid.** Plain BC only ever sees states the EXPERT visited. Once the trained
 student makes even a small mistake, it can end up in a state the expert
 rarely or never visited — no training signal there, so the student's next
 action there is closer to a guess, which can lead to an even less familiar
-state, and so on. This compounds: a classic result (Ross et al.) shows plain
+state, and so on. This compounds: a classic result (Ross et al. 2011 [R4]) shows plain
 BC's total error can grow QUADRATICALLY with how long the episode runs
 (`O(εT²)`, `ε`=per-step error rate, `T`=episode length), versus only
 LINEARLY (`O(εT)`) for the fix below — the difference between errors adding
@@ -1044,8 +1069,9 @@ could do, unless the RL stage that follows actually improves on it.
 
 **Alternatives to plain BC-then-finetune, for context.** Residual learning
 (train the network to output only a small CORRECTION on top of the expert,
-0.13 — this project's actual fix); BC-regularized RL (add a penalty that
-keeps the policy close to the BC solution while still training with RL);
+0.13 — this project's actual fix); BC-regularized RL (Rajeswaran et al. 2018
+[R3]'s DAPG: add a penalty that keeps the policy close to the BC solution
+while still training with RL);
 or KL-to-reference regularization (a softer version of the same idea,
 measured in probability-distribution distance rather than raw action
 distance).
@@ -1090,7 +1116,7 @@ distance).
   without being wholly discarded (which would waste already-collected
   coverage).
 - **This project's DAgger has β=0, always** — no mixture-policy rollout.
-  The original DAgger algorithm (Ross, Gordon & Bagnell 2011) rolls out a
+  The original DAgger algorithm (Ross, Gordon & Bagnell 2011 [R4]) rolls out a
   MIXTURE policy (`β·expert + (1-β)·student`, annealing `β→0` across
   rounds) so early rounds still collect expert-quality trajectories. This
   project's on-policy imitation stage
@@ -1295,7 +1321,7 @@ in a way that doesn't match the real goal (e.g., wiggling back and forth to
 repeatedly collect a badly-designed "moved" reward).
 
 **Potential-based shaping — a specific recipe proven not to have that
-problem.** Ng, Harada & Russell (1999) showed that if your extra shaping
+problem.** Ng, Harada & Russell (1999 [R2]) showed that if your extra shaping
 reward, added on top of the real reward, has this exact form:
 ```
 F(s, s') = γ·φ(s') − φ(s)
@@ -1380,7 +1406,7 @@ before trusting either one alone.
 - **Detail (original notes):**
 
 A shaping term `F(s,s') = γ·φ(s') - φ(s)` added to a reward is
-**policy-invariant** (Ng, Harada & Russell 1999) — the optimal policy under
+**policy-invariant** (Ng, Harada & Russell 1999 [R2]) — the optimal policy under
 the shaped reward is provably identical to the optimal policy under the
 original reward alone, for any potential function `φ`. This project's
 `reward_func` uses a **plain difference** `φ(s') - φ(s)` (not
