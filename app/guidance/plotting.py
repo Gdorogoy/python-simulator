@@ -20,60 +20,6 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
                           n_episodes=20, n_steps=600,
                           oob_radius=7, hit_reward=10, attitude_penalty=-1.0,
                           oob_penalty=-1.5, streak_penalty_coef=-0.05,
-<<<<<<< HEAD
-                          hover_success_steps=200, streak_cap=30):
-    """
-    Runs the tuned PID controller through the same env/reward machinery
-    used to score the RL policy, over n_episodes, and returns the same
-    summary stats diagnose_with_model would -- so the RL run's final
-    checkpoint can be compared against it apples-to-apples.
-
-    Returns None (with a printed reason) if the gains file is missing,
-    rather than raising -- this plot is a nice-to-have, not required to
-    see the rest of the training dashboard.
-    """
-    if not os.path.isfile(pid_gains_path):
-        print(f"[pid_baseline] no gains file at {pid_gains_path}, skipping PID comparison")
-        return None
-
-    from app.environmental.interceptor_drone import InterceptorDroneEnv
-    from app.control.pid_hover import PIDHoverController
-    from app.reward_functions.rewards import RewardConfig, make_reward_fn
-
-    with open(pid_gains_path) as f:
-        gains = json.load(f)
-    pid = PIDHoverController(**gains)
-
-    reward_cfg = RewardConfig(
-        oob_radius=oob_radius, hit_reward=hit_reward, attitude_penalty=attitude_penalty,
-        oob_penalty=oob_penalty, streak_penalty_coef=streak_penalty_coef,
-        hover_success_steps=hover_success_steps, streak_cap=streak_cap,
-    )
-    env = InterceptorDroneEnv(make_reward_fn(reward_cfg), pid_gains_path=None)
-
-    final_dists, steps_survived, episode_rewards = [], [], []
-    n_success = 0
-
-    for _ in range(n_episodes):
-        obs, _ = env.reset()
-        done = False
-        step_count = 0
-        ep_reward = 0.0
-        while not done and step_count < n_steps:
-            action = pid.compute_action(env.drone_state, env.target_pos)
-            obs, reward, terminated, truncated, info = env.step(action)
-            ep_reward += reward
-            step_count += 1
-            done = terminated or truncated
-        steps_survived.append(step_count)
-        episode_rewards.append(ep_reward)
-        final_dists.append(env.prev_distance)
-        if getattr(env, "hover_success_achieved", False):
-            n_success += 1
-
-    return {
-        "success_rate": n_success / n_episodes,
-=======
                           hover_success_steps=200, streak_cap=30,
                           distances=None, gains_by_dist_path=None):
     """
@@ -174,7 +120,6 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
 
     return {
         "success_rate": n_success / max(n_episodes_run, 1),
->>>>>>> later_to_remove
         "avg_final_dist": float(np.mean(final_dists)),
         "avg_reward": float(np.mean(episode_rewards)),
         "avg_steps_survived": float(np.mean(steps_survived)),
@@ -188,26 +133,14 @@ STREAK_TIERS = (0.25, 0.50, 0.75, 1.00)
 STREAK_LEN = 5  # consecutive checkpoints required at a given tier
 
 
-<<<<<<< HEAD
-def _hover_ratios(rows, n_diag_episodes):
-    return [float(r.get("outcome_hover_success", 0) or 0) / n_diag_episodes for r in rows]
-=======
 def _hit_ratios(rows, n_diag_episodes):
     return [float(r.get("outcome_hit", 0) or 0) / n_diag_episodes for r in rows]
->>>>>>> later_to_remove
 
 
 def _streak_windows(values, threshold, min_len=STREAK_LEN):
     """
-<<<<<<< HEAD
-    Indices [start, end] (inclusive) of every run where value >= threshold
-    for at least min_len consecutive checkpoints in a row -- not one lucky
-    checkpoint, but the diagnostic batch clearing the bar min_len times
-    back to back.
-=======
     Indices [start, end] (inclusive) of every run where value >= threshold for at least
     min_len consecutive checkpoints -- filters out a single lucky checkpoint.
->>>>>>> later_to_remove
     """
     windows = []
     start = None
@@ -226,11 +159,7 @@ def _streak_windows(values, threshold, min_len=STREAK_LEN):
 
 def _shade_streak_windows(ax, timesteps, rows, n_diag_episodes):
     """Overlay the highest tier's streak window(s) as shaded spans on a plot."""
-<<<<<<< HEAD
-    ratios = _hover_ratios(rows, n_diag_episodes)
-=======
     ratios = _hit_ratios(rows, n_diag_episodes)
->>>>>>> later_to_remove
     for tier in reversed(STREAK_TIERS):
         windows = _streak_windows(ratios, tier)
         if windows:
@@ -241,17 +170,8 @@ def _shade_streak_windows(ax, timesteps, rows, n_diag_episodes):
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD
-# Plots -- 5 figures total (down from 11), each covering one question:
-#   1) training_error     -- is the optimization itself behaving?
-#   2) policy_std          -- is exploration decaying as expected?
-#   3) distance_distribution -- how close/consistent is the drone to target?
-#   4) success_and_outcomes -- is it succeeding, and why does it fail when it does?
-#   5) vs_pid_baseline      -- did RL actually beat the classical controller?
-=======
 # Plots -- 5 figures: training_error, policy_std, distance_distribution,
 # success_and_outcomes, and vs_pid_baseline.
->>>>>>> later_to_remove
 # ---------------------------------------------------------------------------
 def plot_training_run(csv_path, output_dir="plots_final",
                        hover_success_steps=480, n_diag_episodes=20,
@@ -259,15 +179,6 @@ def plot_training_run(csv_path, output_dir="plots_final",
                        oob_radius=7, hit_reward=10, attitude_penalty=-1.0,
                        oob_penalty=-1.5, streak_penalty_coef=-0.05,
                        pid_gains_path="app/control/best_pid_gains.json",
-<<<<<<< HEAD
-                       pid_baseline_episodes=20):
-    """
-    hover_success_steps, n_diag_episodes, hit_threshold, streak_cap, max_steps
-    should match whatever RewardConfig / env / diagnostic loop you actually
-    trained with -- they're only used to draw target reference lines and
-    (for the reward-related ones) to rebuild an equivalent RewardConfig for
-    the PID baseline comparison, not to recompute anything from the CSV.
-=======
                        pid_baseline_episodes=20,
                        pid_baseline_distances=None,
                        pid_gains_by_dist_path=None):
@@ -277,7 +188,6 @@ def plot_training_run(csv_path, output_dir="plots_final",
     an equivalent RewardConfig for the PID baseline, not recompute anything from the CSV.
     Pass pid_baseline_distances/pid_gains_by_dist_path to compare against the PID
     baseline across the full distance curriculum instead of one fixed target.
->>>>>>> later_to_remove
     """
     rows = _read_csv(csv_path)
     if not rows:
@@ -319,15 +229,12 @@ def plot_training_run(csv_path, output_dir="plots_final",
     plt.fill_between(timesteps, avg_dist - std_dist, avg_dist + std_dist, alpha=0.2,
                       label="+/- 1 std across diagnostic episodes")
     plt.plot(timesteps, min_dist, label="min_final_dist", linestyle="--")
-<<<<<<< HEAD
-=======
     if "pid_avg_final_dist" in rows[0]:
         # Per-checkpoint PID-teacher reference on the exact same target_pairs
         # (see diagnose_with_pid) -- a flat/low PID line next to a flat/high RL
         # line means the task itself is solvable, so the gap is the policy's.
         plt.plot(timesteps, col("pid_avg_final_dist"), label="pid_avg_final_dist",
                   linestyle=":", color="gray")
->>>>>>> later_to_remove
     plt.axhline(y=hit_threshold, color="g", linestyle="--", label=f"hit_threshold={hit_threshold}")
     plt.axhline(y=0.0, color="k", linestyle=":", alpha=0.5)
     plt.xlabel("timesteps"); plt.ylabel("distance (m)")
@@ -335,17 +242,6 @@ def plot_training_run(csv_path, output_dir="plots_final",
     plt.legend()
     plt.savefig(os.path.join(output_dir, "distance_distribution.png")); plt.close()
 
-<<<<<<< HEAD
-    # --- 4) success_and_outcomes: hover-success rate + outcome breakdown ---
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 8))
-    hover_ratio = col("outcome_hover_success") / n_diag_episodes
-    ax1.plot(timesteps, hover_ratio, marker=".")
-    for tier, style in ((0.25, ":"), (0.50, "--"), (0.75, "-."), (1.00, "-")):
-        ax1.axhline(y=tier, color="g", linestyle=style, alpha=0.5, label=f"{int(tier*100)}%")
-    ax1.set_ylim(-0.05, 1.05)
-    ax1.set_ylabel("hover_success / n_diag_episodes")
-    ax1.set_title("Hover success rate per checkpoint")
-=======
     # --- 4) success_and_outcomes: hit rate + outcome breakdown ---
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 8))
     hit_ratio = col("outcome_hit") / n_diag_episodes
@@ -357,7 +253,6 @@ def plot_training_run(csv_path, output_dir="plots_final",
     ax1.set_ylim(-0.05, 1.05)
     ax1.set_ylabel("hit / n_diag_episodes")
     ax1.set_title("Hit rate per checkpoint")
->>>>>>> later_to_remove
     _shade_streak_windows(ax1, timesteps, rows, n_diag_episodes)
     ax1.legend(loc="lower right")
 
@@ -365,25 +260,15 @@ def plot_training_run(csv_path, output_dir="plots_final",
     outcome_series = [col(k) for k in outcome_keys]
     ax2.stackplot(timesteps, *outcome_series, labels=[k.replace("outcome_", "") for k in outcome_keys])
     ax2.axhline(y=n_diag_episodes, color="g", linestyle="--",
-<<<<<<< HEAD
-                label=f"all {n_diag_episodes} eps -> hover_success")
-    ax2.set_xlabel("timesteps"); ax2.set_ylabel("count")
-    ax2.set_title("Outcome distribution (success = stack fills with hover_success only)")
-=======
                 label=f"all {n_diag_episodes} eps -> hit")
     ax2.set_xlabel("timesteps"); ax2.set_ylabel("count")
     ax2.set_title("Outcome distribution (success = stack fills with hit only)")
->>>>>>> later_to_remove
     ax2.legend(loc="upper left")
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "success_and_outcomes.png")); plt.close(fig)
 
     print(f"[plot_training_run] wrote plots_final to {output_dir}/")
-<<<<<<< HEAD
-    _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold)
-=======
     _print_suitable_weights(rows, os.path.dirname(csv_path) or ".", n_diag_episodes)
->>>>>>> later_to_remove
 
     # --- 5) vs_pid_baseline: RL final checkpoint vs classical PID controller ---
     baseline = compute_pid_baseline(
@@ -391,19 +276,12 @@ def plot_training_run(csv_path, output_dir="plots_final",
         oob_radius=oob_radius, hit_reward=hit_reward, attitude_penalty=attitude_penalty,
         oob_penalty=oob_penalty, streak_penalty_coef=streak_penalty_coef,
         hover_success_steps=hover_success_steps, streak_cap=streak_cap,
-<<<<<<< HEAD
-=======
         distances=pid_baseline_distances, gains_by_dist_path=pid_gains_by_dist_path,
->>>>>>> later_to_remove
     )
     if baseline is not None:
         last = rows[-1]
         rl_stats = {
-<<<<<<< HEAD
-            "success_rate": float(last.get("outcome_hover_success", 0)) / n_diag_episodes,
-=======
             "success_rate": float(last.get("outcome_hit", 0)) / n_diag_episodes,
->>>>>>> later_to_remove
             "avg_final_dist": float(last.get("avg_final_dist", 0.0)),
             "avg_reward": float(last.get("reward_mean", 0.0)),
             "avg_steps_survived": float(last.get("avg_steps_survived", 0.0)),
@@ -427,81 +305,6 @@ def plot_training_run(csv_path, output_dir="plots_final",
               f"(RL {rl_stats}, PID {baseline})")
 
 
-<<<<<<< HEAD
-def _print_convergence_summary(rows, hover_success_steps, n_diag_episodes, hit_threshold):
-    """
-    Two-part check:
-      1) per-checkpoint sanity table for the LAST row (quick snapshot --
-         can look good by luck, doesn't prove stability).
-      2) the real signal -- for each hover-success-rate tier (25/50/75/100%),
-         has the diagnostic batch stayed at or above that rate for
-         STREAK_LEN consecutive checkpoints? A single good checkpoint isn't
-         convergence; oscillating good/moving_away_cap checkpoints will fail
-         this even if the last row looks great.
-    """
-    last = rows[-1]
-
-    def f(name, default=0.0):
-        return float(last.get(name, default) or default)
-
-    attitude_total = f("outcome_attitude-ROLL") + f("outcome_attitude-PITCH")
-
-    checks = [
-        ("avg_final_dist -> 0",
-         f("avg_final_dist"),
-         f("avg_final_dist") < hit_threshold * 0.5),
-        ("max_hover_streak -> hover_success_steps",
-         f("max_hover_streak"),
-         f("max_hover_streak") >= hover_success_steps),
-        ("outcome_attitude(ROLL+PITCH) -> 0",
-         attitude_total, attitude_total == 0),
-        ("outcome_oob -> 0",
-         f("outcome_oob"), f("outcome_oob") == 0),
-        ("outcome_moving_away_cap -> 0",
-         f("outcome_moving_away_cap"), f("outcome_moving_away_cap") == 0),
-        (f"outcome_hover_success -> {n_diag_episodes}",
-         f("outcome_hover_success"),
-         f("outcome_hover_success") >= n_diag_episodes * 0.9),
-    ]
-
-    print(f"\n=== Snapshot check @ timestep {last['timesteps']} (last checkpoint only) ===")
-    passed = 0
-    for label, value, ok in checks:
-        mark = "PASS" if ok else "not yet"
-        print(f"  [{mark:7s}] {label:45s} current={value}")
-        passed += int(ok)
-    print(f"  {passed}/{len(checks)} criteria met.")
-    print("=" * 50)
-
-    timesteps = [r["timesteps"] for r in rows]
-    ratios = _hover_ratios(rows, n_diag_episodes)
-
-    print(f"\n=== Streak check: {STREAK_LEN}+ consecutive checkpoints at each hover-rate tier ===")
-    achieved_tier = None
-    for tier in STREAK_TIERS:
-        windows = _streak_windows(ratios, tier)
-        pct = int(tier * 100)
-        if windows:
-            start_i, end_i = windows[-1]
-            length = end_i - start_i + 1
-            print(f"  [PASS   ] >= {pct:3d}% hover_success held for {length} checkpoints straight "
-                  f"-> timesteps {timesteps[start_i]}..{timesteps[end_i]}")
-            achieved_tier = tier
-        else:
-            print(f"  [not yet] >= {pct:3d}% hover_success for {STREAK_LEN}+ checkpoints straight")
-
-    if achieved_tier == 1.00:
-        print("  -> Fully converged: sustained 100% hover rate. Run the manual deterministic "
-              "hold-position test to confirm.")
-    elif achieved_tier is not None:
-        print(f"  -> Partially converged: sustained {int(achieved_tier*100)}% hover rate, "
-              f"but never a clean {STREAK_LEN}-checkpoint 100% run. Still oscillating -- "
-              f"keep training or investigate what's causing the dips.")
-    else:
-        print("  -> Not converged: never held even the lowest tier for "
-              f"{STREAK_LEN} checkpoints in a row.")
-    print("=" * 50 + "\n")
-=======
 def plot_grad_norm(csv_path, output_dir="plots_final"):
     """Standalone grad_norm-over-time plot, shading the critic_warmup stage -- training_error.png
     already has grad_norm on a shared log-scale axis with value_loss, this is a clearer dedicated
@@ -851,7 +654,6 @@ def plot_worker_metrics(history, counts, output_dir="plots_final"):
         fig.savefig(os.path.join(worker_dir, "live_dist.png")); plt.close(fig)
 
     print(f"[plot_worker_metrics] wrote {len(counts)} worker_*/ folders to {output_dir}/")
->>>>>>> later_to_remove
 
 
 if __name__ == "__main__":

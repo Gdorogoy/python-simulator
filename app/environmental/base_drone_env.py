@@ -143,16 +143,15 @@ class BaseDroneEnv(gym.Env):
                 low, high = self.spawn_offset_range
                 start_pos[0] += self.np_random.uniform(low, high)
         if target_pos is None:
-<<<<<<< HEAD:app/environmental/interceptor_drone.py
-            # preserve a target_pos set directly on the env (e.g. by a training/search
-            # script right after construction) across resets that don't pass one explicitly
-            target_pos = getattr(self, "target_pos", np.array([0, 0, 5], dtype=np.float32))
-=======
-            target_pos = np.array([0, 0, 5], dtype=np.float32)
-            if self.target_offset_range is not None:
-                low, high = self.target_offset_range
-                target_pos[0] += self.np_random.uniform(low, high)
->>>>>>> later_to_remove:app/environmental/base_drone_env.py
+            if hasattr(self, "target_pos"):
+                # preserve a target_pos set directly on the env (e.g. by a training/search
+                # script right after construction) across resets that don't pass one explicitly
+                target_pos = self.target_pos
+            else:
+                target_pos = np.array([0, 0, 5], dtype=np.float32)
+                if self.target_offset_range is not None:
+                    low, high = self.target_offset_range
+                    target_pos[0] += self.np_random.uniform(low, high)
 
         self.target_pos = target_pos
         # Fixed at 0 unless a caller explicitly asks for a yaw goal (matches
