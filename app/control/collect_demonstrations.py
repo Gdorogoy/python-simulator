@@ -8,9 +8,7 @@ from app.control.tune_pid import DISTANCES, steps_for_dist
 from app.training.eval_matrix import build_eval_pairs
 from app.reward_functions.rewards import reward_func
 
-# Hard ceiling on a single demonstration/imitation collection run, in (obs, action)
-# pairs. Without this, n_target_rows has no upper bound and a mistyped value can
-# silently commit to a multi-hour collection run.
+# hard ceiling on (obs, action) pairs per collection run (guards against typos)
 IMITATION_ROWS_CAP = 1_000_000
 
 # Matches app.training.base_training.DEFAULT_DISTANCE_LOW/HIGH (not imported to avoid that module's mlflow overhead).
@@ -27,13 +25,7 @@ def _nearest_gain_key(gains_by_dist: dict, dist: float) -> str:
 def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
                             save_path="app/control/demonstrations.npz",
                             distances=DISTANCES):
-    """
-    Collects (obs, action) demonstration pairs across the full distance curriculum in
-    `distances`, using each distance's own PID gains and every x/y/z direction
-    (via build_eval_pairs) so the BC dataset covers altitude, not just lateral moves.
-    `distances` lets a caller drop the expensive-but-unused 250m case (not part of
-    PHASE1_DISTANCES) to save runtime.
-    """
+    """Collect PID (obs, action) pairs over `distances` x every axis direction, per-distance gains."""
     all_obs = []
     all_actions = []
 
@@ -43,17 +35,12 @@ def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
         oob_radius = max(20.0, dist * 3.0)
         n_steps = steps_for_dist(dist)
 
-        # reward_func (not the deprecated RewardFnPhase1 roadmap) -- the current
-        # reward version, matching base_training.py. Its own oob_radius scales
-        # with env.start_dist (see rewards.reward_func), so it's safe across the
-        # full distance curriculum; the oob_radius computed above is only used
-        # for build_eval_pairs' margin filter below, not passed into the env.
+        # reward_func scales its own oob radius with start_dist; oob_radius above only filters pairs
         env = BaseDroneEnv(reward_func, max_steps=n_steps)
 
         for start, target, target_yaw in build_eval_pairs(oob_radius=oob_radius, distances=(dist,), axes=(0, 1, 2)):
             for ep in range(n_episodes_per_pair):
-                # Jitter around the nominal start gives BC a neighborhood of corrective
-                # examples, not one noiseless curve, so it has signal for off-path states.
+                # jitter the start so BC also sees corrective, off-path states
                 jittered_start = start + np.random.uniform(-0.15, 0.15, size=3).astype(np.float32)
                 obs, _ = env.reset(start_pos=jittered_start.astype(np.float32), target_pos=target.copy(),
                                     target_yaw=target_yaw)
@@ -82,9 +69,7 @@ def collect_demonstrations(gains_by_dist, n_episodes_per_pair=5,
 
 
 def sample_full_sphere_target(rng, dist, base=None):
-    """Draws a target at exactly `dist` from `base` (default (0,0,5)) in a uniformly-random
-    direction over the full sphere (rng.normal(size=3) normalized, the standard unbiased method
-    for a uniform point on a sphere). Returns None if the direction points underground."""
+    """Target exactly `dist` from `base` in a uniform random direction; None if underground."""
     if base is None:
         base = np.array([0, 0, 5], dtype=np.float32)
     v = rng.normal(size=3)
@@ -99,9 +84,7 @@ def collect_demonstrations_omni(gains_by_dist, n_target_rows=750_000,
                                  save_path="app/control/demonstrations_omni.npz",
                                  distance_low=DEFAULT_DISTANCE_LOW, distance_high=DEFAULT_DISTANCE_HIGH,
                                  seed=None, log_every=200):
-    """Like collect_demonstrations, but samples a fresh, fully-random target direction
-    (sample_full_sphere_target) and a continuous Uniform(distance_low, distance_high) distance
-    every episode, until n_target_rows pairs are collected. PID gains picked by nearest-distance match."""
+    """Like collect_demonstrations but with a fresh random direction and U(low, high) distance per episode."""
     if n_target_rows > IMITATION_ROWS_CAP:
         raise ValueError(f"n_target_rows={n_target_rows} exceeds IMITATION_ROWS_CAP={IMITATION_ROWS_CAP}")
 
@@ -110,11 +93,7 @@ def collect_demonstrations_omni(gains_by_dist, n_target_rows=750_000,
     all_actions = []
     episodes = 0
 
-    # reward_func (not the deprecated RewardFnPhase1 roadmap) -- see the same
-    # swap in collect_demonstrations() above; oob_radius scales with
-    # env.start_dist internally, safe across the full distance range.
-    # max_steps sized for the longest episode this range can produce; shorter
-    # per-episode distances just break out of the range(n_steps) loop early.
+    # max_steps sized for the longest distance; shorter episodes stop early
     env = BaseDroneEnv(reward_func, max_steps=steps_for_dist(distance_high))
 
     while len(all_obs) < n_target_rows:
@@ -158,13 +137,7 @@ def collect_demonstrations_base_drone_isaac(env, gains_by_dist: dict, n_target_r
                                              save_path: str = "app/control/demonstrations_isaac.npz",
                                              seed=None, log_every: int = 2000,
                                              pool_size: int = 1024, pool_refresh_every_rows: int = 50_000):
-    """Batched counterpart to collect_demonstrations_omni: num_envs parallel episodes at once,
-    saving the same (obs, actions) .npz shape pretrain_behavior_cloning expects. Targets are
-    drawn from a shared pool (env.unwrapped.set_target_pairs), refreshed every
-    pool_refresh_every_rows rows; PID gains picked per-env by nearest-distance match.
-
-    Known simplification: env.unwrapped has one fixed max_episode_length for every env, not a
-    per-distance cap -- fine for (3, 10)m, but distances beyond ~50-60m would get truncated."""
+    """Batched Isaac version of collect_demonstrations_omni. One episode length for all envs (fine up to ~50 m)."""
     import torch
     import isaaclab.utils.math as math_utils
     from app.control.torch_pid import TorchPIDController, assign_gains_by_distance

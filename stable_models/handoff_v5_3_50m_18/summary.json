@@ -1,0 +1,16 @@
+{
+  "aborted": null,
+  "best": {
+    "checkpoint": "runs/rtl_handoff_v5_3_50_18ms\\model_127926272.pt",
+    "chunk": 60,
+    "phase": "full",
+    "score": 0.907958984375,
+    "train_hit_rate": 0.9243345210647663,
+    "eval_hit_rate": 0.907958984375,
+    "timesteps": 127926272
+  },
+  "chunks_run": 61,
+  "baseline_train_hit_rate": 0.8521031282526365,
+  "pid_success_rate": 0.5731201171875,
+  "duration_s": 1879.6963703632355
+}

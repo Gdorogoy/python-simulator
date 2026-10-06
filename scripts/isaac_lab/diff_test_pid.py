@@ -1,10 +1,4 @@
-"""
-Migration step 6 diff-test: TorchPIDController (app.control.torch_pid) vs the
-numpy PIDController (app.control.pid), on random states/targets, batched vs
-looped. Pure torch/numpy/scipy -- no Kit boot needed:
-
-    E:\\Isaac\\env_isaaclab\\Scripts\\python.exe scripts\\isaac_lab\\diff_test_pid.py
-"""
+"""Diff-test TorchPIDController against the numpy PIDController (no Isaac needed). See scripts/README.md."""
 
 import sys
 from pathlib import Path

@@ -24,6 +24,10 @@ ANG_VEL_SCALE =20.0
 MAX_RPM = 12000.0 
 DIST_SCALE = 15.0 
 
+# obs[0:3] layout: "full" = symlog(x, y, z), "height" = (0, 0, symlog(clip(z))). See docs.md "Position modes".
+POSITION_MODES = ("full", "height")
+HEIGHT_CLIP = 30.0
+
 
 
 
@@ -36,19 +40,27 @@ def _symlog_scale(x, linthresh):
     return np.where(ax <= linthresh, linear, log_part)
 
 
-def build_observation(state: QuadState, target_pos: np.ndarray, target_yaw: float = 0.0) -> np.ndarray:
+def build_observation(state: QuadState, target_pos: np.ndarray, target_yaw: float = 0.0,
+                      position_mode: str = "full") -> np.ndarray:
     rel = target_pos - np.array([state.position.x, state.position.y, state.position.z])
     dist = np.linalg.norm(rel)
 
-    # sin/cos of the yaw error (not the raw radian error) so the +/-pi wraparound
-    # never shows up as a discontinuous jump in the observation.
+    # sin/cos of the yaw error so the +/-pi wraparound is continuous
     _, _, yaw = Rotation.from_quat(
         [state.orientation.x, state.orientation.y, state.orientation.z, state.orientation.w]
     ).as_euler("xyz")
     yaw_err = (target_yaw - yaw + np.pi) % (2 * np.pi) - np.pi
 
+    if position_mode == "height":
+        z_clipped = float(np.clip(state.position.z, 0.0, HEIGHT_CLIP))
+        pos_feat = np.array([0.0, 0.0, float(_symlog_scale(z_clipped, POS_SCALE))])
+    elif position_mode == "full":
+        pos_feat = _symlog_scale([state.position.x, state.position.y, state.position.z], POS_SCALE)
+    else:
+        raise ValueError(f"position_mode must be one of {POSITION_MODES}, got {position_mode!r}")
+
     return np.concatenate([
-        _symlog_scale([state.position.x, state.position.y, state.position.z], POS_SCALE),
+        pos_feat,
         np.array([state.velocity.x, state.velocity.y, state.velocity.z]) / VEL_SCALE,
         [state.orientation.x, state.orientation.y, state.orientation.z, state.orientation.w],
         np.array([state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z]) / ANG_VEL_SCALE,
@@ -65,22 +77,22 @@ register(
 )
 
 class BaseDroneEnv(gym.Env):
-    # render_mode="human" (PyBullet GUI) removed -- Isaac Sim is the only
-    # visualization path now (app/environmental/base_drone_env_isaac.py).
-    # render_mode is still accepted for signature compatibility with any
-    # existing caller, but is always a no-op.
+    # render_mode is accepted for compatibility but ignored (no PyBullet GUI any more)
     metadata = {'render_modes': [], 'render_fps': 30}
 
     def _get_obs(self):
-        return build_observation(self.drone_state, self.target_pos, self.target_yaw)
+        return build_observation(self.drone_state, self.target_pos, self.target_yaw, self.position_mode)
 
 
     def __init__(self, custom_reward, render_mode=None, pid_gains_path="app/control/best_pid_gains.json",
                  spawn_offset_range=None, target_offset_range=None, target_pairs=None,
-                 max_steps=15_000, dt=1 / 240):
+                 max_steps=15_000, dt=1 / 240, position_mode="full"):
 
         self.dt = dt
         self.max_steps = max_steps
+        if position_mode not in POSITION_MODES:
+            raise ValueError(f"position_mode must be one of {POSITION_MODES}, got {position_mode!r}")
+        self.position_mode = position_mode
         self.spawn_offset_range = spawn_offset_range
         self.target_offset_range = target_offset_range
         self.target_pairs = target_pairs
@@ -98,13 +110,7 @@ class BaseDroneEnv(gym.Env):
         hover_thrust=self.config.mass*9.81
 
 
-        # roll/pitch/yaw bounds (+-0.5 N*m) keep maneuvers chill on purpose, not
-        # a physical limit -- mixer_inversion will happily deliver far more
-        # (theoretical max roll torque at this arm_length/max_rpm is ~4.58 N*m,
-        # so 0.5 leaves ~89% rotor headroom unused). The reason it needs to be
-        # this conservative: inertia is tiny (0.02 kg*m^2 on x/y), so even 0.5
-        # N*m already produces 25 rad/s^2 (~1432 deg/s^2) of angular
-        # acceleration -- aggressive by feel, not derived from a formula.
+        # +-0.5 N*m torque bounds are a deliberate comfort limit, not physics (docs.md "Action space")
         self.action_space= spaces.Box(
             low=np.array([-hover_thrust, -0.5, -0.5, -0.5], dtype=np.float32),
             high=np.array([hover_thrust,0.5, 0.5, 0.5], dtype=np.float32),
@@ -144,8 +150,7 @@ class BaseDroneEnv(gym.Env):
                 start_pos[0] += self.np_random.uniform(low, high)
         if target_pos is None:
             if hasattr(self, "target_pos"):
-                # preserve a target_pos set directly on the env (e.g. by a training/search
-                # script right after construction) across resets that don't pass one explicitly
+                # keep a target_pos set directly on the env across resets
                 target_pos = self.target_pos
             else:
                 target_pos = np.array([0, 0, 5], dtype=np.float32)
@@ -154,10 +159,7 @@ class BaseDroneEnv(gym.Env):
                     target_pos[0] += self.np_random.uniform(low, high)
 
         self.target_pos = target_pos
-        # Fixed at 0 unless a caller explicitly asks for a yaw goal (matches
-        # target_pos's own "None -> default" pattern) -- so callers that never
-        # pass target_yaw (phase_0_training, old call sites) keep training the
-        # yaw-at-zero task exactly as before.
+        # yaw goal defaults to 0 when the caller passes none
         self.target_yaw = float(target_yaw) if target_yaw is not None else 0.0
 
         self.moving_away_streak = 0
@@ -202,9 +204,7 @@ class BaseDroneEnv(gym.Env):
 
         #TODO: NEED DEPRECATION AND FIX IMMODERATELY!!!!
         self.prev_distance = float(np.linalg.norm(self.target_pos - start_pos))
-        # start_dist/prev_position: for potential-based reward shaping that needs
-        # the actual previous position vector (not just scalar distance) and a
-        # fixed per-episode normalizer (rewards.reward_func).
+        # start_dist / prev_position feed the potential-based shaping in rewards.reward_func
         self.start_dist = self.prev_distance
         self.prev_position = np.array(start_pos, dtype=np.float32).copy()
         self.milestones_hit = set()

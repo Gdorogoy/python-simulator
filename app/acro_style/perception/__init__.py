@@ -1,3 +1,1 @@
-"""
-perception — camera sensor wiring + CNN gate detector. Phase 5.
-"""
+"""Camera sensor + CNN gate detector (phase 5, planned)."""

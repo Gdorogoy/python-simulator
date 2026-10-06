@@ -1,16 +1,4 @@
-"""
-Batched torch mirror of app.control.pid.PIDController (migration step 6).
-Operates on (num_envs, ...) tensors instead of a single QuadState, with
-per-env integral state and (optionally) per-env gains -- so different envs
-can run different PID gain sets simultaneously (e.g. one per target-distance
-bucket, matching app.environmental.subproc_vec_base_drone_env's
-_select_pid_teacher nearest-distance lookup, ported to assign_gains_by_distance
-below).
-
-Diff-tested bit-exact against the numpy oracle: see
-scripts/isaac_lab/diff_test_pid.py. Pure torch, no isaaclab/omni imports --
-runs without booting Kit.
-"""
+"""Batched torch mirror of PIDController with per-env gains; no Isaac imports. See docs.md "PID"."""
 
 from __future__ import annotations
 
@@ -75,9 +63,7 @@ class TorchPIDController:
             self.integral_yaw[env_ids] = 0.0
 
     def set_gains(self, env_ids: torch.Tensor, gains: dict):
-        """Overwrites this PID's gains for env_ids only (e.g. per-distance-bucket
-        gain assignment -- see assign_gains_by_distance). `gains` keys match
-        PIDController's constructor kwargs (kp_pos, kd_pos, ...)."""
+        """Overwrite gains for env_ids only; keys match PIDController kwargs."""
         for key in ("kp_pos", "kd_pos", "ki_pos", "kp_att", "kd_att", "ki_att", "kp_yaw", "kd_yaw", "ki_yaw"):
             if key in gains:
                 getattr(self, key)[env_ids] = float(gains[key])
@@ -88,12 +74,7 @@ class TorchPIDController:
         roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor,
         target_pos: torch.Tensor, target_yaw: torch.Tensor, dt: float = 1 / 240,
     ) -> torch.Tensor:
-        """pos/vel/ang_vel: (num_envs,3) world/world/body-frame, matching
-        QuadState's convention. roll/pitch/yaw: (num_envs,) from
-        isaaclab.utils.math.euler_xyz_from_quat (or scipy, for the diff-test).
-        target_pos: (num_envs,3), target_yaw: (num_envs,). Returns (num_envs,4)
-        [thrust_delta, roll_torque, pitch_torque, yaw_torque], matching
-        app.control.pid.PIDController.compute_action exactly."""
+        """(N,3) pos/vel (world), ang_vel (body), (N,) roll/pitch/yaw -> (N,4) action, same as PIDController."""
         pos_err = target_pos - pos
 
         self.integral_pos = torch.clamp(
@@ -130,12 +111,7 @@ class TorchPIDController:
 
 def assign_gains_by_distance(pid: TorchPIDController, start_dist: torch.Tensor, gains_by_dist: dict,
                               env_ids: torch.Tensor | None = None):
-    """Mirrors app.environmental.subproc_vec_base_drone_env._select_pid_teacher:
-    for each env, picks the gain set whose distance key is nearest to that
-    env's own start_dist (a single generic gain set is a much worse imitation
-    teacher than the per-distance gains dagger.py/collect_demonstrations.py
-    were tuned with). gains_by_dist: {"3": {...}, "10": {...}, ...} (same
-    JSON shape as best_pid_gains_per_dist.json). Call after every reset."""
+    """Per env, pick the gain set whose distance key is nearest its start_dist; call after every reset."""
     if env_ids is None:
         env_ids = torch.arange(pid.num_envs, device=pid.device)
     keys = list(gains_by_dist.keys())

@@ -1,4 +1,1 @@
-"""
-reward_functions — progress/perception/command-penalty/crash reward for the acro-style task.
-Phase 2.
-"""
+"""Progress / perception / command-penalty / crash reward (phase 2, planned)."""

@@ -1,6 +1,1 @@
-"""
-environmental — wind, temperature, air resistance/friction. Pure ambient inputs, no drone-specific logic.
-
-
-
-"""
+"""Gymnasium (numpy) and Isaac Lab drone environments plus ambient sampling. See docs.md."""

@@ -1,15 +1,4 @@
-"""
-test_configuration() -- run before every training session and after any QuadConfig
-change. Each check targets a real bug this project has hit before (unit mismatches,
-mixer inversion issues, yaw/body-frame bugs, NaN from bad hover equilibrium).
-
-Usage:
-    from app.dynamics.drone import create_quad_config
-    config = create_quad_config(...)
-    ok = test_configuration(config)
-    if not ok:
-        raise SystemExit("Config failed validation — fix before training.")
-"""
+"""Physics/config validation suite: run before training and after any QuadConfig change. See docs.md."""
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -86,12 +75,7 @@ def check_static_fields(config: QuadConfig) -> bool:
 
 
 def check_mixer_invertibility(config: QuadConfig) -> bool:
-    """
-    A near-singular mixer matrix doesn't error, it just returns garbage, so this checks
-    explicitly. Uses condition number rather than raw determinant: k_f/k_m are naturally
-    tiny (~1e-7), so the determinant is astronomically small even for a healthy matrix --
-    a scale artifact, not degeneracy. Condition number is scale-invariant.
-    """
+    """Mixer must be well-conditioned (condition number, not determinant: k_f/k_m are ~1e-7)."""
     M = np.zeros((4, 4))
     for i in range(4):
         for j in range(4):
@@ -161,9 +145,7 @@ def check_mixer_roundtrip(config: QuadConfig) -> bool:
 
 
 def check_hover_stability(config: QuadConfig, n_steps: int = 480, dt: float = 1/240) -> bool:
-    """Run pure hover (zero commanded torque) for 2 real seconds. Position
-    should stay essentially put — this is the exact test that would have
-    caught the original 'falls before motors spin up' bug."""
+    """Pure hover for 2 s must stay put (catches the "falls before motors spin up" bug)."""
     hover_thrust = config.mass * 9.81
     hover_omega = mixer_inversion(config, [hover_thrust, 0.0, 0.0, 0.0])
 
@@ -205,9 +187,7 @@ def check_hover_stability(config: QuadConfig, n_steps: int = 480, dt: float = 1/
 
 
 def check_step_response(config: QuadConfig, n_steps: int = 120, dt: float = 1/240) -> bool:
-    """Apply a small constant roll torque and confirm the drone actually
-    rolls in a bounded, non-exploding way — catches NaN/instability under
-    an active command, not just idle hover."""
+    """A small constant roll torque must give a bounded, non-exploding roll."""
     hover_thrust = config.mass * 9.81
     hover_omega = mixer_inversion(config, [hover_thrust, 0.0, 0.0, 0.0])
 
@@ -266,10 +246,7 @@ def check_saturation(config: QuadConfig) -> bool:
 # ---------------------------------------------------------------------------
 
 def test_configuration(config: QuadConfig, verbose: bool = True) -> bool:
-    """
-    Runs the full validation suite against a QuadConfig. Returns True only
-    if every check passes. Run this before starting any training session.
-    """
+    """Run every check against a QuadConfig; True only if all pass."""
     checks = [
         ("Static field sanity",      check_static_fields),
         ("Mixer invertibility",      check_mixer_invertibility),

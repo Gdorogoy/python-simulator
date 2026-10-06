@@ -1,8 +1,4 @@
-"""Isaac Lab DirectRLEnv port of app.environmental.base_drone_env.BaseDroneEnv.
-Registers gym id "Isaac-Base-Drone-Direct-v0" on import. Only importable
-inside the py3.11 Isaac venv (E:\\Isaac\\env_isaaclab); see MIGRATION_PROGRESS.md
-and PROJECT_DEFENSE_GUIDE.md for the full physics/asset/reward design history.
-"""
+"""Isaac Lab DirectRLEnv port of BaseDroneEnv; registers "Isaac-Base-Drone-Direct-v0". Isaac venv only, see docs.md."""
 
 from __future__ import annotations
 
@@ -25,7 +21,7 @@ from isaaclab.utils import configclass
 
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
-from app.environmental.base_drone_env import ANG_VEL_SCALE, DIST_SCALE, POS_SCALE, VEL_SCALE
+from app.environmental.base_drone_env import ANG_VEL_SCALE, DIST_SCALE, HEIGHT_CLIP, POSITION_MODES, POS_SCALE, VEL_SCALE
 from app.environmental.base_drone_env import MAX_RPM as OBS_MAX_RPM
 from app.reward_functions.rewards import (
     APPROACH_MILESTONE_BUDGET,
@@ -82,8 +78,7 @@ class BaseDroneEnvIsaacWindow(BaseEnvWindow):
 class BaseDroneEnvIsaacCfg(DirectRLEnvCfg):
     episode_length_s = MAX_POLICY_STEPS * PHYSICS_DT  # 62.5s, independent of decimation
     decimation = 4  # 4 physics substeps per policy step (60Hz effective control rate)
-    # Explicit bounded Box, not a plain int -- a bare int auto-generates an unbounded
-    # Box, which NaNs ActorCritic's tanh-squash rescale on the first action.
+    # must be a bounded Box: an int gives an unbounded Box and NaNs the tanh rescale
     action_space: gym.spaces.Box = gym.spaces.Box(
         low=np.array([-_HOVER_THRUST, -0.5, -0.5, -0.5], dtype=np.float32),
         high=np.array([_HOVER_THRUST, 0.5, 0.5, 0.5], dtype=np.float32),
@@ -125,8 +120,7 @@ class BaseDroneEnvIsaacCfg(DirectRLEnvCfg):
         num_envs=4096, env_spacing=2.5, replicate_physics=True, clone_in_fabric=True
     )
 
-    # Procedural RigidObject, not an Articulation -- see PROJECT_DEFENSE_GUIDE.md Part 8.2
-    # for why. Size chosen so its own uniform-density inertia matches QuadConfig's ratio.
+    # procedural RigidObject sized so its inertia ratio matches QuadConfig (docs.md "Robot asset")
     robot: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.CuboidCfg(
@@ -181,6 +175,9 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         self._target_pairs_start = None
         self._target_pairs_target = None
         self._target_pairs_yaw = None
+        self._spawn_speed_range = None  # see set_spawn_speed_range
+        self._obs_position_mode = "full"  # see set_obs_position_mode
+        self._target_dist_range = None  # see set_target_distance_range
 
         self._start_dist = torch.ones(self.num_envs, device=self.device)
         self._prev_distance = torch.ones(self.num_envs, device=self.device)
@@ -256,9 +253,15 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         _, _, yaw = math_utils.euler_xyz_from_quat(quat_wxyz)
         yaw_err = (self._desired_yaw_w - yaw + math.pi) % (2 * math.pi) - math.pi
 
+        pos_feat = _symlog(pos, POS_SCALE)
+        if self._obs_position_mode == "height":
+            # no absolute horizontal position, altitude clipped -- same layout/dim as "full" (see base_drone_env.POSITION_MODES)
+            pos_feat = torch.zeros_like(pos_feat)
+            pos_feat[:, 2] = _symlog(pos[:, 2].clamp(0.0, HEIGHT_CLIP), POS_SCALE)
+
         obs = torch.cat(
             [
-                _symlog(pos, POS_SCALE),
+                pos_feat,
                 vel / VEL_SCALE,
                 quat_xyzw,
                 ang_vel / ANG_VEL_SCALE,
@@ -348,9 +351,14 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         self.extras["terminal_observation"] = self._get_observations()["policy"]
         return self._cached_reward
 
+    def set_obs_position_mode(self, mode: str):
+        """"full" | "height"; must match the numpy env used for replay (run_config.json obs_position_mode)."""
+        if mode not in POSITION_MODES:
+            raise ValueError(f"mode must be one of {POSITION_MODES}, got {mode!r}")
+        self._obs_position_mode = mode
+
     def set_target_pairs(self, pairs: list | None):
-        """pairs: list of (start_pos, target_pos, target_yaw) triples; each reset samples one uniformly at
-        random from this pool. None clears the pool (falls back to the Uniform(3,10) placeholder)."""
+        """Pool of (start_pos, target_pos, target_yaw) sampled per reset; None clears it."""
         if pairs is None:
             self._target_pairs_start = None
             self._target_pairs_target = None
@@ -362,6 +370,14 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         self._target_pairs_start = torch.as_tensor(starts, device=self.device)
         self._target_pairs_target = torch.as_tensor(targets, device=self.device)
         self._target_pairs_yaw = torch.as_tensor(yaws, device=self.device)
+
+    def set_target_distance_range(self, low: float | None, high: float | None = None):
+        """Fresh random target per reset (no pair pool): distance ~ U(low, high), uniform direction, random yaw."""
+        self._target_dist_range = None if (low is None or high is None) else (float(low), float(high))
+
+    def set_spawn_speed_range(self, low: float | None, high: float | None = None):
+        """Spawn already moving toward the target at U(low, high) m/s (simulates a handoff); None = spawn at rest."""
+        self._spawn_speed_range = None if (low is None or high is None) else (float(low), float(high))
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -393,14 +409,21 @@ class BaseDroneEnvIsaac(DirectRLEnv):
             target_yaw = self._target_pairs_yaw[pool_idx]
             dist_mag = torch.linalg.norm(target_local - spawn_local, dim=-1)
         else:
-            dist_mag = torch.empty(n, device=self.device).uniform_(3.0, 10.0)
+            lo, hi = self._target_dist_range or (3.0, 10.0)
+            dist_mag = torch.empty(n, device=self.device).uniform_(lo, hi)
             direction = torch.randn(n, 3, device=self.device)
             direction = direction / torch.linalg.norm(direction, dim=-1, keepdim=True).clamp_min(1e-6)
+            if self._target_dist_range is not None:
+                # mirror underground directions so the 0.5 m floor clamp never changes the distance
+                flip = (5.0 + direction[:, 2] * dist_mag) < 0.5
+                direction[:, 2] = torch.where(flip, -direction[:, 2], direction[:, 2])
             spawn_local = torch.zeros(n, 3, device=self.device)
             spawn_local[:, 2] = 5.0
             target_local = spawn_local + direction * dist_mag.unsqueeze(-1)
             target_local[:, 2] = target_local[:, 2].clamp(min=0.5)
             target_yaw = torch.zeros(n, device=self.device)
+            if self._target_dist_range is not None:
+                target_yaw.uniform_(-math.pi, math.pi)
 
         self._desired_pos_w[env_ids] = target_local + self._terrain.env_origins[env_ids]
         self._desired_yaw_w[env_ids] = target_yaw
@@ -409,6 +432,13 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         default_root_state[:, :3] = spawn_local + self._terrain.env_origins[env_ids]
         default_root_state[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
         default_root_state[:, 7:] = 0.0
+        if self._spawn_speed_range is not None:
+            # moving toward this episode's target, angular velocity stays 0
+            low, high = self._spawn_speed_range
+            speed = torch.empty(n, device=self.device).uniform_(low, high)
+            to_target = target_local - spawn_local
+            unit_dir = to_target / torch.linalg.norm(to_target, dim=-1, keepdim=True).clamp_min(1e-6)
+            default_root_state[:, 7:10] = unit_dir * speed.unsqueeze(-1)
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
 

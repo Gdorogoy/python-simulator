@@ -1,0 +1,9 @@
+{
+  "checkpoint": "runs/rtl_handoff_v3_2p_150_250_3_50m\\model_127926272.pt",
+  "chunk": 60,
+  "phase": "full",
+  "score": 0.9505615234375,
+  "train_hit_rate": 0.9536679536679536,
+  "eval_hit_rate": 0.9505615234375,
+  "timesteps": 127926272
+}

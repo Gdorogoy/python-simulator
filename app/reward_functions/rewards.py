@@ -86,9 +86,7 @@ def _kinematics(env):
 
 
 def _check_hit(cfg, dist):
-    """Returns (hit_reward, True, "Hit") once dist closes under cfg.hit_threshold, else None.
-    Shared by every stage/phase so "Hit" stays reachable once curricula advance past
-    the stage that would otherwise be the only one checking it."""
+    """(hit_reward, True, "Hit") inside cfg.hit_threshold, else None; shared by every curriculum stage."""
     if cfg.hit_threshold is not None and dist < cfg.hit_threshold:
         return cfg.hit_reward, True, "Hit"
     return None
@@ -112,13 +110,7 @@ def _terminal_checks(cfg, env, pos, roll, pitch):
 
 
 def chain_reward_fns(fns: list, n: int):
-    """fns is an ordered list of plain reward functions (each fn(env) ->
-    (reward, terminated, reason)); each one runs for exactly n env-steps
-    before permanently advancing to the next -- the LAST function in the
-    list runs indefinitely once reached (no duration to advance past).
-    state["step"] resets on every advance so each function gets its own
-    full n steps, not n minus whatever the global step count already
-    accumulated on prior functions."""
+    """Run each reward fn for n env-steps in order; the last one runs forever."""
     state = {"step": 0, "idx": 0}
 
     def chained_fn(env):
@@ -159,9 +151,7 @@ def base_reward_fn(cfg, env):
 
         tilt = abs(roll) + abs(pitch)
 
-        # Per-step hover-quality score: reward for being in-zone, penalized by
-        # speed, distance, tilt, and angular velocity (each capped to limit
-        # how negative a single term can push the reward).
+        # hover quality: in-zone bonus minus capped speed / distance / tilt / spin terms
         stability_term = (cfg.zone_bonus - cfg.vel_penalty_coef * min(np.linalg.norm(vel), cfg.vel_penalty_cap)
                            - cfg.dist_penalty_coef * dist
                            - cfg.tilt_penalty_coef * tilt
@@ -242,9 +232,7 @@ def make_reward_fn(cfg: RewardConfig):
     return chain_reward_fns(fns, cfg.imitation_duration_steps)
 
 
-# reward_func -- flat, no phases, no config class, every knob a module constant.
-# Potential-based approach shaping (Ng et al.): F(s,s')=gamma*phi(s')-phi(s),
-# phi = negative L1 distance to target normalized by start_dist.
+# reward_func: flat potential-based reward, every knob a module constant (docs.md "reward_func")
 OOB_RADIUS = 30.0
 ATTITUDE_ROLL_DEG = 65
 ATTITUDE_PITCH_DEG = 80
@@ -252,20 +240,17 @@ ATTITUDE_PENALTY = -1.0
 OOB_PENALTY = -1.5
 HIT_THRESHOLD = 0.25
 
-# Was 1000 -- 100-1000x every other term, which produced heavy-tailed advantages
-# that blew up KL divergence and collapsed training. See PROJECT_DEFENSE_GUIDE.md Part 2.
+# was 1000: heavy-tailed advantages blew up KL (docs.md "reward_func")
 HIT_REWARD = 50
 
 TARGET_FRACTION = 0.25
-# Measured via the tuned PID at dist=3,10 -- rerun app.control.tune_pid.calibrate_approach_milestone_budget()
-# and update this if best_pid_gains_per_dist.json, HIT_REWARD, or this reward changes.
+# measured with the tuned PID; recalibrate via tune_pid.calibrate_approach_milestone_budget()
 APPROACH_MILESTONE_BUDGET = 96.72
 
 MILESTONE_FRACS = (0.25, 0.5, 0.75)
 MILESTONE_BONUSES = (10.0, 15.0, 20.0)
 
-# Anti-oscillation terms (2026-09-19) -- see PROJECT_DEFENSE_GUIDE.md Part 2.4.1
-# for the full derivation and worked best/avg/worst-case numbers.
+# anti-oscillation zone terms (info/PROJECT_DEFENSE_GUIDE.md Part 2.4.1)
 OUTER_ZONE_RADIUS = 1.0
 INNER_ZONE_RADIUS = 0.5
 OUTER_ZONE_EXIT_PENALTY = -1.0
@@ -277,19 +262,7 @@ GAMMA = 0.97
 
 
 def terminal_checks(pos, roll, pitch, oob_radius=OOB_RADIUS):
-    """Evaluates every hard-failure condition (not just the first one tripped)
-    and returns (penalty_sum, term_reason, active_reasons): term_reason/
-    active_reasons are empty/None while non-terminal (episode continues);
-    otherwise every condition that tripped THIS step is summed into
-    penalty_sum and listed (e.g. an oob position that's also over the
-    attitude limit reports both, instead of only whichever check happened
-    to be evaluated first).
-
-    `oob_radius` defaults to the flat module constant (the original Uniform(3,10)
-    task) but reward_func passes a distance-scaled value instead -- a fixed 30m
-    radius makes any target past ~10m structurally unreachable (the drone gets
-    flagged oob leaving the sphere long before reaching the target), which isn't
-    a PID/policy failure, just a mismatched radius."""
+    """All hard failures this step -> (penalty_sum, term_reason or None, active_reasons)."""
     penalty_sum = 0.0
     active_reasons = []
 
@@ -312,9 +285,7 @@ def hit_target(dist):
 
 
 def milestone_bonus(env, dist, start_dist):
-    """Fires each of MILESTONE_FRACS' bonuses once per episode, the first
-    time progress (fraction of start_dist closed) crosses it. env.milestones_hit
-    (a set, reset in BaseDroneEnv.reset()) tracks which have already fired."""
+    """Each MILESTONE_FRACS bonus fires once per episode (tracked in env.milestones_hit)."""
     progress = 1.0 - dist / start_dist
     bonus = 0.0
     for frac, val in zip(MILESTONE_FRACS, MILESTONE_BONUSES):
@@ -336,8 +307,7 @@ def reward_func(env):
     if hit_target(dist):
         return HIT_REWARD, True, "Hit"
 
-    # Plain phi_now-phi_prev, not GAMMA*phi_now-phi_prev -- the gamma-scaled form leaves
-    # a small positive reward for standing still, undermining step_penalty (see rewards.py history).
+    # phi_now - phi_prev without gamma: the gamma form pays for standing still
     diff = env.target_pos - pos
     prev_diff = env.target_pos - env.prev_position
     phi_now = -np.sum(np.abs(diff)) / env.start_dist

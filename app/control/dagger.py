@@ -13,34 +13,15 @@ from app.guidance.train import ActorCritic, device
 from app.reward_functions.rewards import reward_func
 from app.training.eval_matrix import build_omni_eval_pairs
 
-# Aggregate buffer cap, in raw (obs, pid_action) pairs. Without this, agg_obs/
-# agg_actions below grows every round for all n_rounds with nothing ever removed,
-# so retrain cost (and memory) balloons round over round and old, less-refined
-# rounds never get diluted out relative to newer, better ones.
+# cap on aggregated (obs, pid_action) pairs so retrain cost doesn't grow every round
 AGG_BUFFER_CAP_PAIRS = 500_000
 
-# Per-round decay applied to both eviction-keep-probability and training loss
-# weight: a pair from `k` rounds ago gets weight RECENCY_DECAY**k. This is what
-# makes the aggregate "learn off dagger" instead of just uniformly pooling
-# everything ever collected -- newer rounds (closer to the current policy's
-# actual mistakes) dominate both what survives the buffer cap and what the
-# retrain loss emphasizes, while old round-0 baseline data never fully
-# disappears (it just fades).
+# a pair from k rounds ago is kept / weighted with RECENCY_DECAY**k (docs.md "DAgger")
 RECENCY_DECAY = 0.85
 
 
 def _make_env(max_steps=15_000):
-    # reward_func (app.reward_functions.rewards), not the deprecated RewardFnPhase1
-    # roadmap -- the current reward version, matching what base_training.py actually
-    # trains against. Its oob_radius scales with env.start_dist (see
-    # rewards.reward_func), so it's safe across the full distance curriculum,
-    # not just the 3/10m this script currently runs at.
-    #
-    # max_steps must be passed per distance: BaseDroneEnv defaults to 15_000,
-    # but steps_for_dist(100/150/250) needs 25k/37.5k/62.5k -- leaving the
-    # default would silently truncate long-distance rollouts before the
-    # policy/PID has a chance to converge, regardless of this function's own
-    # max_steps loop bound below.
+    # max_steps per distance: the env default (15k) would truncate long-distance rollouts
     return BaseDroneEnv(reward_func, pid_gains_path=None, max_steps=max_steps)
 
 
@@ -58,26 +39,7 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
            out_path="app/control/pretrained_bc_dagger.pt",
            plots_dir="plots_final", distances=DISTANCES,
            hidden=64, num_hidden_layers=4, model=None, snapshot_path=None):
-    """
-    Runs the same distance curriculum as collect_demonstrations.py (per-distance PID
-    gains) to collect fresh rollouts each round, using build_omni_eval_pairs so every
-    single/pair/triple-axis diagonal direction gets corrected each round, not just the
-    six cardinal ones. `distances` only limits new collection -- any 250m rows already
-    baked into demo_path's dataset stay in the aggregate; they just stop growing.
-
-    Long-distance episodes run far more steps than short ones, so raw pair counts per
-    distance are wildly unequal; each round, every distance's pairs are subsampled
-    down to the smallest distance's count before aggregating, so no distance dominates
-    the BC loss.
-
-    `model`/`hidden`/`num_hidden_layers` let a caller hand in an already-built,
-    already-BC-pretrained model of a specific shape instead of loading
-    `checkpoint_path` off disk -- the on-policy rollouts below depend on the
-    exact policy driving the drone, so a non-default architecture needs the matching net.
-    `snapshot_path` overrides where the growing aggregate is saved each round; default
-    derives it from `demo_path` as before, which is only safe when demo_path is used by
-    a single dagger() run at a time.
-    """
+    """Numpy DAgger over the distance curriculum with per-distance PID gains. See docs.md "DAgger"."""
     shape_env = _make_env()
     if model is None:
         model = ActorCritic(shape_env.observation_space.shape[0], shape_env.action_space.shape[0],
@@ -88,8 +50,7 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
     data = np.load(demo_path)
     agg_obs = data["obs"]
     agg_actions = data["actions"]
-    # Round 0 = pre-DAgger baseline demonstrations (oldest, lowest recency weight
-    # once rounds start accumulating).
+    # round 0 = pre-DAgger baseline demos
     agg_round = np.zeros(len(agg_obs), dtype=np.int32)
 
     history = []
@@ -108,20 +69,13 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
             max_steps = steps_for_dist(dist)
             env = _make_env(max_steps=max_steps)
 
-            # Jitter magnitude scales with task distance -- a fixed absolute range would be
-            # negligible at 250m but dominate (and distort) the shortest curriculum bucket.
+            # jitter scales with distance (a fixed range is noise at 250 m, distortion at 3 m)
             jitter_mag = min(0.75, 0.25 * dist)
 
-            # build_omni_eval_pairs (not build_eval_pairs) -- build_eval_pairs only
-            # ever offsets ONE axis at a time (x+/x-/y+/y-/z+/z-), so DAgger's own
-            # on-policy corrections never covered a diagonal 2/3-axis target even
-            # though the round-0 baseline (collect_demonstrations_omni) did. That
-            # left diagonal movement uncorrected round over round. build_omni_eval_pairs
-            # covers every single/pair/triple-axis combo (all signs) at this distance.
+            # omni pairs: single/pair/triple-axis directions, not just the 6 cardinal ones
             for start, target, target_yaw in build_omni_eval_pairs(oob_radius=oob_radius, distances=(dist,)):
                 for ep in range(num_episodes_per_pair):
-                    # Jitter must cover all 3 axes, including z: z-axis pairs need the same
-                    # neighborhood jitter as x/y, since z is the actual task dimension there.
+                    # jitter all 3 axes, including z
                     drone_offset = np.random.uniform(-jitter_mag, jitter_mag, size=3).astype(np.float32)
                     target_offset = np.random.uniform(-jitter_mag, jitter_mag, size=3).astype(np.float32)
 
@@ -169,9 +123,7 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
         agg_round = np.concatenate([agg_round, np.full(len(new_obs), round_idx + 1, dtype=np.int32)])
 
         if len(agg_obs) > AGG_BUFFER_CAP_PAIRS:
-            # Recency-weighted eviction: a pair's keep-probability decays with how
-            # many rounds old it is, so the buffer skews toward recent, more-refined
-            # corrections instead of shrinking everything uniformly at random.
+            # recency-weighted eviction
             keep_w = RECENCY_DECAY ** (round_idx + 1 - agg_round)
             idx = rng.choice(len(agg_obs), size=AGG_BUFFER_CAP_PAIRS, replace=False,
                               p=keep_w / keep_w.sum())
@@ -183,8 +135,7 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
 
         print(f"round {round_idx + 1}/{n_rounds}: raw_counts={raw_counts} -> balanced to {min_count}/dist, "
               f"aggregated dataset now {len(agg_obs)} pairs, retraining...")
-        # Same recency weighting drives the retrain loss: rounds closer to "now"
-        # matter more than the original round-0 PID-only baseline.
+        # recency weighting also drives the retrain loss
         train_w = RECENCY_DECAY ** (round_idx + 1 - agg_round)
         model = pretrain_behavior_cloning(model, obs=agg_obs, actions=agg_actions,
                                            weights=train_w, epochs=retrain_epochs)
@@ -203,8 +154,7 @@ def dagger(gains_by_dist, n_rounds=5, num_episodes_per_pair=3,
     return model, history
 
 
-# Batched on-policy DAgger on the live Isaac Lab env -- same algorithm as
-# dagger() above but num_envs episodes in parallel per round.
+# batched on-policy DAgger on the Isaac env (same algorithm, num_envs in parallel)
 AGG_BUFFER_CAP_PAIRS_ISAAC = AGG_BUFFER_CAP_PAIRS
 
 
@@ -216,20 +166,7 @@ def dagger_base_drone_isaac(env, gains_by_dist: dict, n_rounds: int = 5,
                              out_path: str = "app/control/pretrained_bc_dagger_isaac.pt",
                              hidden: int = 64, num_hidden_layers: int = 4, model=None,
                              pool_size: int = 1024, pool_refresh_every_rows: int = 50_000):
-    """Returns (model, history) -- history is a list of per-round dicts
-    (round, rows_collected, aggregate_size, hit_rate, episodes). Distance is
-    drawn continuously from Uniform(distance_low, distance_high) per pool
-    entry (see collect_demonstrations_base_drone_isaac's docstring) -- PID
-    gains are picked per-env by nearest-distance match, so an arbitrary
-    continuous distance is fine.
-
-    Known simplifications vs. dagger(): no per-distance row balancing (the
-    numpy version subsamples every distance down to its smallest distance's
-    raw count each round before aggregating, since long-distance episodes run
-    far more steps and would otherwise dominate the BC loss) -- here envs
-    draw targets from the shared omni pool and contribute rows for however
-    long their episode runs, unrebalanced. Also no per-round
-    plot_dagger_history call."""
+    """Returns (model, history). No per-distance row balancing, unlike dagger(); see docs.md "DAgger"."""
     import torch
     import isaaclab.utils.math as math_utils
     from app.control.collect_demonstrations import sample_full_sphere_target
@@ -268,8 +205,7 @@ def dagger_base_drone_isaac(env, gains_by_dist: dict, n_rounds: int = 5,
     _refresh_pool()
     pid = TorchPIDController(unwrapped.num_envs, device, **next(iter(gains_by_dist.values())))
 
-    # Reset ONCE, not every round -- a per-round reset was silently making hit_rate
-    # read near-zero regardless of policy quality (see PROJECT_DEFENSE_GUIDE.md Part 8.5.1).
+    # reset once, not per round (per-round reset made hit_rate read ~0, docs.md "DAgger")
     obs = env.reset()[0]["policy"]
     all_env_ids = torch.arange(unwrapped.num_envs, device=device)
     assign_gains_by_distance(pid, unwrapped._start_dist, gains_by_dist, all_env_ids)
@@ -335,8 +271,7 @@ def dagger_base_drone_isaac(env, gains_by_dist: dict, n_rounds: int = 5,
 
         eviction_rng = np.random.default_rng(round_idx)
         if len(agg_obs) > AGG_BUFFER_CAP_PAIRS_ISAAC:
-            # Same recency-weighted eviction as dagger(): a pair's
-            # keep-probability decays with how many rounds old it is.
+            # recency-weighted eviction, as in dagger()
             keep_w = RECENCY_DECAY ** (round_idx + 1 - agg_round)
             idx = eviction_rng.choice(len(agg_obs), size=AGG_BUFFER_CAP_PAIRS_ISAAC, replace=False,
                                        p=keep_w / keep_w.sum())

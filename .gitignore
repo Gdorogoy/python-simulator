@@ -1,27 +1,30 @@
-<<<<<<< HEAD
-*/logs
+# Python / tooling
 .venv/
-/runs
-=======
-*/logs
-.venv/
-/runs/*
-!/runs/optuna_isaac/
-plots_final
-demonstrations_dagger.npz
-app/control/demonstrations_isaac.npz
-arch_dagger/
-mlflow.db
-mlflow.db~
-mlflow_isaac.db
-mlruns/
-mlartifacts/
-recordings/
-out/
-prod_logs/
 __pycache__/
 *.pyc
+
+# Training outputs (never pushed; released models live in stable_models/)
+/runs/
+/uploaded_weights/
+/recordings/
+/out/
+/prod_logs/
+*/logs
+plots_final/
+arch_dagger/
 *.mp4
+
+# Experiment tracking
+mlflow*.db
+mlflow*.db~
+mlruns/
+mlartifacts/
 optuna/
 optuna_isaac/
->>>>>>> later_to_remove
+
+# Demonstration datasets (regenerate with app/control/collect_demo_isaac.py)
+*.npz
+
+# Released models: keep best.pt / .onnx / configs / plots, drop resume + intermediate weights
+stable_models/*/latest_full.pt
+stable_models/handoff_*/model_*.pt

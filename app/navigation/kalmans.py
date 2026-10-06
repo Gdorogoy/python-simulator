@@ -1,14 +1,7 @@
 import numpy as np
 
 
-"""
-Standard linear Kalman filter over a 6-element state [x, y, z, vx, vy, vz]. x_hat/P are
-the state estimate and its covariance; F is the constant-velocity motion model; Q/R are
-process/measurement noise (as scalars q/r, expanded to matrices via identity); H maps
-state to the 3 position measurements actually sensed; K is the Kalman gain balancing
-trust between prediction and new measurement. No control input (B/u) is used since RL
-actions aren't known accelerations here.
-"""
+"""Linear constant-velocity Kalman filter over [x, y, z, vx, vy, vz] with position measurements. See docs.md."""
 
 
 class Kalman:

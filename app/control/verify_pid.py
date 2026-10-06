@@ -9,15 +9,7 @@ from app.guidance.plotting import plot_eval_matrix_distance, plot_eval_matrix_pa
 
 
 def _make_env(max_steps):
-    # reward_func (not the deprecated RewardFnPhase1 roadmap) -- the current
-    # reward version. Its oob_radius now scales with env.start_dist (see
-    # rewards.reward_func), so it's safe across the full DISTANCES ladder
-    # including 250m, not just the original Uniform(3,10) task.
-    #
-    # max_steps must be passed explicitly: BaseDroneEnv defaults to 15_000,
-    # but steps_for_dist(100/150/250) needs 25k/37.5k/62.5k -- leaving the
-    # default would silently truncate long-distance episodes before the
-    # controller has a chance to converge.
+    # max_steps per distance: the env default (15k) would truncate long-distance episodes
     return BaseDroneEnv(reward_func, pid_gains_path=None, max_steps=max_steps)
 
 
@@ -32,8 +24,7 @@ for dist in DISTANCES:
     oob_radius = max(20.0, dist * 3.0)
     env = _make_env(max_steps=steps_for_dist(dist))
 
-    # Same fixed (start, target) pairs used to score RL checkpoints, so the PID
-    # baseline is compared against RL on identical, non-random configs.
+    # same fixed pairs used to score RL checkpoints, so PID and RL are compared like for like
     results = run_eval_matrix(
         env, make_pid_action_fn(pid), pairs=build_eval_pairs(oob_radius=oob_radius, distances=(dist,)),
         n_repeats=3, max_steps=steps_for_dist(dist), on_episode_reset=pid.reset,

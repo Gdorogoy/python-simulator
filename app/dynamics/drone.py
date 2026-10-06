@@ -1,8 +1,4 @@
-"""
-Drone dynamics entities: RotorConfig (static per-motor physics), QuadConfig
-(static per-drone physics: mass, inertia, 4 rotors), and QuadState (dynamic
-per-tick state: position, velocity, orientation, etc).
-"""
+"""Drone entities: RotorConfig / QuadConfig (static physics) and QuadState (per-tick state)."""
 
 import math
 from dataclasses import dataclass
@@ -51,10 +47,7 @@ class QuadState:
     rotor_rpm: list[float]        # current actual rpm, 4 values
 
 
-"""
-Places 4 rotors in a standard X configuration, 90 degrees apart, with alternating
-spin direction so reaction torques cancel out during hover.
-"""
+"""4 rotors in an X layout, alternating spin so reaction torques cancel at hover."""
 
 def create_quad_rotors(
     arm_length: float,
@@ -126,10 +119,7 @@ def create_quad_config(
 
 
 
-"""
-Builds a starting QuadState — spawns at rest, level orientation,
-unless overridden.
-"""
+"""Starting QuadState: at rest and level unless overridden."""
 def create_initial_state(
     position: Vector3D,
     velocity: Vector3D | None = None,

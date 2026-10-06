@@ -4,9 +4,7 @@ import math
 def compute_grade(success_rate, avg_final_dist, avg_hit_time_sec, avg_grad_norm,
                    oob_radius, episode_time_budget_sec, grad_norm_ceiling=50.0,
                    w_success=1.0, w_error=0.3, w_time=0.0, w_grad=0.1):
-    """Single scalar score for comparing checkpoints/trials: success rate, rewarded,
-    minus normalized penalties for final distance error, time-to-hit, and grad norm.
-    Returns (grade, breakdown_dict)."""
+    """Single checkpoint score: success rate minus normalised distance / time / grad-norm penalties -> (grade, breakdown)."""
     error_ratio = min(max(avg_final_dist / oob_radius, 0.0), 1.0)
     if avg_hit_time_sec is None:
         time_ratio = 1.0

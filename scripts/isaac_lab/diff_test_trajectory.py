@@ -1,26 +1,4 @@
-"""
-Migration step 4 (trajectory layer): runs the SAME fixed action sequence
-through (a) the numpy oracle (app.dynamics.methods.timestamp_update, direct,
-not through BaseDroneEnv/gym) and (b) the Isaac Lab env (PhysX-integrated,
-num_envs=1), from matching initial conditions, and reports per-step position/
-velocity/orientation/angular-velocity/rotor-rpm divergence.
-
-app.dynamics.torch_methods is already diff-tested bit-exact against the
-oracle (scripts/isaac_lab/diff_test_physics.py) for the force/torque MATH.
-This script isolates the remaining unknown: does PhysX's own rigid-body
-INTEGRATION (turning those forces into position/orientation/velocity) track
-the oracle's manual semi-implicit-Euler + exact rotvec-exponential-map
-integration closely enough to trust. Some divergence is expected and is not
-automatically a bug -- see the printed summary's interpretation notes.
-
-The env's own `decimation` (BaseDroneEnvIsaacCfg.decimation, 4 as of this
-writing) means each `env.step()` advances `decimation` PHYSICS_DT substeps,
-not one -- the oracle side below loops timestamp_update that many times per
-iteration to stay a fair 1:1 comparison. If decimation changes, this script
-picks it up automatically (reads unwrapped.cfg.decimation).
-
-    E:\\Isaac\\env_isaaclab\\Scripts\\python.exe -u scripts\\isaac_lab\\diff_test_trajectory.py --headless --num_steps 100
-"""
+"""Same action sequence through the numpy oracle and the Isaac env: per-step state divergence. See scripts/README.md."""
 
 import argparse
 
@@ -70,9 +48,7 @@ def main():
 
     env.reset()
     print(f"[DEBUG post-reset mass] readback={unwrapped._robot.root_physx_view.get_masses()}")
-    # pin env 0 to the oracle's exact initial condition (default reset() already
-    # samples a random target/spawn; overwrite spawn back to (0,0,5) so both
-    # sides start identically -- target doesn't affect the dynamics being tested).
+    # pin env 0 to the oracle's initial condition (spawn (0,0,5))
     zero_ids = torch.tensor([0], device=unwrapped.device)
     root_state = unwrapped._robot.data.default_root_state[zero_ids].clone()
     root_state[:, :3] = torch.tensor(START_POS, device=unwrapped.device, dtype=root_state.dtype) + unwrapped._terrain.env_origins[zero_ids]

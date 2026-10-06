@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone Policy Viewer</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2230; --muted: #647087; --line: #dde1e8;
+    --accent: #2f5bea; --accent-ink: #ffffff; --soft: #eef1f7;
+    --good: #1f8a4c; --bad: #c43d3d; --warn: #b7791f; --info: #2f5bea;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151c; --card: #1a1f2a; --ink: #e7eaf2; --muted: #99a3b8; --line: #2b3342;
+      --accent: #6c8cff; --accent-ink: #0d1220; --soft: #222938;
+      --good: #4cc27f; --bad: #ef7676; --warn: #e0a84e; --info: #6c8cff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 16px 64px; }
+  header h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+
+  nav.tabs { display: flex; gap: 4px; margin: 22px 0 16px; border-bottom: 1px solid var(--line); }
+  nav.tabs button { background: none; border: 0; padding: 10px 14px; font: inherit; color: var(--muted);
+                    cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  nav.tabs button:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible
+    { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .panel[hidden] { display: none; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .card > h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  label.field { display: block; font-size: 12px; color: var(--muted); }
+  label.field span.hint { display: block; margin-top: 3px; font-size: 11.5px; }
+  input[type=number], input[type=text], select { width: 100%; margin-top: 4px; padding: 8px 10px; font: inherit; color: var(--ink);
+        background: var(--card); border: 1px solid var(--line); border-radius: 7px; }
+  input[type=file] { margin-top: 4px; font: inherit; color: var(--muted); }
+  input:disabled { opacity: .5; }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 10px; }
+  .seg button { background: var(--card); border: 0; padding: 7px 12px; font: inherit; color: var(--muted); cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--soft); color: var(--ink); font-weight: 600; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .chip { background: var(--soft); border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px;
+          font: inherit; font-size: 12.5px; color: var(--ink); cursor: pointer; }
+  .chip:hover { border-color: var(--accent); }
+
+  .toggle { display: flex; align-items: flex-start; gap: 10px; }
+  .toggle input { margin-top: 3px; }
+  .toggle b { font-weight: 600; }
+  .note { font-size: 12.5px; color: var(--muted); margin: 6px 0 0; }
+  .note.warn { color: var(--warn); }
+  details { margin-top: 10px; }
+  details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  details[open] > summary { margin-bottom: 8px; }
+
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  button.primary, button.secondary { font: inherit; padding: 9px 16px; border-radius: 8px; cursor: pointer; border: 1px solid var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: progress; }
+  .status { display: flex; align-items: center; gap: 8px; min-height: 22px; margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+  .status.error { color: var(--bad); } .status.ok { color: var(--good); }
+  .spin { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+          animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+  .results { margin-top: 6px; }
+  .results[hidden] { display: none; }
+  video, img.plot { width: 100%; border-radius: 8px; margin-top: 10px; background: #000; }
+  img.plot { background: var(--card); border: 1px solid var(--line); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 4px; }
+  .kpi { background: var(--soft); border-radius: 8px; padding: 10px 12px; }
+  .kpi .v { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+  .kpi .l { font-size: 12px; color: var(--muted); }
+  .kpi .bar { height: 4px; border-radius: 4px; background: var(--line); margin-top: 6px; overflow: hidden; }
+  .kpi .bar i { display: block; height: 100%; background: var(--info); }
+  .kpi.good .v { color: var(--good); } .kpi.good .bar i { background: var(--good); }
+  .kpi.bad .v { color: var(--bad); } .kpi.bad .bar i { background: var(--bad); }
+  .kpi.warn .v { color: var(--warn); } .kpi.warn .bar i { background: var(--warn); }
+  dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 4px 0 0; }
+  dl.kv dt { color: var(--muted); } dl.kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; }
+  .verdict { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 13px; background: var(--soft); }
+  .verdict.good { color: var(--good); } .verdict.bad { color: var(--bad); } .verdict.warn { color: var(--warn); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  .tablewrap { max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+  pre.out { font: 12px/1.45 var(--mono); background: var(--soft); border-radius: 8px; padding: 10px; margin: 0;
+            max-height: 420px; overflow: auto; white-space: pre; }
+  .rowbtn { display: flex; gap: 10px; align-items: center; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+  .rowbtn a { color: var(--accent); }
+  .linkbtn { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
+
+  /* ---- 3D player ---- */
+  .wrap.wide { max-width: 1280px; }
+  .player { margin-top: 10px; }
+  .pv-stage { position: relative; height: min(66vh, 640px); min-height: 360px; border-radius: 10px; overflow: hidden; background: #0d111b; }
+  .pv-canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; }
+  .pv-hud { position: absolute; left: 12px; top: 10px; color: #e7eaf2; font: 12.5px/1.5 var(--mono); background: rgba(13,17,27,.65);
+            padding: 6px 10px; border-radius: 8px; pointer-events: none; }
+  .pv-help { position: absolute; left: 12px; bottom: 8px; right: 12px; color: #8b97b1; font-size: 11.5px; pointer-events: none; }
+  .pv-chart { display: block; width: 100%; height: 72px; margin-top: 8px; border-radius: 8px; cursor: pointer; touch-action: none; }
+  .pv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+  .pv-bar button { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px; font: inherit; cursor: pointer; min-width: 38px; }
+  .pv-bar button:hover { border-color: var(--accent); }
+  .pv-bar .pv-play { min-width: 52px; background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+  .pv-scrub { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent); }
+  .pv-time { font: 12.5px var(--mono); color: var(--muted); white-space: nowrap; }
+  .pv-opts { font-size: 12.5px; color: var(--muted); }
+  .pv-opts label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .pv-opts select { width: auto; margin: 0; padding: 4px 6px; }
+  .pv-seg { margin-bottom: 0; }
+  .pv-seg button { border: 0; border-radius: 0; padding: 5px 11px; background: var(--card); color: var(--muted); }
+  .pv-seg button[aria-pressed="true"] { background: var(--soft); color: var(--ink); font-weight: 600; }
+  .pv-bar button.pv-mini { padding: 4px 9px; min-width: 0; font-size: 12.5px; }
+  .pv-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div class="wrap wide">
+  <header>
+    <h1>Drone Policy Viewer</h1>
+    <p>Fly checkpoints in the numpy simulator and replay the flight in 3D: orbit, zoom, scrub, pause, follow the drone (local tool, no auth, runs are synchronous).</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Mode">
+    <button role="tab" id="t-two" aria-selected="true" aria-controls="tab-two">Two-phase</button>
+    <button role="tab" id="t-single" aria-selected="false" aria-controls="tab-single">Single policy</button>
+    <button role="tab" id="t-rank" aria-selected="false" aria-controls="tab-rank">Rank checkpoints</button>
+  </nav>
+
+  <!-- ===================== TWO-PHASE ===================== -->
+  <section id="tab-two" class="panel" role="tabpanel" aria-labelledby="t-two">
+    <div class="card">
+      <h2>Checkpoint</h2>
+      <div class="seg" role="group" aria-label="Checkpoint source">
+        <button id="tpSrcPick" aria-pressed="true" type="button">Pick from server</button>
+        <button id="tpSrcUpload" aria-pressed="false" type="button">Upload .pt</button>
+      </div>
+      <div id="tpPickBox"><select id="tpCheckpoint" aria-label="Checkpoint on the server"></select></div>
+      <div id="tpUploadBox" hidden><input id="tpFile" type="file" accept=".pt" aria-label="Checkpoint file"></div>
+      <p class="note" id="tpCkptNote"></p>
+    </div>
+
+    <div class="card">
+      <h2>Scenario</h2>
+      <div class="grid">
+        <label class="field">Target distance (m)
+          <input id="tpDistance" type="number" value="250" step="1" min="1">
+          <span class="hint">PID flies it alone down to the switch distance.</span></label>
+        <label class="field">Switch distance (m)
+          <input id="tpSwitchDist" type="number" value="40" step="1" min="1">
+          <span class="hint">Where the policy takes over.</span></label>
+        <label class="field">Cruise speed (m/s)
+          <input id="tpCruise" type="number" value="18" step="1" min="0">
+          <span class="hint">Use the run's --max-speed. 0 = old slow PID (arrives at ~0.5 m/s).</span></label>
+        <label class="field">Handoff speed (m/s)
+          <input id="tpHandoffSpeed" type="number" placeholder="cruise / 2" step="1" min="0">
+          <span class="hint">Speed when the policy takes over.</span></label>
+        <label class="field">Test runs
+          <input id="tpNRuns" type="number" value="75" step="1" min="1">
+          <span class="hint">Used by "Run test batch".</span></label>
+        <label class="field">Seed (optional)
+          <input id="tpSeed" type="number" placeholder="random">
+          <span class="hint">Same seed = same scenarios.</span></label>
+      </div>
+      <div class="toggle" style="margin-top:14px">
+        <input id="tpRecentre" type="checkbox">
+        <label for="tpRecentre"><b>Re-centre the position input at the handoff</b>
+          <span class="note" style="display:block;margin:2px 0 0">From the handoff on, the policy sees x,y measured from the handoff point (like training's re-centring); the drone still flies in real coordinates.
+            Altitude is capped at <input id="tpRecentreZ" type="number" value="20" step="1" min="1" style="width:70px;display:inline-block;margin:0 4px;padding:3px 6px"> m.</span></label>
+      </div>
+      <p class="note" id="tpRecentreNote"></p>
+      <div class="chips" aria-label="Presets">
+        <button class="chip" type="button" data-preset="rtl">Isaac RTL checkpoint (250 m, switch 40)</button>
+        <button class="chip" type="button" data-preset="short">Short test (30 m, switch 20)</button>
+      </div>
+      <p class="note warn" id="tpBudgetHint"></p>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="tpRecordBtn" type="button">Run &amp; play in 3D</button>
+      <button class="secondary" id="tpEvalBtn" type="button">Run test batch (no video)</button>
+    </div>
+    <div class="status" id="tpStatus" role="status" aria-live="polite"></div>
+    <div class="results card" id="tpResults" hidden></div>
+  </section>
+
+  <!-- ===================== SINGLE POLICY ===================== -->
+  <section id="tab-single" class="panel" role="tabpanel" aria-labelledby="t-single" hidden>
+    <div class="card">
+      <h2>Checkpoint</h2>
+      <select id="spCheckpoint" aria-label="Checkpoint on the server"></select>
+      <p class="note">The policy flies the whole episode (no PID leg). Distances are sampled between low and high.</p>
+    </div>
+    <div class="card">
+      <h2>Scenario</h2>
+      <div class="grid">
+        <label class="field">Distance low (m)<input id="spLow" type="number" value="3" step="0.5"></label>
+        <label class="field">Distance high (m)<input id="spHigh" type="number" value="10" step="0.5"></label>
+        <label class="field">Seed (optional)<input id="spSeed" type="number" placeholder="random"></label>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" id="spRecordBtn" type="button">Record &amp; play</button>
+      <button class="secondary" id="spEvalBtn" type="button">Run full evaluation (75 scenarios)</button>
+    </div>
+    <div class="status" id="spStatus" role="status" aria-live="polite"></div>
+    <div class="results card" id="spResults" hidden></div>
+  </section>
+
+  <!-- ===================== RANK ===================== -->
+  <section id="tab-rank" class="panel" role="tabpanel" aria-labelledby="t-rank" hidden>
+    <div class="card">
+      <h2>Directory</h2>
+      <div class="grid">
+        <label class="field" style="grid-column: span 2">Checkpoint directory
+          <input id="rkDir" type="text" placeholder="runs/base_training_isaac_3_10"></label>
+        <label class="field">Top N<input id="rkTop" type="number" value="5" min="1"></label>
+      </div>
+      <p class="note">Uses the distance range and seed from the Single policy tab.</p>
+    </div>
+    <div class="actions"><button class="primary" id="rkBtn" type="button">Rank checkpoints</button></div>
+    <div class="status" id="rkStatus" role="status" aria-live="polite"></div>
+    <div class="results card" id="rkResults" hidden></div>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('dpv.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('dpv.' + k, JSON.stringify(v)); } catch (e) { /* storage may be blocked */ } },
+};
+
+/* ---------- tabs ---------- */
+const TABS = ['two', 'single', 'rank'];
+function showTab(name) {
+  for (const t of TABS) {
+    $('t-' + t).setAttribute('aria-selected', String(t === name));
+    $('tab-' + t).hidden = t !== name;
+  }
+  store.set('tab', name);
+}
+for (const t of TABS) $('t-' + t).onclick = () => showTab(t);
+
+/* ---------- small helpers ---------- */
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) { if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v); }
+  for (const kid of kids) if (kid != null) e.append(kid);
+  return e;
+}
+const pct = (n, d) => d ? (100 * n / d) : 0;
+const fmt = (x, n = 2) => (x == null || Number.isNaN(x)) ? '-' : Number(x).toFixed(n);
+
+let busy = {};
+function setStatus(id, msg, kind) {
+  const s = $(id); s.className = 'status' + (kind ? ' ' + kind : ''); s.replaceChildren();
+  if (kind === 'busy') s.append(el('span', { class: 'spin' }));
+  if (msg) s.append(el('span', { text: msg }));
+}
+async function run(statusId, btnIds, busyMsg, job) {
+  btnIds.forEach((b) => { $(b).disabled = true; });
+  const t0 = Date.now();
+  const tick = setInterval(() => setStatus(statusId, `${busyMsg}  ${Math.round((Date.now() - t0) / 1000)} s`, 'busy'), 1000);
+  setStatus(statusId, busyMsg, 'busy');
+  try { await job(); }
+  catch (e) { setStatus(statusId, 'Error: ' + (e.message || e), 'error'); }
+  finally { clearInterval(tick); btnIds.forEach((b) => { $(b).disabled = false; }); }
+}
+async function api(url, body, form) {
+  const res = await fetch(url, form ? { method: 'POST', body } : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) { let d = res.statusText; try { d = (await res.json()).detail || d; } catch (e) { /* not json */ } throw new Error(d); }
+  return res.json();
+}
+
+/* ---------- result widgets ---------- */
+function kpi(label, count, total, tone) {
+  const v = pct(count, total);
+  return el('div', { class: 'kpi ' + (tone || '') },
+    el('div', { class: 'v', text: `${v.toFixed(0)}%` }),
+    el('div', { class: 'l', text: `${label} (${count}/${total})` }),
+    el('div', { class: 'bar' }, el('i', { style: `width:${v}%` })));
+}
+function totalsCards(data) {
+  const sc = data.scenarios || [], n = sc.length || Object.values(data.totals || {}).reduce((a, b) => a + b, 0);
+  const t = data.totals || {};
+  const parked = sc.filter((s) => s.reason === 'timeout' && (s.stall_steps || 0) > 1000).length;
+  const wrap = el('div', { class: 'kpis' },
+    kpi('Hit', t.hit || 0, n, 'good'),
+    kpi('Roll / pitch crash', t.attitude || 0, n, 'bad'),
+    kpi('Out of bounds', t.oob || 0, n, 'bad'),
+    kpi('Timeout', t.timeout || 0, n, 'warn'));
+  if (parked) wrap.append(kpi('of which parked < 1 m', parked, n, 'warn'));
+  return wrap;
+}
+function scenarioTable(sc) {
+  const head = ['#', 'result', 'final dist (m)', 'closest (m)', 'handoff speed (m/s)', 'stalled steps'];
+  const tb = el('tbody');
+  sc.forEach((s, i) => tb.append(el('tr', {},
+    el('td', { text: i + 1 }), el('td', { text: s.reason }), el('td', { text: fmt(s.final_dist) }),
+    el('td', { text: fmt(s.min_dist) }), el('td', { text: fmt(s.handoff_speed, 1) }), el('td', { text: s.stall_steps ?? '-' }))));
+  return el('div', { class: 'tablewrap' }, el('table', {}, el('thead', {}, el('tr', {}, ...head.map((h) => el('th', { text: h })))), tb));
+}
+function collapsible(title, node) { return el('details', {}, el('summary', { text: title }), node); }
+function textBlock(text) { return el('pre', { class: 'out', text }); }
+function copyBtn(getText) {
+  const b = el('button', { class: 'linkbtn', type: 'button', text: 'Copy summary' });
+  b.onclick = async () => { try { await navigator.clipboard.writeText(getText()); b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy summary'), 1500); } catch (e) { b.textContent = 'Copy failed'; } };
+  return b;
+}
+function savedLink(url) { return url ? el('a', { href: url, target: '_blank', rel: 'noopener', text: 'Open saved summary' }) : null; }
+function kv(obj) {
+  const dl = el('dl', { class: 'kv' });
+  for (const [k, v] of Object.entries(obj)) if (v !== undefined) { dl.append(el('dt', { text: k })); dl.append(el('dd', { text: typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v) })); }
+  return dl;
+}
+function verdict(reason) {
+  const good = reason === 'Hit', warn = reason === 'timeout';
+  return el('span', { class: 'verdict ' + (good ? 'good' : warn ? 'warn' : 'bad'), text: reason });
+}
+function show(id, ...nodes) { const r = $(id); r.replaceChildren(...nodes.filter(Boolean)); r.hidden = false; }
+
+/* ---------- checkpoints ---------- */
+let CKPTS = [];
+async function loadCheckpoints() {
+  try { CKPTS = (await (await fetch('/api/checkpoints')).json()).checkpoints; } catch (e) { CKPTS = []; }
+  for (const id of ['tpCheckpoint', 'spCheckpoint']) {
+    const sel = $(id); sel.replaceChildren();
+    if (!CKPTS.length) sel.append(el('option', { value: '', text: '(no .pt files found under runs/ or app/control/)' }));
+    CKPTS.forEach((cp) => sel.append(el('option', { value: cp, text: cp })));
+    const saved = store.get(id, null);
+    if (saved && CKPTS.includes(saved)) sel.value = saved;
+    sel.onchange = () => { store.set(id, sel.value); updateNotes(); };
+  }
+  updateNotes();
+}
+let tpInfoSeq = 0;
+async function updateTpInfo() {
+  const cp = $('tpCheckpoint').value, note = $('tpCkptNote'), seq = ++tpInfoSeq;
+  note.textContent = '';
+  if (!cp) return;
+  applyRecentreDefault(null);
+  try {
+    const info = await (await fetch('/api/checkpoint_info?path=' + encodeURIComponent(cp))).json();
+    if (seq !== tpInfoSeq || !info.has_config) return;            // stale answer, or an older run without run_config.json
+    const parts = [];
+    if (info.distance_high != null) parts.push(`trained for ${info.distance_low}-${info.distance_high} m`);
+    if (info.max_speed != null) parts.push(`max speed ${info.max_speed} m/s`);
+    if (info.spawn_dist_low != null) parts.push(`spawn leg ${info.spawn_dist_low}-${info.spawn_dist_high} m`);
+    parts.push(`position input: ${info.obs_position_mode}`);
+    let text = parts.join(', ');
+    if (info.distance_high != null) text += ` | switch distance should be <= ${info.distance_high} m`;
+    note.textContent = text;
+    applyRecentreDefault(info);
+  } catch (e) { /* the note is only a convenience */ }
+}
+function updateNotes() { updateTpInfo(); }
+function applyRecentreDefault(info) {
+  const box = $('tpRecentre'), note = $('tpRecentreNote');
+  const height = info && info.obs_position_mode === 'height';
+  box.disabled = height; $('tpRecentreZ').disabled = height;
+  if (!info) { note.textContent = ''; return; }
+  box.checked = !height && !!info.recentred;
+  note.textContent = height ? 'This checkpoint does not see x,y (height mode), so there is nothing to re-centre.'
+    : info.recentred ? 'Turned on: this checkpoint was trained with the handoff re-centred to x=y=0.'
+    : 'Off: this run did not re-centre.';
+}
+
+/* ---------- two-phase ---------- */
+let tpSource = 'pick';
+function setSource(s) {
+  tpSource = s; store.set('tpSource', s);
+  $('tpSrcPick').setAttribute('aria-pressed', String(s === 'pick')); $('tpSrcUpload').setAttribute('aria-pressed', String(s === 'upload'));
+  $('tpPickBox').hidden = s !== 'pick'; $('tpUploadBox').hidden = s !== 'upload';
+}
+$('tpSrcPick').onclick = () => setSource('pick'); $('tpSrcUpload').onclick = () => setSource('upload');
+
+const PRESETS = { rtl: { d: 250, s: 40 }, short: { d: 30, s: 20 } };
+document.querySelectorAll('[data-preset]').forEach((b) => b.onclick = () => {
+  const p = PRESETS[b.dataset.preset];
+  $('tpDistance').value = p.d; $('tpSwitchDist').value = p.s; budgetHint();
+});
+function budgetHint() {
+  const d = parseFloat($('tpDistance').value) || 0;
+  $('tpBudgetHint').textContent = d > 5000 ? 'Past 5000 m the step budget is clamped; the episode may time out before arriving.'
+    : d > 500 ? `At ${d} m expect real minutes per run (more for a batch).` : '';
+}
+$('tpDistance').oninput = budgetHint;
+
+function tpForm(extra) {
+  const fd = new FormData();
+  if (tpSource === 'upload') {
+    const f = $('tpFile').files[0];
+    if (!f) throw new Error('Choose a .pt file to upload, or switch to "Pick from server".');
+    fd.append('file', f);
+  } else {
+    if (!$('tpCheckpoint').value) throw new Error('No checkpoint selected.');
+    fd.append('checkpoint', $('tpCheckpoint').value);
+  }
+  fd.append('distance', $('tpDistance').value);
+  fd.append('switch_dist', $('tpSwitchDist').value);
+  fd.append('cruise_speed', $('tpCruise').value || 0);
+  if ($('tpHandoffSpeed').value) fd.append('handoff_speed', $('tpHandoffSpeed').value);
+  if ($('tpSeed').value) fd.append('seed', $('tpSeed').value);
+  if ($('tpRecentre').checked && !$('tpRecentre').disabled) fd.append('recentre_z', $('tpRecentreZ').value || 20);
+  for (const [k, v] of Object.entries(extra || {})) fd.append(k, v);
+  return fd;
+}
+for (const id of ['tpDistance', 'tpSwitchDist', 'tpNRuns', 'tpSeed', 'tpCruise', 'tpHandoffSpeed']) {
+  $(id).value = store.get(id, $(id).value) ?? $(id).value; $(id).addEventListener('change', () => store.set(id, $(id).value));
+}
+
+$('tpRecordBtn').onclick = () => run('tpStatus', ['tpRecordBtn', 'tpEvalBtn'], 'Running one episode...', async () => {
+  if (!window.dpvPlayer) throw new Error('The 3D player failed to load (three.js comes from cdn.jsdelivr.net - check your connection).');
+  const d = await api('/api/two_phase/trajectory', tpForm(), true);
+  const top = el('div', { style: 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' }, verdict(d.reason),
+    el('span', { class: 'note', text: `${d.steps} steps, final distance ${fmt(d.final_dist)} m, closest ${fmt(d.diag && d.diag.min_dist)} m` }));
+  const { track, log, diag, ...meta } = d;
+  show('tpResults', top, window.dpvPlayer.root,
+    collapsible('Details', kv({ checkpoint: d.checkpoint, distance: d.distance, switch_dist: d.switch_dist, position_mode: d.position_mode, recentre_z: d.recentre_z ?? 'off', ...(diag || {}) })),
+    collapsible('Timestamped log', textBlock((log || []).join('\n'))));
+  window.dpvPlayer.load(track, meta);
+  setStatus('tpStatus', 'Done - press Space to play.', 'ok');
+});
+$('tpEvalBtn').onclick = () => run('tpStatus', ['tpRecordBtn', 'tpEvalBtn'], `Running ${$('tpNRuns').value || 75} test runs...`, async () => {
+  const d = await api('/api/two_phase/evaluate', tpForm({ n_scenarios: $('tpNRuns').value || 75 }), true);
+  const head = el('div', { class: 'note', text: `${d.checkpoint} | distance ${$('tpDistance').value} m, switch ${$('tpSwitchDist').value} m` });
+  show('tpResults', head, totalsCards(d),
+    el('div', { class: 'rowbtn' }, copyBtn(() => d.summary_text), savedLink(d.summary_url)),
+    collapsible('Per-scenario results', scenarioTable(d.scenarios || [])),
+    collapsible('Summary text', textBlock(d.summary_text)),
+    collapsible('Timestamped log', textBlock((d.log || []).join('\n'))));
+  setStatus('tpStatus', 'Done.', 'ok');
+});
+
+/* ---------- single policy ---------- */
+function spBody(extra) {
+  return { checkpoint: $('spCheckpoint').value || null, distance_low: parseFloat($('spLow').value), distance_high: parseFloat($('spHigh').value),
+    seed: $('spSeed').value ? parseInt($('spSeed').value) : null, ...(extra || {}) };
+}
+$('spRecordBtn').onclick = () => run('spStatus', ['spRecordBtn', 'spEvalBtn'], 'Running the episode and encoding the video...', async () => {
+  const d = await api('/api/record', spBody());
+  const { video_url, ...rest } = d;
+  show('spResults', verdict(d.reason || 'done'), el('video', { controls: '', autoplay: '', loop: '', src: video_url }), collapsible('Details', kv(rest)));
+  setStatus('spStatus', 'Done.', 'ok');
+});
+$('spEvalBtn').onclick = () => run('spStatus', ['spRecordBtn', 'spEvalBtn'], 'Running 75 scenarios...', async () => {
+  const d = await api('/api/evaluate', spBody());
+  show('spResults', totalsCards(d), el('div', { class: 'rowbtn' }, copyBtn(() => d.summary_text), savedLink(d.summary_url)),
+    collapsible('Per-scenario results', scenarioTable(d.scenarios || [])), collapsible('Summary text', textBlock(d.summary_text)));
+  setStatus('spStatus', 'Done.', 'ok');
+});
+
+/* ---------- rank ---------- */
+$('rkBtn').onclick = () => run('rkStatus', ['rkBtn'], 'Evaluating every checkpoint in the directory...', async () => {
+  const d = await api('/api/rank', { dir: $('rkDir').value, top_n: parseInt($('rkTop').value) || 5, distance_low: parseFloat($('spLow').value),
+    distance_high: parseFloat($('spHigh').value), seed: $('spSeed').value ? parseInt($('spSeed').value) : null });
+  show('rkResults', el('div', { class: 'rowbtn' }, copyBtn(() => d.summary_text), savedLink(d.summary_url)), textBlock(d.summary_text));
+  setStatus('rkStatus', 'Done.', 'ok');
+});
+
+/* ---------- init ---------- */
+setSource(store.get('tpSource', 'pick'));
+showTab(store.get('tab', 'two'));
+budgetHint();
+loadCheckpoints();
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);          // the sim is z-up; this lets sim quaternions apply untouched
+
+const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64];
+const COL_PID = 0x4c8dff, COL_RL = 0xff9f43, COL_TARGET = 0xff4d5e;
+const clamp = (x, a, b) => Math.min(Math.max(x, a), b);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
+
+const MARKUP = `
+<div class="pv-stage">
+  <canvas class="pv-canvas"></canvas>
+  <div class="pv-hud">
+    <div><b data-h="phase">-</b> <span data-h="result"></span></div>
+    <div>t <b data-h="t">0.0</b> s &nbsp; step <b data-h="step">0</b></div>
+    <div>dist <b data-h="dist">-</b> m &nbsp; speed <b data-h="speed">-</b> m/s</div>
+  </div>
+  <div class="pv-help">drag: orbit &middot; right-drag: pan &middot; wheel: zoom &middot; space: play/pause &middot; &larr;/&rarr;: step &middot; F: follow</div>
+</div>
+<canvas class="pv-chart" title="Click or drag to seek"></canvas>
+<div class="pv-bar">
+  <button type="button" data-a="start" title="Restart (Home)">|&#9664;</button>
+  <button type="button" data-a="back" title="Step back (Left arrow; hold Shift for 10x)">&#9664;</button>
+  <button type="button" data-a="play" class="pv-play" title="Play / pause (Space)">&#9654;</button>
+  <button type="button" data-a="fwd" title="Step forward (Right arrow; hold Shift for 10x)">&#9654;</button>
+  <button type="button" data-a="end" title="Jump to end (End)">&#9654;|</button>
+  <input type="range" class="pv-scrub" min="0" max="1000" value="0" aria-label="Timeline">
+  <span class="pv-time" data-h="time">0.0 / 0.0 s</span>
+</div>
+<div class="pv-bar pv-opts">
+  <label>Speed <select data-o="speed"></select></label>
+  <label><input type="checkbox" data-o="loop"> loop</label>
+  <span class="pv-sep"></span>
+  <span class="seg pv-seg" role="group" aria-label="Camera">
+    <button type="button" data-cam="orbit" aria-pressed="true">Orbit</button>
+    <button type="button" data-cam="follow" aria-pressed="false">Follow</button>
+    <button type="button" data-cam="chase" aria-pressed="false">Chase</button>
+  </span>
+  <button type="button" class="pv-mini" data-view="fit">Fit</button>
+  <button type="button" class="pv-mini" data-view="top">Top</button>
+  <button type="button" class="pv-mini" data-view="side">Side</button>
+  <span class="pv-sep"></span>
+  <label><input type="checkbox" data-o="trail" checked> trail</label>
+  <label><input type="checkbox" data-o="ghost" checked> full path</label>
+  <label><input type="checkbox" data-o="vel" checked> velocity</label>
+  <label><input type="checkbox" data-o="guide"> line to target</label>
+  <label><input type="checkbox" data-o="drops" checked> ground drop</label>
+  <label><input type="checkbox" data-o="switch" checked> switch sphere</label>
+</div>`;
+
+function buildPlayer() {
+  const root = document.createElement('div');
+  root.className = 'player';
+  root.innerHTML = MARKUP;                       // static markup only, no server data goes through innerHTML
+  const q = (s) => root.querySelector(s);
+  const stage = q('.pv-stage'), canvas = q('.pv-canvas'), chart = q('.pv-chart'), scrub = q('.pv-scrub');
+  const hud = (k) => q(`[data-h="${k}"]`);
+  const opt = (k) => q(`[data-o="${k}"]`);
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d111b);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 1e6);
+  camera.position.set(-20, -30, 20);
+  const controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true; controls.dampingFactor = 0.12;
+  controls.zoomToCursor = true; controls.minDistance = 0.3; controls.maxDistance = 1e5;
+  controls.screenSpacePanning = true;
+  scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x1a2030, 1.4));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(30, -20, 60); scene.add(sun);
+
+  const world = new THREE.Group(); scene.add(world);     // everything that is rebuilt per run
+  const droneGroup = new THREE.Group(); scene.add(droneGroup);
+  const rotors = [];
+  const bodyMat = new THREE.MeshStandardMaterial({ color: COL_PID, metalness: 0.2, roughness: 0.5 });
+  {
+    const dark = new THREE.MeshStandardMaterial({ color: 0x20252f, roughness: 0.7 });
+    droneGroup.add(new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.2, 0.1), bodyMat));
+    for (const sgn of [1, -1]) {
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.04, 0.03), dark);
+      arm.rotation.z = sgn * Math.PI / 4; droneGroup.add(arm);
+    }
+    for (const [x, y] of [[1, 1], [1, -1], [-1, -1], [-1, 1]]) {
+      const r = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.012, 24),
+        new THREE.MeshStandardMaterial({ color: 0x9fb4d8, transparent: true, opacity: 0.55 }));
+      r.rotation.x = Math.PI / 2; r.position.set(x * 0.265, y * 0.265, 0.045);
+      droneGroup.add(r); rotors.push(r);
+    }
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.18, 12), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+    nose.rotation.z = -Math.PI / 2; nose.position.set(0.22, 0, 0); droneGroup.add(nose);   // +x is "forward"
+  }
+  droneGroup.visible = false;
+  const velArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0xffffff, 0.3, 0.15);
+  scene.add(velArrow);
+  const guide = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+    new THREE.LineDashedMaterial({ color: COL_TARGET, dashSize: 1, gapSize: 1, transparent: true, opacity: 0.6 }));
+  scene.add(guide);
+  const drop = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+    new THREE.LineBasicMaterial({ color: 0x8fa0c0, transparent: true, opacity: 0.5 }));
+  scene.add(drop);
+  const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.35, 20), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55 }));
+  scene.add(shadow);
+
+  /* ---- state ---- */
+  let T = null;                                  // loaded run
+  let t = 0, playing = false, last = 0, camMode = 'orbit', followDelta = new THREE.Vector3();
+  let trailLine = null, ghostLine = null, beacon = null, hitSphere = null, switchSphere = null, startMarker = null, extent = 10;
+  const chaseDir = new THREE.Vector3(1, 0, 0);
+  const tmpP = new THREE.Vector3(), tmpV = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpT = new THREE.Vector3();
+
+  SPEEDS.forEach((s) => { const o = document.createElement('option'); o.value = s; o.textContent = s + 'x'; opt('speed').append(o); });
+  opt('speed').value = '1';
+
+  const dur = () => (T ? (T.n - 1) * T.dt : 0);
+  function disposeWorld() {
+    for (const c of [...world.children]) { world.remove(c); c.traverse((o) => { o.geometry && o.geometry.dispose(); o.material && o.material.dispose && o.material.dispose(); }); }
+  }
+  function niceStep(x) { const p = 10 ** Math.floor(Math.log10(x)); const m = x / p; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p; }
+
+  function load(track, meta) {
+    disposeWorld();
+    const n = track.pos.length;
+    T = {
+      n, dt: track.dt, meta,
+      pos: track.pos.map((p) => new THREE.Vector3(p[0], p[1], p[2])),
+      quat: track.quat.map((a) => new THREE.Quaternion(a[0], a[1], a[2], a[3])),
+      phase: track.phase, dist: track.dist, speed: track.speed, steps: track.steps,
+      target: new THREE.Vector3(...meta.target_pos), start: new THREE.Vector3(...meta.start_pos),
+    };
+    T.vel = T.pos.map((p, i) => { const a = T.pos[Math.max(i - 1, 0)], b = T.pos[Math.min(i + 1, n - 1)]; return b.clone().sub(a).divideScalar(Math.max(track.dt * (Math.min(i + 1, n - 1) - Math.max(i - 1, 0)), 1e-6)); });
+    T.handoff = track.phase.indexOf(1);
+
+    const box = new THREE.Box3().setFromPoints([...T.pos, T.target, new THREE.Vector3(T.target.x, T.target.y, 0)]);
+    const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+    extent = Math.max(size.length() * 0.5, 3);
+    // ground grid + faint floor
+    const gsize = niceStep(extent * 4), gdiv = Math.max(10, Math.min(80, Math.round(gsize / niceStep(extent / 6))));
+    const grid = new THREE.GridHelper(gsize, gdiv, 0x3b4766, 0x232b3f); grid.rotation.x = Math.PI / 2;
+    grid.position.set(ctr.x, ctr.y, 0); world.add(grid);
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(gsize, gsize), new THREE.MeshBasicMaterial({ color: 0x121829, transparent: true, opacity: 0.8 }));
+    floor.position.set(ctr.x, ctr.y, -0.02); world.add(floor);
+    const axes = new THREE.AxesHelper(Math.max(2, extent * 0.1)); world.add(axes);
+
+    // paths: full (ghost) and the revealed trail, coloured by phase
+    const geo = () => {
+      const g = new THREE.BufferGeometry(), p = new Float32Array(n * 3), c = new Float32Array(n * 3);
+      const cp = new THREE.Color(COL_PID), cr = new THREE.Color(COL_RL);
+      for (let i = 0; i < n; i++) { p.set([T.pos[i].x, T.pos[i].y, T.pos[i].z], i * 3); (T.phase[i] ? cr : cp).toArray(c, i * 3); }
+      g.setAttribute('position', new THREE.BufferAttribute(p, 3)); g.setAttribute('color', new THREE.BufferAttribute(c, 3)); return g;
+    };
+    ghostLine = new THREE.Line(geo(), new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.22 }));
+    trailLine = new THREE.Line(geo(), new THREE.LineBasicMaterial({ vertexColors: true }));
+    world.add(ghostLine, trailLine);
+
+    // target: true-size hit sphere + screen-size beacon so it can be found from far away + switch-distance sphere
+    hitSphere = new THREE.Mesh(new THREE.SphereGeometry(meta.hit_radius || 0.25, 24, 16), new THREE.MeshBasicMaterial({ color: COL_TARGET, transparent: true, opacity: 0.55 }));
+    hitSphere.position.copy(T.target);
+    beacon = new THREE.Mesh(new THREE.OctahedronGeometry(1), new THREE.MeshBasicMaterial({ color: COL_TARGET, wireframe: true }));
+    beacon.position.copy(T.target);
+    switchSphere = new THREE.Mesh(new THREE.SphereGeometry(meta.switch_dist, 24, 12), new THREE.MeshBasicMaterial({ color: 0x4cc27f, wireframe: true, transparent: true, opacity: 0.07 }));
+    switchSphere.position.copy(T.target);
+    startMarker = new THREE.Mesh(new THREE.OctahedronGeometry(1), new THREE.MeshBasicMaterial({ color: 0x8fa0c0, wireframe: true }));
+    startMarker.position.copy(T.start);
+    world.add(hitSphere, beacon, switchSphere, startMarker);
+
+    controls.maxDistance = Math.max(extent * 40, 100);
+    camera.far = Math.max(extent * 200, 1e3); camera.updateProjectionMatrix();
+    droneGroup.visible = true;
+    hud('result').textContent = '';
+    const auto = SPEEDS.find((s) => dur() / s <= 30) || SPEEDS[SPEEDS.length - 1];   // aim for a ~30 s replay
+    opt('speed').value = String(auto);
+    setCam('orbit'); view('fit');
+    seek(0); playing = false; syncPlay(); drawChart();
+  }
+
+  /* ---- sampling / rendering ---- */
+  function seek(time) { t = clamp(time, 0, dur()); scrub.value = dur() ? Math.round(1000 * t / dur()) : 0; }
+  function sample(time) {
+    const f = clamp(time / T.dt, 0, T.n - 1), i = Math.floor(f), j = Math.min(i + 1, T.n - 1), a = f - i;
+    tmpP.lerpVectors(T.pos[i], T.pos[j], a); tmpQ.slerpQuaternions(T.quat[i], T.quat[j], a); tmpV.lerpVectors(T.vel[i], T.vel[j], a);
+    return { i, f, dist: T.dist[i] + (T.dist[j] - T.dist[i]) * a, speed: T.speed[i] + (T.speed[j] - T.speed[i]) * a };
+  }
+  function applyFrame(dtReal) {
+    if (!T) return;
+    const s = sample(t);
+    droneGroup.position.copy(tmpP); droneGroup.quaternion.copy(tmpQ);
+    const camDist = camera.position.distanceTo(tmpP);
+    const k = Math.max(1, camDist * 0.04);
+    droneGroup.scale.setScalar(k);
+    bodyMat.color.setHex(T.phase[s.i] ? COL_RL : COL_PID);
+    rotors.forEach((r, n) => { r.rotation.y += (n % 2 ? -1 : 1) * 40 * dtReal; });
+
+    const kb = Math.max(0.4, camDist * 0.012);
+    beacon.scale.setScalar(kb); startMarker.scale.setScalar(kb * 0.6);
+    trailLine.visible = opt('trail').checked; trailLine.geometry.setDrawRange(0, s.i + 2);
+    ghostLine.visible = opt('ghost').checked; switchSphere.visible = opt('switch').checked;
+
+    const speed = tmpV.length();
+    velArrow.visible = opt('vel').checked && speed > 0.2;
+    if (velArrow.visible) { velArrow.position.copy(tmpP); velArrow.setDirection(tmpT.copy(tmpV).normalize()); velArrow.setLength(clamp(speed * 0.15, 1, 8) * k, 0.35 * k, 0.18 * k); }
+    guide.visible = opt('guide').checked;
+    if (guide.visible) { const p = guide.geometry.attributes.position; p.setXYZ(0, tmpP.x, tmpP.y, tmpP.z); p.setXYZ(1, T.target.x, T.target.y, T.target.z); p.needsUpdate = true; guide.computeLineDistances(); guide.material.dashSize = guide.material.gapSize = Math.max(camDist * 0.02, 0.2); guide.geometry.computeBoundingSphere(); }
+    const drops = opt('drops').checked; drop.visible = shadow.visible = drops;
+    if (drops) { const p = drop.geometry.attributes.position; p.setXYZ(0, tmpP.x, tmpP.y, tmpP.z); p.setXYZ(1, tmpP.x, tmpP.y, 0); p.needsUpdate = true; drop.geometry.computeBoundingSphere(); shadow.position.set(tmpP.x, tmpP.y, 0.01); shadow.scale.setScalar(k); }
+
+    // camera modes
+    if (camMode === 'follow' || camMode === 'chase') {
+      const delta = tmpT.copy(tmpP).sub(controls.target);
+      if (camMode === 'chase') {
+        if (speed > 0.5) chaseDir.lerp(tmpV.clone().normalize(), clamp(dtReal * 4, 0, 1)).normalize();
+        const D = clamp(camDist, 3, extent * 2);
+        const want = tmpP.clone().addScaledVector(chaseDir, -D).add(new THREE.Vector3(0, 0, D * 0.3));
+        camera.position.lerp(want, clamp(dtReal * 5, 0, 1));
+        controls.target.copy(tmpP);
+      } else { camera.position.add(delta); controls.target.copy(tmpP); }
+    }
+
+    hud('t').textContent = t.toFixed(1); hud('step').textContent = T.steps[s.i];
+    hud('dist').textContent = s.dist.toFixed(2); hud('speed').textContent = s.speed.toFixed(1);
+    hud('phase').textContent = T.phase[s.i] ? 'RL policy' : 'PID';
+    hud('phase').style.color = T.phase[s.i] ? '#ff9f43' : '#7aa7ff';
+    hud('time').textContent = `${t.toFixed(1)} / ${dur().toFixed(1)} s`;
+    hud('result').textContent = t >= dur() - 1e-6 ? `- ${T.meta.reason}` : '';
+    drawChart(t);
+  }
+
+  /* ---- chart ---- */
+  function drawChart(time = t) {
+    if (!T) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2), w = chart.clientWidth, h = chart.clientHeight;
+    if (!w || !h) return;
+    if (chart.width !== Math.round(w * dpr)) { chart.width = Math.round(w * dpr); chart.height = Math.round(h * dpr); }
+    const g = chart.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    g.fillStyle = css('--soft'); g.fillRect(0, 0, w, h);
+    const X = (i) => (i / Math.max(T.n - 1, 1)) * (w - 2) + 1;
+    const dmax = Math.max(...T.dist, 1), smax = Math.max(...T.speed, 1), ly = (d) => Math.log1p(d) / Math.log1p(dmax);
+    const line = (vals, norm, color) => { g.beginPath(); vals.forEach((v, i) => { const y = h - 4 - norm(v) * (h - 8); i ? g.lineTo(X(i), y) : g.moveTo(X(i), y); }); g.strokeStyle = color; g.lineWidth = 1.5; g.stroke(); };
+    if (T.handoff >= 0) { g.fillStyle = 'rgba(255,159,67,0.12)'; g.fillRect(X(T.handoff), 0, w - X(T.handoff), h); }
+    line(T.speed, (v) => v / smax, 'rgba(255,159,67,0.9)');
+    line(T.dist, ly, '#6c8cff');
+    g.fillStyle = css('--muted'); g.font = '10.5px sans-serif';
+    g.fillText(`distance (log, max ${dmax.toFixed(0)} m)`, 6, 12); g.fillText(`speed (max ${smax.toFixed(1)} m/s)`, 6, 24);
+    if (T.handoff >= 0) g.fillText('RL takes over', X(T.handoff) + 4, h - 6);
+    const px = (time / Math.max(dur(), 1e-9)) * (w - 2) + 1;
+    g.strokeStyle = css('--ink'); g.lineWidth = 1.5; g.beginPath(); g.moveTo(px, 0); g.lineTo(px, h); g.stroke();
+  }
+
+  /* ---- views ---- */
+  function view(kind) {
+    if (!T) return;
+    const c = new THREE.Box3().setFromPoints([...T.pos, T.target]).getCenter(new THREE.Vector3());
+    const D = extent / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.05;
+    const dirs = { fit: new THREE.Vector3(-0.6, -0.8, 0.5), top: new THREE.Vector3(0.0001, -0.0001, 1), side: new THREE.Vector3(0, -1, 0.05) };
+    controls.target.copy(c); camera.position.copy(c).addScaledVector(dirs[kind].normalize(), D);
+    if (camMode !== 'orbit') setCam('orbit');
+    controls.update();
+  }
+  function setCam(mode) {
+    camMode = mode;
+    root.querySelectorAll('[data-cam]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.cam === mode)));
+    if (mode === 'chase' && T) { const s = sample(t); chaseDir.copy(tmpV).setZ(0); if (chaseDir.lengthSq() < 1e-6) chaseDir.set(1, 0, 0); chaseDir.normalize(); }
+  }
+
+  /* ---- transport ---- */
+  function syncPlay() { q('[data-a="play"]').innerHTML = playing ? '&#10074;&#10074;' : '&#9654;'; }
+  function play(on) {
+    if (!T) return;
+    if (on && t >= dur() - 1e-6) seek(0);
+    playing = on; syncPlay();
+  }
+  const stepFrames = (n) => { play(false); if (T) seek(t + n * T.dt); };
+  root.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.cam) setCam(b.dataset.cam);
+    else if (b.dataset.view) view(b.dataset.view);
+    else if (b.dataset.a === 'play') play(!playing);
+    else if (b.dataset.a === 'start') { seek(0); }
+    else if (b.dataset.a === 'end') { play(false); seek(dur()); }
+    else if (b.dataset.a === 'back') stepFrames(-1);
+    else if (b.dataset.a === 'fwd') stepFrames(1);
+  });
+  scrub.addEventListener('input', () => { if (T) seek(dur() * scrub.value / 1000); });
+  function chartSeek(e) { if (!T) return; const r = chart.getBoundingClientRect(); seek(dur() * clamp((e.clientX - r.left) / r.width, 0, 1)); }
+  chart.addEventListener('pointerdown', (e) => { chart.setPointerCapture(e.pointerId); chartSeek(e); chart.onpointermove = chartSeek; });
+  chart.addEventListener('pointerup', () => { chart.onpointermove = null; });
+  canvas.addEventListener('dblclick', () => play(!playing));
+  window.addEventListener('keydown', (e) => {
+    if (!root.isConnected || !T || root.offsetParent === null) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'textarea' || tag === 'select' || (tag === 'input' && e.target.type !== 'range' && e.target.type !== 'checkbox')) return;
+    const big = e.shiftKey ? 10 : 1;
+    const k = e.key;
+    if (k === ' ') play(!playing);
+    else if (k === 'ArrowLeft') stepFrames(-big);
+    else if (k === 'ArrowRight') stepFrames(big);
+    else if (k === 'Home') seek(0);
+    else if (k === 'End') { play(false); seek(dur()); }
+    else if (k === 'f' || k === 'F') setCam(camMode === 'follow' ? 'orbit' : 'follow');
+    else if (k === 'c' || k === 'C') setCam(camMode === 'chase' ? 'orbit' : 'chase');
+    else if (k === 'r' || k === 'R') view('fit');
+    else if (k === '+' || k === '=' || k === ']') bumpSpeed(1);
+    else if (k === '-' || k === '[') bumpSpeed(-1);
+    else return;
+    e.preventDefault();
+  });
+  function bumpSpeed(d) { const s = opt('speed'), i = clamp(SPEEDS.indexOf(parseFloat(s.value)) + d, 0, SPEEDS.length - 1); s.value = String(SPEEDS[i]); }
+
+  /* ---- loop / resize ---- */
+  new ResizeObserver(() => {
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); drawChart();
+  }).observe(stage);
+  new ResizeObserver(() => drawChart()).observe(chart);
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dtReal = Math.min((now - last) / 1000, 0.1); last = now;
+    if (!root.isConnected || !stage.clientWidth) return;
+    if (T && playing) {
+      t += dtReal * parseFloat(opt('speed').value);
+      if (t >= dur()) { if (opt('loop').checked) t = 0; else { t = dur(); play(false); } }
+      scrub.value = dur() ? Math.round(1000 * t / dur()) : 0;
+    }
+    applyFrame(dtReal);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  requestAnimationFrame((n) => { last = n; frame(n); });
+  return { root, load };
+}
+
+window.dpvPlayer = buildPlayer();
+window.dispatchEvent(new Event('dpv-player-ready'));
+</script>
+</body>
+</html>

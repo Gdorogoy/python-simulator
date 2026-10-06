@@ -40,18 +40,18 @@ uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_
 
 
 
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/rtl_train_isaac.py --headless \
+      --num_envs 8192 --handoff --max-speed 18 \
+      --distance-low 3 --distance-high 50 \
+      --spawn-dist-low 150 --spawn-dist-high 250 \
+      --obs-position-mode height \
+      --checkpoint-dir runs/rtl_handoff_v3_2p_150_250_3_50m \
+      --distill-start 0.25 --distill-end 0.05 --init-std 0.1 \
+      --bc-checkpoint runs/rtl_handoff_v2_2p_150_250_3_50m/best.pt \
+      --warmup-chunks 8
 
-  /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
-      --num_envs 16384 --num-steps-per-chunk 128 --total_timesteps 128000000 \
-      --distance-low 3 --distance-high 10 \
-      --checkpoint-dir runs/base_training_isaac_3_10_res_v1 \
-      --bc-checkpoint app/control/model_92274688.pt \
-      --residual-scale 0.1
-      --seed 42
 
 
-    --n-trials 100 --num_envs 256 --total-timesteps 2000000 \
-    --distance-low 3 --distance-high 10
 
 
 ###============== mlflow
@@ -59,10 +59,3 @@ uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_
 /mnt/e/Isaac/env_igsaaclab/Scripts/python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db
 
 
-/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
-      --num_envs 16384 --num-steps-per-chunk 128 --total_timesteps 128000000 \
-      --distance-low 3 --distance-high 50 \
-      --checkpoint-dir runs/base_training_isaac_3_50_v1_res015 \
-      --bc-checkpoint stable_models/3_30m_v1_res01/model_94371840.pt\
-      --residual-scale 0.15 \
-      --seed 42

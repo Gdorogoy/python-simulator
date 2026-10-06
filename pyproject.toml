@@ -1,7 +1,7 @@
 [project]
 name = "python-simulator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Quadcopter interception: physics simulator, PID teacher and PPO policies trained in Isaac Lab"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

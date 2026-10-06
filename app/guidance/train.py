@@ -21,9 +21,7 @@ class ActorCritic(nn.Module):
                  hidden: int = 64, num_hidden_layers: int = 4, dropout: float = 0.0,
                  log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX,
                  detach_critic: bool = False):
-        """detach_critic: the value head reads the shared trunk's features through .detach(), so value-loss
-        gradients never reach the trunk the actor also reads (only the actor loss trains it). Off by default;
-        it's a plain flag, not a parameter, so it isn't saved in checkpoints."""
+        """detach_critic: value loss never reaches the shared trunk (runtime flag, not saved in checkpoints)."""
         super().__init__()
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
@@ -45,9 +43,7 @@ class ActorCritic(nn.Module):
         self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
         self.critic_head = nn.Linear(hidden, 1)
 
-        # Actor head outputs unbounded values, squashed via tanh and rescaled
-        # into [action_low, action_high] (see scale_action). Registered as
-        # buffers so they're saved/loaded with the model.
+        # tanh-squashed actor output is rescaled into [action_low, action_high]; buffers so they are saved
         self.register_buffer("action_low", torch.as_tensor(action_low, dtype=torch.float32))
         self.register_buffer("action_high", torch.as_tensor(action_high, dtype=torch.float32))
 
@@ -66,9 +62,7 @@ class ActorCritic(nn.Module):
         return self.action_low + (squashed + 1) * 0.5 * (self.action_high - self.action_low)
 
     def get_action_and_value(self, obs, raw_action=None):
-        """If raw_action is given (the pre-squash rollout-buffer sample), re-derive
-        the squashed action from it so log_prob/entropy match rollout collection.
-        Returns (scaled_action, raw_action, log_prob, entropy, value)."""
+        """Returns (scaled_action, raw_action, log_prob, entropy, value); pass raw_action to re-evaluate a rollout sample."""
         mean, std, value = self.forward(obs)
         dist = Normal(mean, std)
 
@@ -79,25 +73,14 @@ class ActorCritic(nn.Module):
         half_range = 0.5 * (self.action_high - self.action_low)
         scaled_action = self.action_low + (squashed + 1) * half_range
 
-        # change-of-variables correction for the tanh + affine rescale, so
-        # log_prob is the density of the action actually sent to the env,
-        # not of the pre-squash Gaussian sample.
+        # tanh + affine change-of-variables correction: log_prob of the action actually sent to the env
         log_prob = dist.log_prob(raw_action).sum(-1) - torch.log(half_range * (1 - squashed.pow(2)) + 1e-6).sum(-1)
         entropy = dist.entropy().sum(-1)
         return scaled_action, raw_action, log_prob, entropy, value
 
 
 def load_bc_checkpoint(model, path, map_location=None):
-    """Loads a BC/DAgger checkpoint into model, remapping `shared.<idx>` keys by
-    Linear-layer POSITION rather than raw nn.Sequential index. ActorCritic only
-    inserts a Dropout sublayer when dropout>0 (see __init__), which shifts every
-    later Linear's raw index -- every checkpoint produced by pretrain_bc.py or
-    dagger.py is saved at dropout=0, so a plain load_state_dict silently
-    mismatches (and gets swallowed) for any model built with dropout>0, even
-    though the actual Linear weights are unaffected by dropout and line up
-    fine once matched by position instead of raw index.
-    Raises RuntimeError (like load_state_dict) if shapes still don't match after
-    remapping -- e.g. a genuine hidden/num_hidden_layers mismatch."""
+    """Load a BC/DAgger checkpoint matching `shared.*` Linear layers by position (robust to Dropout layers)."""
     raw_state = torch.load(path, map_location=map_location)
 
     model_linear_idxs = [i for i, layer in enumerate(model.shared) if isinstance(layer, nn.Linear)]
@@ -137,9 +120,7 @@ class RolloutBuffer:
 
 
 def compute_gae(rewards, values, dones, last_value, gamma: float, lam: float):
-    """Also handles the vectorized-envs case: pass rewards/values/dones shaped
-    (num_steps, num_envs) and last_value as a (num_envs,) tensor -- the backward
-    recursion below then runs across all envs at once via broadcasting."""
+    """GAE; works on (steps,) or (steps, num_envs) tensors via broadcasting."""
     n = len(rewards)
     advantages = torch.zeros_like(rewards)
     last_gae = torch.zeros_like(last_value) if torch.is_tensor(last_value) else 0.0
@@ -160,23 +141,10 @@ def ppo_update(model, optimizer, buffer, advantages, returns,
                num_epochs: int, batch_size: int, target_kl: float = 0.02,
                max_grad_norm: float = 0.5,
                global_timesteps_done: int = 0, global_total_timesteps: int = 0,
-               # --- migration step 5: flag-switchable extras, both off by
-               # default (identical numerics to before when unset) ---
+               # optional extras, off by default
                value_clip_eps: float | None = None,
                distill_target_actions: torch.Tensor | None = None, distill_coef: float = 0.0):
-    """Runs the PPO epoch/minibatch loop. Returns a dict with the last executed
-    epoch's averaged stats (policy_loss, value_loss, entropy_loss, approx_kl,
-    grad_norm, early_stopped).
-
-    value_clip_eps: if set, clips the value update to buffer.values[b] +-
-    value_clip_eps (PPO2-style, same idea as the policy ratio clip) and takes
-    the max of clipped/unclipped squared error, instead of the plain MSE.
-
-    distill_target_actions / distill_coef: if distill_target_actions is given
-    (shape matching buffer.obs, e.g. a PID teacher's or a bigger teacher
-    model's action for each sample), adds distill_coef * MSE(scaled student
-    action, target action) to the loss -- a plain student-teacher distillation
-    term, agnostic to what produced the target actions."""
+    """PPO epoch/minibatch loop -> last epoch's stats. Optional value clipping and teacher distillation (docs.md "PPO")."""
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     n = len(buffer.rewards)
 
@@ -260,9 +228,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
               hidden: int = 64, num_hidden_layers: int = 3, dropout: float = 0.0,
               log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX,
               ):
-    """Runs PPO for `total_timesteps`. Pass model=None (default) to start fresh,
-    or a previously-returned model/optimizer to resume chunked training.
-    Returns (model, optimizer, episode_rewards, last_losses)."""
+    """Single-env PPO for total_timesteps; pass model/optimizer to resume. -> (model, optimizer, rewards, losses)."""
     if model is None:
         model = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0],
                              env.action_space.low, env.action_space.high,
@@ -293,15 +259,13 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
             done = terminated or truncated
 
             if truncated and not terminated:
-                # Time-limit cutoff, not a real terminal state: bootstrap the missing
-                # future value into this step's reward instead of treating it as zero.
+                # time-limit cutoff: bootstrap the missing future value
                 with torch.no_grad():
                     next_obs_t = torch.as_tensor(next_obs, dtype=torch.float32, device=device).unsqueeze(0)
                     bootstrap_value = model.forward(next_obs_t)[2].item()
                 reward = reward + gamma * bootstrap_value
 
-            # Store the pre-squash raw action; ppo_update recomputes the squashed
-            # action/log_prob from it during the policy update.
+            # store the pre-squash action; ppo_update recomputes log_prob from it
             buffer.add(obs, raw_action.squeeze(0), log_prob.squeeze(0), reward, value.squeeze(0), done)
 
             episode_reward += reward
@@ -347,12 +311,7 @@ def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
                    hidden: int = 64, num_hidden_layers: int = 3, dropout: float = 0.0,
                    log_std_min: float = DEFAULT_LOG_STD_MIN, log_std_max: float = DEFAULT_LOG_STD_MAX,
                    ):
-    """Same as ppo_train, but collects rollouts across vec_env.num_envs environments
-    in lockstep each step -- one batched (num_envs, obs_dim) forward pass instead of
-    num_envs separate ones, which is what actually gives a GPU something to chew on.
-    vec_env is a VecBaseDroneEnv. Returns (model, optimizer, episode_rewards,
-    last_losses), same as ppo_train (no per-episode drone-state snapshots here --
-    nothing downstream of the vectorized path currently consumes those)."""
+    """ppo_train over a numpy vec-env in lockstep (one batched forward pass per step)."""
     num_envs = vec_env.num_envs
     obs_dim = vec_env.observation_space.shape[0]
     action_dim = vec_env.action_space.shape[0]
@@ -389,12 +348,7 @@ def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
             next_obs, reward, terminated, truncated, infos = vec_env.step(action_np)
             done = terminated | truncated
 
-            # Same time-limit bootstrap as ppo_train, applied only to the envs that
-            # actually truncated (not terminated) this step. Both vec envs auto-reset
-            # a done env before returning, so next_obs for a truncated env already
-            # belongs to its NEXT episode (fresh spawn) -- bootstrapping off that would
-            # value the wrong state entirely. Use each env's stashed
-            # info["terminal_observation"] (the true pre-reset state) instead.
+            # bootstrap truncations from info["terminal_observation"] (next_obs is already the next episode)
             trunc_only = truncated & ~terminated
             if trunc_only.any():
                 with torch.no_grad():
@@ -426,8 +380,7 @@ def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
         advantages, returns = compute_gae(buf_rewards, buf_values, buf_dones, last_value, gamma, lam)
         timesteps_done += num_steps * num_envs
 
-        # Flatten (num_steps, num_envs, ...) -> (num_steps*num_envs, ...); ppo_update
-        # only reads these five attributes off `buffer`, so a plain namespace works.
+        # flatten (steps, envs, ...) for ppo_update
         flat_buffer = SimpleNamespace(
             obs=buf_obs.reshape(-1, obs_dim), actions=buf_actions.reshape(-1, action_dim),
             log_probs=buf_log_probs.reshape(-1), rewards=buf_rewards.reshape(-1),
@@ -445,10 +398,7 @@ def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
 
 def warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam: float, lr: float = 3e-5,
                    max_grad_norm: float = 0.5):
-    """Collects rollouts with the current (untouched) actor and updates only
-    critic_head for num_rounds, so a BC/DAgger-loaded critic isn't still at
-    random init when real PPO updates start. lr is cosine-decayed across
-    rounds since each round's regression target is non-stationary."""
+    """Critic-only warm-up with the actor frozen (cosine-decayed lr)."""
     critic_optimizer = torch.optim.Adam(model.critic_head.parameters(), lr=lr)
     obs, _ = env.reset()
 
@@ -520,25 +470,11 @@ def evaluate(model, env, n_episodes: int):
     print(f"Success rate: {n_success}/{n_episodes}")
 
 
-# =============================================================================
-# migration step 5: Isaac Lab-native PPO -- batched across a live DirectRLEnv's
-# num_envs GPU-resident envs, no numpy round-trip (unlike vec_ppo_train's
-# VecBaseDroneEnv/SubprocVecBaseDroneEnv path, which is Python-for-loop-over-
-# envs and CPU-bound -- flow.md section 6). Reuses ActorCritic/compute_gae/
-# ppo_update above UNCHANGED -- the only new code is the rollout-collection
-# loop against a live env instead of a numpy vec-env, and the adaptive-KL
-# learning-rate schedule (a training-loop-level concern, not ppo_update's).
-# No isaaclab import here -- `env` is passed in already constructed (by
-# whatever script/venv called this), so this function itself is safe to
-# import from any venv, same as everything else in this file.
-# =============================================================================
+# ===== Isaac-native PPO: same ActorCritic / compute_gae / ppo_update, GPU rollouts (docs.md "PPO") =====
 
 def adaptive_kl_lr_step(optimizer, current_lr: float, approx_kl: float, target_kl: float,
                          min_lr: float = 1e-6, max_lr: float = 1e-2, factor: float = 1.5) -> float:
-    """Off-by-default extra (isaac_ppo_train's adaptive_kl_lr=False). Classic
-    PPO adaptive-lr heuristic (same scheme as rl_games' AdaptiveScheduler):
-    halve-ish the lr if this round overshot target_kl by 2x, double-ish it if
-    it undershot by 2x, otherwise leave it. Returns the (possibly updated) lr."""
+    """Adaptive lr (rl_games style): shrink if approx_kl > 2x target, grow if < target/2."""
     if approx_kl > target_kl * 2.0:
         current_lr = max(min_lr, current_lr / factor)
     elif approx_kl < target_kl / 2.0:
@@ -561,23 +497,7 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
                      initial_obs: "torch.Tensor | None" = None,
                      skip_update: bool = False,
                      ):
-    """Same interface/semantics as vec_ppo_train, but drives an Isaac Lab DirectRLEnv directly:
-    torch tensors in/out, GPU-resident, num_envs = env.unwrapped.num_envs.
-
-    distill_teacher_fn: optional callable(obs) -> target actions, called once per rollout step;
-    None (default) disables distillation entirely.
-
-    initial_obs: pass the previous call's returned obs when calling this repeatedly across chunks
-    on the same env, so it skips a full env.reset() -- a reset every call corrupts reward-shaping
-    state and randomizes episode_length_buf, silently wrecking short-chunk training (see
-    PROJECT_DEFENSE_GUIDE.md Part 8.5.1). None (default) does a fresh reset, fine for one-off calls.
-
-    skip_update: collect rollouts (advancing the env, filling episode_rewards) but never call
-    ppo_update -- for a rollout-only settle period where the whole model must stay byte-identical,
-    which plain requires_grad freezing can't do (backward() has no leaf to differentiate through
-    if every param is frozen). last_losses is returned as {} in this case.
-
-    Returns (model, optimizer, episode_rewards, last_losses, final_obs) -- final_obs feeds the next call's initial_obs."""
+    """vec_ppo_train for an Isaac DirectRLEnv. -> (model, optimizer, rewards, losses, final_obs). See docs.md "PPO"."""
     unwrapped = env.unwrapped
     device = unwrapped.device
     num_envs = unwrapped.num_envs
@@ -623,11 +543,7 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
             next_obs = next_obs_dict["policy"]
             done = terminated | truncated
 
-            # Same time-limit bootstrap as vec_ppo_train, vectorized (no python
-            # per-env loop): a truncated (not terminated) env's next_obs already
-            # belongs to its NEXT episode (DirectRLEnv auto-resets before
-            # returning), so bootstrap off extras["terminal_observation"]
-            # (stashed pre-reset in BaseDroneEnvIsaac._get_rewards) instead.
+            # bootstrap truncations from extras["terminal_observation"] (envs auto-reset before returning)
             trunc_only = truncated & ~terminated
             if trunc_only.any():
                 with torch.no_grad():
@@ -682,13 +598,7 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
 
 def isaac_warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam: float,
                          lr: float = 3e-5, max_grad_norm: float = 0.5):
-    """Isaac-native counterpart to warmup_critic above: collects rollouts with
-    the current (untouched) actor and updates only critic_head, batched
-    across env.unwrapped.num_envs -- same purpose (a BC/DAgger-loaded critic
-    starts at random init; this calibrates it against the warm-started actor
-    before real PPO updates start, so untrained-critic advantage noise
-    doesn't immediately wreck a good warm-started policy), same cosine-decayed
-    per-round lr, just driven by a live DirectRLEnv instead of a numpy env."""
+    """Isaac version of warmup_critic: critic-only rounds with the actor frozen."""
     device = env.unwrapped.device
     num_envs = env.unwrapped.num_envs
     obs_dim = env.unwrapped.single_observation_space["policy"].shape[0]

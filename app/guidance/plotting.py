@@ -13,22 +13,14 @@ def _read_csv(csv_path):
         return list(csv.DictReader(f))
 
 
-# ---------------------------------------------------------------------------
-# PID baseline -- what would a classical controller score on the same task?
-# ---------------------------------------------------------------------------
+# --- PID baseline ---
 def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
                           n_episodes=20, n_steps=600,
                           oob_radius=7, hit_reward=10, attitude_penalty=-1.0,
                           oob_penalty=-1.5, streak_penalty_coef=-0.05,
                           hover_success_steps=200, streak_cap=30,
                           distances=None, gains_by_dist_path=None):
-    """
-    Runs the tuned PID controller through the same env/reward machinery used to score
-    the RL policy, so the final checkpoint can be compared apples-to-apples. With
-    `distances` set, loads per-distance gains from gains_by_dist_path and pools results
-    across the whole curriculum instead of one fixed-distance baseline. Returns None
-    (with a printed reason) if the gains file is missing, since this plot is optional.
-    """
+    """Tuned-PID score on the same env/reward as the policy (pooled over `distances` if given); None if no gains file."""
     from app.environmental.base_drone_env import BaseDroneEnv
     from app.control.pid import PIDController
     from app.reward_functions.rewards import RewardConfig, make_reward_fn
@@ -126,9 +118,7 @@ def compute_pid_baseline(pid_gains_path="app/control/best_pid_gains.json",
     }
 
 
-# ---------------------------------------------------------------------------
-# Streak analysis -- is a good checkpoint a fluke or sustained?
-# ---------------------------------------------------------------------------
+# --- streak analysis: is a good checkpoint sustained or a fluke? ---
 STREAK_TIERS = (0.25, 0.50, 0.75, 1.00)
 STREAK_LEN = 5  # consecutive checkpoints required at a given tier
 
@@ -138,10 +128,7 @@ def _hit_ratios(rows, n_diag_episodes):
 
 
 def _streak_windows(values, threshold, min_len=STREAK_LEN):
-    """
-    Indices [start, end] (inclusive) of every run where value >= threshold for at least
-    min_len consecutive checkpoints -- filters out a single lucky checkpoint.
-    """
+    """[start, end] index runs where value >= threshold for at least min_len checkpoints."""
     windows = []
     start = None
     for i, v in enumerate(values):
@@ -169,10 +156,7 @@ def _shade_streak_windows(ax, timesteps, rows, n_diag_episodes):
             break  # only shade the highest tier actually achieved
 
 
-# ---------------------------------------------------------------------------
-# Plots -- 5 figures: training_error, policy_std, distance_distribution,
-# success_and_outcomes, and vs_pid_baseline.
-# ---------------------------------------------------------------------------
+# --- training-run plots: training_error, policy_std, distance_distribution, success_and_outcomes, vs_pid_baseline ---
 def plot_training_run(csv_path, output_dir="plots_final",
                        hover_success_steps=480, n_diag_episodes=20,
                        hit_threshold=0.3, streak_cap=30, max_steps=5000,
@@ -182,13 +166,7 @@ def plot_training_run(csv_path, output_dir="plots_final",
                        pid_baseline_episodes=20,
                        pid_baseline_distances=None,
                        pid_gains_by_dist_path=None):
-    """
-    hover_success_steps, n_diag_episodes, hit_threshold, streak_cap, max_steps must match
-    what the run was actually trained with -- they only draw reference lines and rebuild
-    an equivalent RewardConfig for the PID baseline, not recompute anything from the CSV.
-    Pass pid_baseline_distances/pid_gains_by_dist_path to compare against the PID
-    baseline across the full distance curriculum instead of one fixed target.
-    """
+    """Plot a run's metrics.csv. The reward/episode args only draw reference lines and rebuild the PID baseline."""
     rows = _read_csv(csv_path)
     if not rows:
         print(f"[plot_training_run] no rows found in {csv_path}")
@@ -230,9 +208,7 @@ def plot_training_run(csv_path, output_dir="plots_final",
                       label="+/- 1 std across diagnostic episodes")
     plt.plot(timesteps, min_dist, label="min_final_dist", linestyle="--")
     if "pid_avg_final_dist" in rows[0]:
-        # Per-checkpoint PID-teacher reference on the exact same target_pairs
-        # (see diagnose_with_pid) -- a flat/low PID line next to a flat/high RL
-        # line means the task itself is solvable, so the gap is the policy's.
+        # PID on the same target pairs: a high RL line next to a low PID line = the gap is the policy's
         plt.plot(timesteps, col("pid_avg_final_dist"), label="pid_avg_final_dist",
                   linestyle=":", color="gray")
     plt.axhline(y=hit_threshold, color="g", linestyle="--", label=f"hit_threshold={hit_threshold}")
@@ -306,9 +282,7 @@ def plot_training_run(csv_path, output_dir="plots_final",
 
 
 def plot_grad_norm(csv_path, output_dir="plots_final"):
-    """Standalone grad_norm-over-time plot, shading the critic_warmup stage -- training_error.png
-    already has grad_norm on a shared log-scale axis with value_loss, this is a clearer dedicated
-    view for spotting a post-unfreeze spike."""
+    """grad_norm over time with the critic-warmup stage shaded (spot post-unfreeze spikes)."""
     rows = _read_csv(csv_path)
     if not rows:
         print(f"[plot_grad_norm] no rows found in {csv_path}")
@@ -333,14 +307,7 @@ def plot_grad_norm(csv_path, output_dir="plots_final"):
 
 
 def plot_grad_norm_3d(csv_path, output_dir="plots_final", y_col="grade"):
-    """Landscape-style 3D view of grad_norm: x=timesteps, y=`y_col` (default grade), z=grad_norm, drawn as a
-    jet-colored surface with contour lines projected on the floor and this run's path (start dot ... arrowhead)
-    riding on top -- the way a loss-landscape descent is usually drawn.
-
-    The SURFACE IS INTERPOLATED, not a measured landscape: a Gaussian-kernel smooth of the logged
-    (timesteps, y, grad_norm) chunks that relaxes to the mean grad_norm away from any logged chunk, so
-    only the path itself is data. (y=lr, the old choice, gives no surface at all: lr is a fixed function of
-    timesteps, so the run only ever visits a single curve of that plane.)"""
+    """3D grad_norm "landscape" (x=timesteps, y=y_col). The surface is interpolated; only the path is data."""
     rows = _read_csv(csv_path)
     if len(rows) < 4:
         print(f"[plot_grad_norm_3d] need >= 4 rows in {csv_path}, found {len(rows)}")
@@ -381,10 +348,7 @@ def plot_grad_norm_3d(csv_path, output_dir="plots_final", y_col="grade"):
     ax.contour(X, Y, GZ, zdir="z", offset=floor, cmap="jet", levels=8, linewidths=1.3)
     ax.plot(to_t(pt), to_y(py_), pz + lift, color="black", linewidth=2.4, zorder=10)
     ax.plot([to_t(pt[0])], [to_y(py_[0])], [pz[0] + lift], marker="o", markersize=10, color="black", linestyle="none", zorder=11)  # a Line3D, not scatter: scatter is depth-sorted with the surface and can vanish behind it
-    # Arrowhead = two line segments, not a patch/quiver: Axes3D depth-sorts patches and collections
-    # against each other, so the big surface polygon gets drawn over a patch arrow; lines (zorder) draw last.
-    # Geometry is built in unit-cube coordinates (each axis scaled to 0..1) so the head looks the same size
-    # despite timesteps ~1e8 vs grade ~1, then mapped back to data units.
+    # arrowhead as line segments (patches get depth-sorted under the surface), built in unit-cube coords
     z_top = GZ.max() + 0.05 * z_range
     to_zn = lambda v: (v - floor) / (z_top - floor)
     from_zn = lambda u: floor + u * (z_top - floor)
@@ -415,10 +379,7 @@ def plot_grad_norm_3d(csv_path, output_dir="plots_final", y_col="grade"):
 
 
 def plot_time_to_hit(csv_path, output_dir="plots_final"):
-    """avg_hit_time_sec over training -- sim-seconds from episode start to
-    hit/hover-success, averaged only over episodes that actually succeeded
-    that checkpoint (blank/None when none did, see diagnose_with_model).
-    Success = trending down as the policy gets faster, not just hitting more."""
+    """avg_hit_time_sec over training (successful episodes only); should trend down."""
     rows = _read_csv(csv_path)
     if not rows:
         print(f"[plot_time_to_hit] no rows found in {csv_path}")
@@ -450,12 +411,7 @@ def plot_time_to_hit(csv_path, output_dir="plots_final"):
 
 def _print_suitable_weights(rows, checkpoint_dir, n_diag_episodes, top_n=5, recent_window=20,
                              sustain_window=5, avg_grade_min=0.75, min_grade_min=0.6):
-    """A checkpoint only counts as a potential suitable weight if its OWN trailing
-    sustain_window (ending at it) has avg grade >= avg_grade_min AND min grade >=
-    min_grade_min -- sustained performance, not one lucky spike (grade is already
-    computed and stored per-row during training, no re-evaluation needed). Prints the
-    top_n qualifying checkpoints all-time, and the top_n qualifying within the last
-    recent_window checkpoints -- same format as app.guidance.record_run.rank_checkpoints."""
+    """Print top_n checkpoints whose trailing sustain_window meets avg/min grade thresholds (all-time and recent)."""
     def f(row, name):
         return float(row.get(name, 0.0) or 0.0)
 
@@ -504,15 +460,9 @@ def _print_suitable_weights(rows, checkpoint_dir, n_diag_episodes, top_n=5, rece
                        f"qualifying in last {recent_window} checkpoints)", recent_top)
 
 
-# ---------------------------------------------------------------------------
-# Eval matrix plots -- fixed (start,target) pairs, see app/training/eval_matrix.py
-# ---------------------------------------------------------------------------
+# --- eval-matrix plots (fixed start/target pairs, training/eval_matrix.py) ---
 def plot_eval_matrix_distance(labeled_results, output_path="plots_final/eval_matrix_distance.png"):
-    """
-    Plots task distance (x) vs. mean final distance actually achieved (y, 0=perfect).
-    labeled_results: {label -> list of run_eval_matrix() result dicts}, e.g.
-    {"RL": rl_results, "PID": pid_results} to compare on one plot.
-    """
+    """Task distance vs mean final distance; labeled_results = {label: run_eval_matrix() results}."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     plt.figure(figsize=(7, 6))
     for label, results in labeled_results.items():
@@ -561,16 +511,9 @@ def plot_eval_matrix_pairs(labeled_results, output_path="plots_final/eval_matrix
     print(f"[plot_eval_matrix_pairs] wrote {output_path}")
 
 
-# ---------------------------------------------------------------------------
-# DAgger per-distance balancing diagnostics -- see app/control/dagger.py
-# ---------------------------------------------------------------------------
+# --- DAgger diagnostics (control/dagger.py) ---
 def plot_dagger_history(history, output_dir="plots_final"):
-    """
-    history: list of {"round", "raw_counts", "balanced_counts", "hit_rate"} dicts from
-    dagger.py, one per round. Writes dagger_raw_counts.png (pre-balancing pair counts per
-    distance, showing long-distance episodes' data volume advantage) and
-    dagger_hit_rate.png (per-distance hit rate of the policy flying against PID labels).
-    """
+    """dagger_raw_counts.png and dagger_hit_rate.png from dagger() per-round history."""
     if not history:
         print("[plot_dagger_history] empty history, nothing to plot")
         return
@@ -601,26 +544,7 @@ def plot_dagger_history(history, output_dir="plots_final"):
 
 
 def plot_worker_metrics(history, counts, output_dir="plots_final"):
-    """Per-worker breakdown of what SubprocVecBaseDroneEnv's parallel envs are
-    actually doing over the course of training -- one worker_<i>/ folder per
-    OS worker process (i in range(len(counts))), each with every env that
-    worker owns plotted as its own line.
-
-    history: {"timesteps": [t0, t1, ...],
-              "start_dist": [arr0, arr1, ...],   # each arr shape (num_envs,)
-              "live_dist":  [arr0, arr1, ...]}   # snapshotted once per chunk
-    counts: SubprocVecBaseDroneEnv.counts -- envs-per-worker, in the same
-    order the flat (num_envs,) arrays above are concatenated in, so a
-    straight cumulative-sum split recovers each worker's own slice.
-
-    Two plots per worker:
-      - target_dist.png: start_dist per env over time -- confirms the
-        sampler is actually spreading distances across every worker, not
-        just in aggregate.
-      - live_dist.png: live current distance-to-target per env over time --
-        a diverging/stuck worker shows up here as a line that doesn't trend
-        toward its own start_dist.
-    """
+    """Per-worker target_dist.png / live_dist.png from get_target_positions() snapshots (counts = envs per worker)."""
     if not history["timesteps"]:
         print("[plot_worker_metrics] empty history, nothing to plot")
         return

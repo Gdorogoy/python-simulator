@@ -1,16 +1,5 @@
-"""Exports a saved ActorCritic checkpoint to ONNX so its graph can be
-inspected in a viewer like Netron (https://netron.app).
+"""Export an ActorCritic checkpoint to ONNX (architecture inferred from tensor shapes).
 
-A bare state_dict doesn't carry hidden/num_hidden_layers/dropout/obs_dim/
-action_dim, so infer_architecture reads them straight from tensor shapes
-(every `shared.*` Linear has `hidden` as out_features except the first,
-whose in_features is obs_dim -- see ActorCritic.__init__) instead of
-hardcoding each checkpoint's original training config. dropout doesn't
-appear in the state_dict at all (no learned params), so it's irrelevant to
-the exported inference graph regardless of what it was set to during
-training.
-
-Usage:
     python -m app.guidance.export_onnx <checkpoint.pt> [output.onnx]
 """
 import os
@@ -48,9 +37,7 @@ def build_model_from_state_dict(state_dict: dict) -> ActorCritic:
 
 
 def export_onnx_model(model: ActorCritic, obs_dim: int, output_path: str):
-    """Exports an already-built, already-loaded model. Use this from a
-    training loop that already has the model in memory -- no checkpoint
-    round-trip needed."""
+    """Export an already-loaded model (no checkpoint round-trip)."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     was_training = model.training
     model.eval()
@@ -62,8 +49,7 @@ def export_onnx_model(model: ActorCritic, obs_dim: int, output_path: str):
                        "action_std": {0: "batch"}, "state_value": {0: "batch"}},
         opset_version=17,
         dynamo=False,  # the dynamo exporter (torch>=2.x default) prints a noisy
-                        # "[torch.onnx] ... done checkmark" progress log per export;
-                        # the legacy TorchScript-based exporter does the same job quietly.
+                        # legacy exporter: same graph, without the dynamo exporter's progress log
     )
     model.train(was_training)
     return output_path

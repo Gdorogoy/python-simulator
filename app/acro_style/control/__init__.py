@@ -1,4 +1,1 @@
-"""
-control — inner-loop body-rate controller; body-rate-space classical teacher for BC/DAgger.
-Phase 1/6.
-"""
+"""Inner-loop body-rate controller and body-rate classical teacher (phase 1/6, planned)."""

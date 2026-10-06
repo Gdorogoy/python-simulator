@@ -8,15 +8,7 @@ from app.guidance.train import ActorCritic, device
 def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
                                obs=None, actions=None, weights=None,
                                epochs=50, batch_size=256, lr=1e-3, weight_decay=1e-4):
-    """
-    Trains on (obs, actions) arrays if given directly (e.g. DAgger's aggregated,
-    growing dataset), otherwise loads them from demo_path.
-
-    `weights`, if given, is a per-sample array (same length as obs/actions) used to
-    weight each sample's contribution to the loss -- e.g. DAgger's recency weights,
-    so older rounds fade instead of counting equally with fresh corrections.
-    Unweighted (None) reproduces plain uniform BC.
-    """
+    """BC on (obs, actions) arrays or demo_path; optional per-sample `weights` (e.g. DAgger recency)."""
     if obs is None or actions is None:
         data = np.load(demo_path)
         obs = data["obs"]
@@ -41,8 +33,7 @@ def pretrain_behavior_cloning(model, demo_path="app/control/demonstrations.npz",
             mean, std, _ = model.forward(obs[b])
             epoch_std_sum += std.detach().mean(dim=0)
 
-            # Map bounded PID actions into raw pre-tanh space (model.scale_action's inverse) and
-            # score with Gaussian NLL instead of MSE, so large-magnitude dims don't dominate small ones.
+            # labels -> raw pre-tanh space, scored with Gaussian NLL so big dims don't dominate
             half_range = 0.5 * (model.action_high - model.action_low)
             normalized = (actions[b] - model.action_low) / half_range - 1.0
             normalized = torch.clamp(normalized, -0.999, 0.999)  # keep atanh finite

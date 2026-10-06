@@ -1,12 +1,4 @@
-"""Real demonstration-collection launcher for collect_demonstrations_base_drone_isaac
-(batched, continuous omni-directional sampling). Every knob is a CLI flag.
-
-    E:\\Isaac\\env_isaaclab\\Scripts\\python.exe -u app\\control\\collect_demo_isaac.py --headless ^
-        --num_envs 4096 --n_target_rows 2000000 --distance-low 3 --distance-high 10 ^
-        --save-path app/control/demonstrations_isaac.npz
-
-Feed the output straight to pretrain_bc.py's demo_path.
-"""
+"""CLI launcher for collect_demonstrations_base_drone_isaac (batched PID demos). See README "Pipeline"."""
 
 import argparse
 import json

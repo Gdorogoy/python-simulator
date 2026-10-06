@@ -1,9 +1,4 @@
-"""Thin MLflow helpers shared by the training loops.
-Uses MLflow's default local sqlite:///mlflow.db store unless MLFLOW_TRACKING_URI
-is set. That backend's first-ever use races if several processes hit it at once
-(each tries to create its schema) -- any future multi-process launcher should
-create the experiment once, itself, before spawning workers, rather than
-letting each worker's first start_run() call race to create it."""
+"""Thin MLflow helpers. Store = MLFLOW_TRACKING_URI or sqlite:///mlflow.db (create experiments before forking workers)."""
 import mlflow
 
 

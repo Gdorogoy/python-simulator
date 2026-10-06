@@ -39,13 +39,7 @@ class PIDController:
         self.integral_att = np.zeros(2)  # roll, pitch
         self.integral_yaw = 0.0
 
-        # BaseDroneEnv.step() clips whatever action it receives to these same
-        # bounds before actuating (see base_drone_env.py's action_space), so any
-        # unclipped PID output past this range is never actually reachable --
-        # left unclipped here, it also poisons BC/DAgger labels: pretrain_bc.py
-        # normalizes actions into this range and atanh's them into raw target
-        # space, so an out-of-range label maps to a huge raw_target instead of
-        # the actual (clipped) actuator command.
+        # clip to the env's action bounds: unclipped labels poison BC's atanh targets (docs.md "PID")
         self.action_low = np.array(action_low, dtype=np.float64)
         self.action_high = np.array(action_high, dtype=np.float64)
 
@@ -73,12 +67,7 @@ class PIDController:
         # 2 outer loop
         accel_cmd= self.kp_pos* pos_err - self.kd_pos* vel + self.ki_pos* self.integral_pos
 
-        # accel_cmd is in world-frame x/y, but roll/pitch tilt the drone in its
-        # OWN (yaw-rotated) horizontal frame -- rotate by -yaw before mapping to
-        # tilt, or this is only correct at yaw=0. Without this, commanding any
-        # nonzero target_yaw makes the drone tilt toward the wrong world-frame
-        # direction as soon as it actually turns (roll/pitch get swapped/mixed
-        # by however far it's yawed).
+        # rotate world-frame accel by -yaw into the drone's heading frame before mapping to tilt
         cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
         accel_body_x = accel_cmd[0] * cos_yaw + accel_cmd[1] * sin_yaw
         accel_body_y = -accel_cmd[0] * sin_yaw + accel_cmd[1] * cos_yaw

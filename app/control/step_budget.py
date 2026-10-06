@@ -7,9 +7,5 @@ MIN_STEPS = int(MIN_EPISODE_SECONDS * 240)
 
 
 def steps_for_dist(target_dist):
-    """
-    Scales steps with distance, but floors at MIN_STEPS: hit_threshold precision takes
-    roughly the same settling time regardless of distance, so short distances still need
-    a real time floor rather than a proportionally tiny travel-time budget.
-    """
+    """Episode step budget: grows with distance, floored at MIN_STEPS for final settling."""
     return max(MIN_STEPS, int(750 * target_dist / 3))

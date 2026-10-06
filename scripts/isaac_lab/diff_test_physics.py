@@ -1,17 +1,4 @@
-"""
-Migration step 4 (physics-math layer): diff-tests app.dynamics.torch_methods
-(batched torch) against app.dynamics.methods (the numpy oracle), function by
-function, on random inputs. Pure torch/numpy/scipy -- no isaaclab/omni/pxr, so
-this runs standalone, no Kit boot required:
-
-    E:\\Isaac\\env_isaaclab\\Scripts\\python.exe scripts\\isaac_lab\\diff_test_physics.py
-
-This validates the force/torque MATH (mixer inversion, motor lag, thrust,
-torque, drag, wind) -- the part migration step 3 ports by hand. It does NOT
-validate PhysX's own rigid-body integration (position/orientation from those
-forces), which needs a live Isaac Sim trajectory diff-test instead
-(scripts/isaac_lab/diff_test_trajectory.py).
-"""
+"""Diff-test dynamics.torch_methods against the numpy oracle on random inputs (no Isaac needed). See scripts/README.md."""
 
 import sys
 from pathlib import Path

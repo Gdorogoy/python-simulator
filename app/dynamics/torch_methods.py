@@ -1,20 +1,4 @@
-"""
-Batched torch mirror of app.dynamics.methods (the numpy oracle) -- mixer
-inversion, motor lag, thrust/torque, quadratic drag, wind. Pure torch, NO
-isaaclab/omni/pxr imports, so this module (and its diff-test) runs without
-booting Isaac Sim -- see scripts/isaac_lab/diff_test_physics.py (migration step 4).
-
-Not per-env: BaseDroneEnv builds one identical QuadConfig every episode (no
-domain randomization currently -- mass_scale/wind sampling are present but
-disabled in base_drone_env.py), so rotor geometry/coeffs are plain (4,)
-tensors broadcast against (num_envs, 4) state, matching that behavior.
-
-Frame convention matches the oracle exactly: torque and angular_velocity are
-body-frame throughout (rotor positions are body-frame, inertia is diagonal in
-body-frame); linear force/velocity are world-frame. Caller
-(app/environmental/base_drone_env_isaac.py) is responsible for rotating into
-whatever frame the RigidObject wrench API expects.
-"""
+"""Batched torch mirror of app.dynamics.methods (the numpy oracle); no Isaac imports. See docs.md "Torch mirror"."""
 
 from __future__ import annotations
 
@@ -50,10 +34,7 @@ def build_quad_config(
     device: str | torch.device = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> QuadConfigTorch:
-    """Mirrors app.dynamics.drone.create_quad_rotors/create_quad_config exactly:
-    4 rotors at 45/135/225/315deg, alternating spin_dir, k_f solved so
-    hover_rpm_fraction*max_rpm balances gravity. dtype defaults to float32 (the
-    env's dtype); diff_test_physics.py passes float64 for tight-tolerance checks."""
+    """Mirrors drone.create_quad_rotors/create_quad_config (float64 in diff tests, float32 in the env)."""
     angles_deg = torch.tensor([45.0, 135.0, 225.0, 315.0], device=device, dtype=dtype)
     spin_dir = torch.tensor([1.0, -1.0, 1.0, -1.0], device=device, dtype=dtype)
 
@@ -90,9 +71,7 @@ def build_quad_config(
 
 
 def mixer_inversion(cfg: QuadConfigTorch, desired: torch.Tensor) -> torch.Tensor:
-    """desired: (num_envs, 4) [thrust, roll, pitch, yaw] -> (num_envs, 4) rotor speeds (rad/s).
-    Matches app.dynamics.methods.mixer_inversion: solves for w^2 via inv(M), clips
-    negative w^2 to 0 (mirrors a torque/thrust combo the mixer can't realize), sqrt."""
+    """(N, 4) [thrust, roll, pitch, yaw] -> (N, 4) rotor speeds; unrealizable w^2 < 0 clipped to 0."""
     speeds_sq = desired @ cfg.mixer_inv.T
     speeds_sq = torch.clamp(speeds_sq, min=0.0)
     return torch.sqrt(speeds_sq)
@@ -110,9 +89,7 @@ def net_combining_thrust(cfg: QuadConfigTorch, w: torch.Tensor) -> torch.Tensor:
 
 
 def net_combining_torque(cfg: QuadConfigTorch, w: torch.Tensor) -> torch.Tensor:
-    """w: (num_envs, 4) rotor speeds -> (num_envs, 3) body-frame torque.
-    Matches app.dynamics.methods.net_combining_torque: cross([x,y,0],[0,0,F]) = [y*F,-x*F,0]
-    (moment-arm contribution) + [0,0,k_m*w^2*spin_dir] (reaction torque), summed over rotors."""
+    """(N, 4) rotor speeds -> (N, 3) body torque: moment arms [y*F, -x*F] + reaction k_m*w^2*spin_dir."""
     F = cfg.k_f * w**2  # (num_envs, 4)
     torque_x = (cfg.rotor_xy[:, 1] * F).sum(dim=-1)
     torque_y = (-cfg.rotor_xy[:, 0] * F).sum(dim=-1)
@@ -121,8 +98,7 @@ def net_combining_torque(cfg: QuadConfigTorch, w: torch.Tensor) -> torch.Tensor:
 
 
 def drag_force(velocity: torch.Tensor, drag_coeff: float, cross_sec_area: float, air_dens: float) -> torch.Tensor:
-    """velocity: (num_envs, 3) world-frame -> (num_envs, 3) drag force opposing it.
-    Matches app.dynamics.methods.drag_force, including the <0.01 m/s zero-force floor."""
+    """(N, 3) world velocity -> (N, 3) opposing drag; zero below 0.01 m/s like the oracle."""
     speed = torch.linalg.norm(velocity, dim=-1, keepdim=True)
     f_drag_mag = 0.5 * air_dens * speed**2 * drag_coeff * cross_sec_area
     direction = torch.where(speed < 0.01, torch.zeros_like(velocity), -velocity / speed.clamp_min(1e-8))

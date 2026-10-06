@@ -1,15 +1,10 @@
-"""
-mixer inversion, motor lag, thrust/torque integration.
-"""
+"""Numpy physics: mixer inversion, motor lag, thrust/torque, drag, wind and the per-tick integrator."""
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 from app.dynamics.drone import QuadConfig, Vector3D, QuadState, Quaternion
 
-"""
-Maps per-rotor speeds to [thrust, roll, pitch, yaw] via the mixer matrix M: row i holds
-each rotor's contribution to output i (thrust, roll, pitch, yaw respectively).
-"""
+"""Rotor speeds -> [thrust, roll, pitch, yaw] via the mixer matrix M."""
 def mixer(config: QuadConfig, rotors_speed : list[float]):
     M=np.zeros((4,4))
     for i in range(0,4):
@@ -28,10 +23,7 @@ def mixer(config: QuadConfig, rotors_speed : list[float]):
     return res
 
 
-"""
-Inverts the mixer matrix to go from a desired [thrust, roll, pitch, yaw] command
-(e.g. from the RL policy) to the per-rotor speeds that produce it.
-"""
+"""Desired [thrust, roll, pitch, yaw] -> per-rotor speeds (inverse mixer)."""
 def mixer_inversion(config: QuadConfig, desired_params : list[float]) -> list[float]:
     M = np.zeros((4, 4))
     for i in range(0, 4):
@@ -51,29 +43,20 @@ def mixer_inversion(config: QuadConfig, desired_params : list[float]) -> list[fl
 
     return res
 
-"""
-First-order lag toward the target rpm (motor_tau: small = responsive, large = sluggish),
-so a rotor can't jump speed instantly, like a real motor's spin-up/down time.
-"""
+"""First-order lag toward the target speed (motor_tau = spin-up time constant)."""
 def motor_lag(w_current: float, w_target: float, motor_tau: float, dt: float) -> float:
     w_dot= (w_target-w_current) / motor_tau
     w_new = w_current + w_dot * dt
     return w_new
 
 
-"""
-Thrust from one rotor, along body z. Always positive since it's squared in omega, so
-spin direction (CW/CCW) doesn't matter here the way it does for torque.
-"""
+"""Thrust of one rotor along body z: k_f * w^2 (independent of spin direction)."""
 
 def thrust(k_f: float, w_i: float):
     F_i=k_f*w_i**2
     return F_i
 
-"""
-Reaction torque from one rotor about the vertical axis. Unlike thrust, torque direction
-depends on spin_dir (+1/-1 for CW/CCW), since drag reaction opposes the spin.
-"""
+"""Reaction torque of one rotor about body z: k_m * w^2 * spin_dir."""
 
 def torque(k_m: float, w_i: float, spin_dir_i: float):
     F_i= k_m*w_i**2 * spin_dir_i
@@ -188,10 +171,7 @@ def timestamp_update(state: QuadState, config: QuadConfig , rl_action: list[floa
 
     delta_rot = Rotation.from_rotvec(new_angular_velocity * dt)
 
-    # angular_velocity is body-frame (p,q,r), so the incremental rotation must
-    # compose on the right (current_rot * delta_rot) -- left composition is only
-    # correct for a world-frame rate and gives a different result as soon as
-    # current_rot isn't near-identity.
+    # body-frame rate -> compose on the right (see docs.md "Orientation update")
     new_rot = current_rot * delta_rot
 
     new_quat = new_rot.as_quat()  # returns [x, y, z, w]

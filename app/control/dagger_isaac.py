@@ -1,15 +1,4 @@
-"""Real DAgger launcher for app.control.dagger.dagger_base_drone_isaac (batched, on-policy).
-Every knob is a CLI flag.
-
-    E:\\Isaac\\env_isaaclab\\Scripts\\python.exe -u app\\control\\dagger_isaac.py --headless ^
-        --num_envs 4096 --n_rounds 5 --rows_per_round 500000 --distance-low 3 --distance-high 10 ^
-        --checkpoint-path app/control/pretrained_bc.pt ^
-        --demo-path app/control/demonstrations_isaac.npz ^
-        --out-path app/control/pretrained_bc_dagger.pt
-
-checkpoint_path is the BC starting point; demo_path is the aggregate dataset to build on;
-out_path is where refined weights + the growing dataset snapshot get written each round.
-"""
+"""CLI launcher for dagger_base_drone_isaac (batched on-policy DAgger). See README "Pipeline"."""
 
 import argparse
 import json

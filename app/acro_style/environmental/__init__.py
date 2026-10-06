@@ -1,3 +1,1 @@
-"""
-environmental — acro-style Isaac Lab env: body-rate action space, gates in scene. Phase 1/4.
-"""
+"""Acro-style Isaac env: body-rate actions, gates in the scene (phase 1/4, planned)."""
