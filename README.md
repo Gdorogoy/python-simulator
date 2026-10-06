@@ -27,7 +27,7 @@ spawn ──── PID / carrot cruise (≤ 18 m/s) ────► handoff (3-5
 
 | Model | Task | Eval hit rate |
 |---|---|---|
-| `handoff_v3_150_250_30_50_18ms` | Two-phase: 150-250 m spawn, handoff at 3-50 m, up to 18 m/s, `height` obs | **0.95** |
+| `handoff_v3_150_250_30_50_18ms` | Two-phase: 150-250 m spawn (can be any dist 150-250 is base), handoff at 3-50 m, up to 18 m/s, `height` obs | **0.95** |
 | `handoff_v5_3_50m_18` | Handoff stage at 3-50 m, up to 18 m/s (no long leg) | 0.91 |
 | `3_10m_v2_res01` | Earlier PID-residual policy, 3-10 m from rest | grade 0.92 |
 | `3_30m_v1_res01` | Earlier PID-residual policy, 3-30 m from rest | grade 0.85 |
