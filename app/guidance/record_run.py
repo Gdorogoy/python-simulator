@@ -27,7 +27,7 @@ from app.reward_functions.rewards import reward_func, HIT_THRESHOLD, OOB_RADIUS
 
 PHYSICS_DT = 1.0 / 240.0
 
-CHECKPOINT_SEARCH_DIRS = ("runs", "app/control")
+CHECKPOINT_SEARCH_DIRS = ("runs", "app/control", "stable_models")
 MAX_RENDER_FRAMES = 360  # cap on frames actually drawn -- keeps render time/output size bounded
 FPS = 24
 N_EVAL_SCENARIOS = 75
