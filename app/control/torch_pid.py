@@ -6,6 +6,10 @@ import math
 
 import torch
 
+from app.dynamics.drone_params import angle_action_bounds
+
+ANGLE_ACTION_LOW, ANGLE_ACTION_HIGH = angle_action_bounds()   # the env's bounds, as in control/pid.py
+
 
 def wrap_angle(angle: torch.Tensor) -> torch.Tensor:
     """Matches app.control.pid.wrap_angle exactly."""
@@ -21,8 +25,8 @@ class TorchPIDController:
         max_tilt_rad: float = 0.3,
         ki_pos=0.0, ki_att=0.0, ki_yaw=0.0,
         integral_limit_pos: float = 0.3, integral_limit_att: float = 0.3,
-        action_low=(-1.5 * 9.81, -0.5, -0.5, -0.5),
-        action_high=(1.5 * 9.81, 0.5, 0.5, 0.5),
+        action_low=ANGLE_ACTION_LOW,
+        action_high=ANGLE_ACTION_HIGH,
     ):
         """Every gain arg accepts either a python scalar (broadcast to all envs)
         or a (num_envs,) tensor/array (per-env gains) -- see assign_gains_by_distance."""

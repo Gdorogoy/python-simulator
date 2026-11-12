@@ -2,7 +2,7 @@
 
 Covers the drone "hit the target" project as it stands: the model, PPO, the PID teacher (RTL), the reward (qv2),
 the controller-to-policy handoff stage, evaluation, how to read the logs, what each run taught us, and the plan.
-Numbers quoted as "default" are the script defaults at the time of writing (`app/training/rtl_train_isaac.py`);
+Numbers quoted as "default" are the script defaults at the time of writing (`app/training/angle_rtl_train_isaac.py`);
 check `--help` if in doubt.
 
 ---
@@ -25,8 +25,8 @@ plus a handoff distance chosen from physics (braking distance is about v^2 / (2a
 
 | File | What it is |
 |---|---|
-| `app/training/rtl_train_isaac.py` | the training script (PPO + PID teacher + handoff stage + Isaac eval) |
-| `app/reward_functions/reward_qv2.py` | the reward (qv1 + miss-and-hover penalty/termination) |
+| `app/training/angle_rtl_train_isaac.py` | the training script (PPO + PID teacher + handoff stage + Isaac eval) |
+| `app/reward_functions/angle_reward_qv2.py` | the reward (qv1 + miss-and-hover penalty/termination) |
 | `deprecated/reward_functions/reward_qv1.py` | the previous reward (deprecated, kept for reference) |
 | `app/guidance/train.py` | `ActorCritic`, `compute_gae`, checkpoint loading |
 | `app/environmental/base_drone_env_isaac.py` | the Isaac env (`_reset_idx`, observations, actions) |
@@ -259,7 +259,8 @@ the script runs `--eval-burnin` noisy steps (default 600) and discards them, plu
 | `base` | average `train_hit` during critic warmup, i.e. the untouched start policy |
 | `eval` | hit rate of the deterministic policy on freshly reset envs (first episode each) |
 | `[b0/b1/b2]` | eval hit rate per speed bucket (slow / medium / fast) |
-| `pid` | the PID baseline in the same eval |
+| `caught` | eval share caught by a chasing drone (`--reward rc` with threats; 0 otherwise), carried between eval chunks like `eval` |
+| `pid` | the PID baseline in the same eval (acro trainer: the teacher flying alone) |
 | `timeout`, `hover` | share of training episodes ended by timeout / hover termination |
 | `stall` | share of steps spent 0.25-0.75 m from the target, nearly stopped (diagnostic) |
 | `agree` | mean student-teacher action gap |
@@ -315,7 +316,7 @@ that restarting is only useful if eval actually improves (compare to the chunk-0
 
 Example (start from a previous best at a harder setting):
 ```
-python -u app/training/rtl_train_isaac.py --headless --num_envs 8192 --handoff --max-speed 18 \
+python -u app/training/angle_rtl_train_isaac.py --headless --num_envs 8192 --handoff --max-speed 18 \
     --distance-low 3 --distance-high 50 --checkpoint-dir runs/<NEW_NAME> \
     --distill-start 0.25 --distill-end 0.1 --init-std 0.1 \
     --bc-checkpoint runs/<previous>/best.pt --warmup-chunks 8
@@ -531,11 +532,11 @@ teacher normalisation of the PID action, observation scale VEL_SCALE = 10 m/s (o
 
 ## 17. The web viewer (2026-10-06)
 
-`uv run uvicorn app.guidance.serve_run:app --port 8000` -> http://localhost:8000. The page is `app/guidance/viewer.html` (edit it as a normal HTML file; it is read on every request).
+`uv run uvicorn app.guidance.serve_run:app --port 8000` -> http://localhost:8000. The page is the small React app in `app/guidance/web/` (plain `.js` files, no build; they are read on every request).
 - **Tabs:** *Two-phase* (default), *Single policy*, *Rank checkpoints*.
 - **Two-phase tab:** pick any checkpoint the server lists (`best.pt` files first, `latest_full.pt` hidden) or upload one; target distance, switch distance, cruise / handoff
   speed, test runs, seed; presets; and the **"Re-centre the position input at the handoff"** option (`recentre_z`, altitude cap default 20 m) described in section 15.
-  Picking a checkpoint from an `rtl_train_isaac.py` run reads its `run_config.json` (`GET /api/checkpoint_info`) and shows the trained range, max speed, spawn leg and
+  Picking a checkpoint from an `angle_rtl_train_isaac.py` run reads its `run_config.json` (`GET /api/checkpoint_info`) and shows the trained range, max speed, spawn leg and
   **position input mode**. The re-centre box sets itself: **on** for a `full`-mode run that used a spawn leg with re-centring (`recenter` true, the default), **off** for a run
   that did not re-centre, **disabled** for a `height`-mode run (nothing to re-centre). An uploaded `.pt` has no `run_config.json`, so the box is left as you set it.
 - **"Run & play in 3D"** (replaced the mp4 player, 2026-10-06): runs one episode and plays it back in a three.js scene in the page (three.js 0.160 from cdn.jsdelivr.net,
@@ -594,7 +595,7 @@ Caveat on the anchor: it is fed the same `height` observation as the student, so
 
 ## 19. Implementation notes (moved from code comments, 2026-10-06)
 
-Details of `install_handoff_stage` / `collect_rollout` / the main loop in `rtl_train_isaac.py` that used to live in comments.
+Details of `install_handoff_stage` / `collect_rollout` / the main loop in `angle_rtl_train_isaac.py` that used to live in comments.
 
 **Handoff trigger.** Control passes to the policy as soon as the drone's **real** distance to the target is `<= h`, where
 `h ~ U(dist_low, dist_high)`. That is the policy's own range, not the spawn range, so a BC checkpoint trained on that
@@ -653,3 +654,27 @@ must be reset again before training continues.
 
 **Shutdown.** The traceback is printed before `SimulationApp.close()`, because Kit can hard-exit during shutdown and
 swallow it.
+
+---
+
+## 20. Updates (2026-10-24)
+
+These supersede older statements in sections 5, 6 and 9 where they differ.
+
+- **Teacher is no longer always the PID.** `--teacher {auto,pid,policy,los}`. `los` is a scripted line-of-sight controller
+  (`make_los_label`): fly straight at the target at `min(max_speed, sqrt(2 * accel * dist))`, braking down to `--los-stop-speed`.
+  `auto` = `policy` if a checkpoint was passed, else `los`. The PID still flies the handoff leg and the `pid=` baseline.
+- **Teacher check first.** With a non-PID teacher, the run flies the teacher alone through the handoff and prints `TEACHER CHECK`
+  before any training. Under 50 % hits it warns: distilling from a teacher that cannot hit cannot work.
+- **Teacher BC** (`--teacher-bc-chunks`, `--scratch`): supervised DAgger onto the teacher before PPO, which is much faster than
+  the KL-limited pull inside PPO when the student starts random.
+- **Reward rc** (`--reward rc`, `angle_reward_rc.py`) is what the recent runs use: log-potential closing plus per-axis progress,
+  a line-of-sight penalty, a zone hold for the hit, a post-hit window, chasing drones (`--num-threats`), and the `caught` outcome.
+- **Optimiser.** Every optimiser is AdamW with `--weight-decay` (default 1e-4), including the teacher-BC loop.
+- **NaN incident (`angle_los_fixed_v5_15_50`).** The run used `--los-max-tilt-deg 180`. The braking accel is `0.5 * g * tan(cap)`,
+  and `tan(180 deg)` is about -1.2e-16, so `sqrt(2 * accel * dist)` was NaN and every teacher label was NaN. The first teacher-BC
+  step then turned the shared layers into NaN, and every checkpoint of the run (from 2M steps on) was NaN. The viewer showed it as
+  "Found zero norm quaternions" (the NaN action broke the orientation update). `make_los_label` now refuses a cap above 90 deg
+  unless `--teacher-accel` is given. At exactly 90 deg `tan` is huge but finite, so the teacher simply never brakes.
+- **Acro trainer** uses the same teacher (`LosTeacher`, labels converted to body rates) and the same console line; see
+  `docs.md` "acro_rtl_train_isaac".

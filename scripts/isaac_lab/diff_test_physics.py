@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from app.dynamics.drone import create_quad_config
-from app.dynamics.methods import (
+from app.dynamics.angle_style_methods import (
     mixer_inversion as np_mixer_inversion,
     motor_lag as np_motor_lag,
     net_combining_thrust as np_net_combining_thrust,
@@ -17,7 +17,7 @@ from app.dynamics.methods import (
     drag_force as np_drag_force,
     wind as np_wind,
 )
-from app.dynamics import torch_methods as tp
+from app.dynamics import angle_style_torch_methods as tp
 
 RNG = np.random.default_rng(0)
 ATOL = 1e-9

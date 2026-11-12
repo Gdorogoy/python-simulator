@@ -12,7 +12,9 @@ from scipy.spatial.transform import Rotation
 
 from app.control.pid import PIDController
 from app.dynamics.drone import create_quad_config, QuadState, Vector3D, Quaternion, QuadConfig
-from app.dynamics.methods import mixer_inversion, timestamp_update
+from app.dynamics.acro_style_methods import MAX_BODY_RATE, RateController, acro_timestamp_update
+from app.dynamics.angle_style_methods import mixer_inversion, timestamp_update
+from app.dynamics import drone_params as P
 from app.environmental.enviorment import sample_wind_conditions
 
 from app.reward_functions.rewards import RewardConfig, make_reward_fn
@@ -27,6 +29,9 @@ DIST_SCALE = 15.0
 # obs[0:3] layout: "full" = symlog(x, y, z), "height" = (0, 0, symlog(clip(z))). See docs.md "Position modes".
 POSITION_MODES = ("full", "height")
 HEIGHT_CLIP = 30.0
+
+# "angle": action = [thrust, roll/pitch/yaw torque]. "acro": action = [thrust, p/q/r body rate]. See dynamics/docs.md.
+DRONE_STYLES = ("angle", "acro")
 
 
 
@@ -86,13 +91,16 @@ class BaseDroneEnv(gym.Env):
 
     def __init__(self, custom_reward, render_mode=None, pid_gains_path="app/control/best_pid_gains.json",
                  spawn_offset_range=None, target_offset_range=None, target_pairs=None,
-                 max_steps=15_000, dt=1 / 240, position_mode="full"):
+                 max_steps=15_000, dt=1 / 240, position_mode="full", drone_style="angle"):
 
         self.dt = dt
         self.max_steps = max_steps
         if position_mode not in POSITION_MODES:
             raise ValueError(f"position_mode must be one of {POSITION_MODES}, got {position_mode!r}")
         self.position_mode = position_mode
+        if drone_style not in DRONE_STYLES:
+            raise ValueError(f"drone_style must be one of {DRONE_STYLES}, got {drone_style!r}")
+        self.drone_style = drone_style
         self.spawn_offset_range = spawn_offset_range
         self.target_offset_range = target_offset_range
         self.target_pairs = target_pairs
@@ -107,14 +115,16 @@ class BaseDroneEnv(gym.Env):
 
         self.reset()
 
-        hover_thrust=self.config.mass*9.81
-
-
-        # +-0.5 N*m torque bounds are a deliberate comfort limit, not physics (docs.md "Action space")
-        self.action_space= spaces.Box(
-            low=np.array([-hover_thrust, -0.5, -0.5, -0.5], dtype=np.float32),
-            high=np.array([hover_thrust,0.5, 0.5, 0.5], dtype=np.float32),
-        )
+        if self.drone_style == "acro":
+            thrust_low, thrust_high = P.acro_thrust_bounds(self.config.mass)
+            self.action_space = spaces.Box(
+                low=np.array([thrust_low, *(-r for r in MAX_BODY_RATE)], dtype=np.float32),
+                high=np.array([thrust_high, *MAX_BODY_RATE], dtype=np.float32),
+            )
+        else:
+            # torque / thrust bounds are a deliberate limit, not physics: see dynamics/drone_params.py
+            low, high = P.angle_action_bounds(self.config.mass)
+            self.action_space = spaces.Box(low=np.array(low, dtype=np.float32), high=np.array(high, dtype=np.float32))
 
         self.observation_space= spaces.Box(
             low=-inf,
@@ -126,7 +136,10 @@ class BaseDroneEnv(gym.Env):
 
         self.pid_teacher=None
 
-        if pid_gains_path  is not None:
+        # the PID outputs torques, which mean nothing as an acro rate command
+        if pid_gains_path is not None and self.drone_style == "acro":
+            print("[warn] no acro PID teacher yet; pid_teacher unavailable")
+        elif pid_gains_path  is not None:
             try:
                 with open(pid_gains_path) as f:
                     gains = json.load(f)
@@ -176,13 +189,15 @@ class BaseDroneEnv(gym.Env):
         self.mass_scale=1
 
         self.config = create_quad_config(
-            mass=1.5 * self.mass_scale,
-            inertia=(0.02 * self.mass_scale, 0.02 * self.mass_scale, 0.04 * self.mass_scale),
-            arm_length=0.22,
-            drag_coeff=0.035,
-            max_rpm=12000,
-            motor_tau=0.05,
+            mass=P.MASS * self.mass_scale,
+            inertia=tuple(i * self.mass_scale for i in P.INERTIA),
+            arm_length=P.ARM_LENGTH,
+            drag_coeff=P.DRAG_COEFF,
+            max_rpm=P.MAX_RPM,
+            motor_tau=P.MOTOR_TAU,
         )
+
+        self.rate_controller = RateController(self.config) if self.drone_style == "acro" else None
 
         start_position = Vector3D(start_pos[0],start_pos[1],start_pos[2])
 
@@ -224,7 +239,11 @@ class BaseDroneEnv(gym.Env):
         real_action = action.copy()
         real_action[0] = action[0] + hover_thrust
 
-        self.drone_state = timestamp_update(self.drone_state, self.config, list(real_action), self.wind_vector, self.dt)
+        if self.drone_style == "acro":
+            self.drone_state = acro_timestamp_update(self.drone_state, self.config, self.rate_controller,
+                                                     list(real_action), self.wind_vector, self.dt)
+        else:
+            self.drone_state = timestamp_update(self.drone_state, self.config, list(real_action), self.wind_vector, self.dt)
         self.steps_elapsed += 1
 
         obs = self._get_obs()

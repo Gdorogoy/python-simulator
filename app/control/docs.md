@@ -12,6 +12,7 @@ The classical controllers and the imitation-learning pipeline built on them. The
 |---|---|
 | `pid.py` | `PIDController`: cascaded position -> attitude P(I)D (numpy, one drone). |
 | `torch_pid.py` | `TorchPIDController`: batched mirror with per-env gains, plus `assign_gains_by_distance`. |
+| `los.py` / `los_np.py` | Line-of-sight velocity controller: `velocity_to_action` (shared by the LOS teacher and the threat/runner drones) and `chase_velocity` / `hold_velocity`. The two files are identical maths (torch / numpy); `test_los_np.py` diffs them. |
 | `tune_pid.py` | Closed-form gains per distance -> `best_pid_gains_per_dist.json` and `best_pid_gains.json`. |
 | `step_budget.py` | `steps_for_dist`: episode step budget per distance. |
 | `collect_demonstrations.py` | PID (obs, action) datasets (numpy and batched Isaac). |
@@ -52,6 +53,18 @@ There is no search: the gains come from pole placement on the real plant (`creat
   forced to 0 so the current budget constant doesn't feed into its own measurement. Copy the result into
   `rewards.APPROACH_MILESTONE_BUDGET` by hand.
 
+## LOS velocity controller (`los.py` / `los_np.py`)
+- `v_des` comes from the caller: the braking profile for the LOS teacher, full speed for a chaser. The loop is
+  `a_cmd = cruise_gain * (v_des - vel)`; `a_cmd_xy` is rotated by -yaw into the heading frame and mapped to
+  `roll = -a_y / g`, `pitch = a_x / g`; thrust compensates the bank (`/ cos(tilt)`).
+- **The tilt clamp is isotropic.** The `(roll, pitch)` vector is scaled so that
+  `|roll, pitch| <= tan(max_tilt)`, i.e. the total tilt `atan(|a_xy| / g)` is the cap. The older form clipped roll and
+  pitch **per axis** to `max_tilt`, so on a diagonal target one axis saturated first, the commanded direction rotated,
+  and the teacher bowed (~90 m on a 30 deg azimuth) or left the bounds. The diagonal now gets the same tilt budget as a
+  cardinal direction, and the direction is preserved. `max_tilt` is in **radians**.
+- `chase_velocity` has no braking profile and no lead; it points at `rel` and applies `speed_cap`. The tilt clamp is
+  the airframe's limit, not a chaser setting.
+
 ## Imitation pipeline
 1. **Demonstrations:** the PID flies; each (obs, action) pair is recorded. The start position is jittered so the
    dataset also contains corrective, off-path states. Directions cover single, pair and triple axes ("omni"), not
@@ -73,11 +86,21 @@ There is no search: the gains come from pole placement on the real plant (`creat
   need 25k-62.5k steps.
 
 ## Two-phase agent (`two_phase.py`)
-- **Midcourse.** `CarrotController` (the default) is a numpy port of `rtl_train_isaac`'s carrot controller. It
-  tracks velocity along the straight spawn->target line on a trapezoid profile: ramp up to `cruise_speed`, cruise,
-  and ramp down to `handoff_speed` by `switch_dist`. It holds altitude on the target z. With `cruise_speed=None`
+- **Midcourse.** `CarrotController` (the default) is a numpy port of `angle_rtl_train_isaac`'s carrot controller. It
+  tracks velocity on a trapezoid profile: ramp up to `cruise_speed`, cruise, and ramp down to `handoff_speed` by
+  `switch_dist`. It holds altitude on the target z. With `cruise_speed=None`
   it uses the old analytic position-hold PID, with gains solved for the exact distance. That mode arrives at
   about 0.5-1 m/s, a state training never produced.
+- **Pure pursuit.** The commanded direction is recomputed every step from the drone to the target, and progress on the
+  profile is the distance already covered (`total - remaining`). On the spawn->target line this equals the old fixed-line
+  controller, so short flights are unchanged. Off the line it steers the sideways error out. The old version aimed along
+  the fixed spawn line with velocity feedback only, so any steady sideways drift (1-2 m/s with drag) piled up over a long
+  flight: at 1500 m the drone ended 250 m off the line, never came within `switch_dist`, never handed off, and flew on at
+  `handoff_speed` until out of bounds. The same case now hits (peak about 120 m off the line, then steered back in).
+  `angle_rtl_train_isaac._carrot_action` still has the fixed-line form; training stays under ~250 m where the drift is small.
+- **Tilt compensation differs.** The numpy `CarrotController` adds `hover * (1/cos(tilt) - 1)` to the thrust so a banked drone
+  keeps its altitude. Its comment says the Isaac `_carrot_action` has the same line, but it does not (2026-10-24): the Isaac leg
+  uses the plain `kp_pos * z_err - kd_pos * vz` hold. Expect the Isaac leg to sag a little more in altitude at large tilt.
 - **Handoff.** Inside `switch_dist`, only the model acts. Velocity is **snapped** to the trained handoff speed
   along the line to the target, and the observation is rebuilt. That is why `record_run` logs exactly
   `speed = handoff_speed, lateral = 0` at takeover.

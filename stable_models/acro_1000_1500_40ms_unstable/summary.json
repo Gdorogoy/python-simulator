@@ -1,0 +1,18 @@
+{
+  "aborted": null,
+  "stage_done": null,
+  "best": {
+    "checkpoint": "runs/acro_speed_s4_1000_1500_v5_ft\\model_12582912.pt",
+    "chunk": 5,
+    "phase": "full",
+    "score": 0.956560453414917,
+    "eval_hit_rate": 0.9600830078125,
+    "eval_hit_time_s": 35.22554397583008,
+    "tilt_limit_deg": 80.0,
+    "timesteps": 12582912
+  },
+  "chunks_run": 25,
+  "pid_success_rate": null,
+  "tilt_limit_deg": 80.0,
+  "duration_s": 1968.6785197257996
+}

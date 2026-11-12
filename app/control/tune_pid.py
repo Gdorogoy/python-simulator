@@ -3,6 +3,7 @@ import json
 
 import numpy as np
 
+from app.dynamics import drone_params as P
 from app.dynamics.drone import create_quad_config
 from app.control.pid import PIDController
 from app.control.step_budget import DT, MIN_STEPS, steps_for_dist
@@ -18,8 +19,8 @@ MAX_TILT_RAD = 0.3  # must match PIDController's default
 
 # must match the QuadConfig base_drone_env.reset() builds
 _CONFIG = create_quad_config(
-    mass=1.5, inertia=(0.02, 0.02, 0.04), arm_length=0.22,
-    drag_coeff=0.035, max_rpm=12000, motor_tau=0.05,
+    mass=P.MASS, inertia=P.INERTIA, arm_length=P.ARM_LENGTH,
+    drag_coeff=P.DRAG_COEFF, max_rpm=P.MAX_RPM, motor_tau=P.MOTOR_TAU,
 )
 I_ROLL_PITCH = _CONFIG.inertia[0]  # Ixx == Iyy
 I_YAW = _CONFIG.inertia[2]

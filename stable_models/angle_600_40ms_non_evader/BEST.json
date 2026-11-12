@@ -1,0 +1,9 @@
+{
+  "checkpoint": "runs/angle_los_40_160_600\\model_295698432.pt",
+  "chunk": 140,
+  "phase": "full",
+  "score": 0.964111328125,
+  "train_hit_rate": 0.9758454106280193,
+  "eval_hit_rate": 0.964111328125,
+  "timesteps": 295698432
+}

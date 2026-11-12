@@ -1,0 +1,9 @@
+{
+  "checkpoint": "runs/angle_evades_headon_45_600\\model_96468992.pt",
+  "chunk": 45,
+  "phase": "full",
+  "score": 0.8458251953125,
+  "train_hit_rate": 0.855188141391106,
+  "eval_hit_rate": 0.8458251953125,
+  "timesteps": 96468992
+}

@@ -29,8 +29,8 @@ import app.environmental.base_drone_env_isaac  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 from app.dynamics.drone import create_quad_config, QuadState, Vector3D, Quaternion
-from app.dynamics.methods import timestamp_update
-from app.dynamics import torch_methods as tp
+from app.dynamics.angle_style_methods import timestamp_update
+from app.dynamics import angle_style_torch_methods as tp
 
 MASS, INERTIA, ARM, DRAG_COEFF, MAX_RPM, MOTOR_TAU = 1.5, (0.02, 0.02, 0.04), 0.22, 0.035, 12000, 0.05
 DT = 1 / 240

@@ -261,7 +261,7 @@ STABILITY_COEF = 0.1  # applied inside OUTER_ZONE_RADIUS: -STABILITY_COEF*(|vel|
 GAMMA = 0.97
 
 
-def terminal_checks(pos, roll, pitch, oob_radius=OOB_RADIUS):
+def terminal_checks(pos, roll, pitch, oob_radius=OOB_RADIUS, roll_deg=ATTITUDE_ROLL_DEG, pitch_deg=ATTITUDE_PITCH_DEG):
     """All hard failures this step -> (penalty_sum, term_reason or None, active_reasons)."""
     penalty_sum = 0.0
     active_reasons = []
@@ -269,10 +269,10 @@ def terminal_checks(pos, roll, pitch, oob_radius=OOB_RADIUS):
     if np.any(np.isnan(pos)) or pos[2] < 0.0 or np.linalg.norm(pos) > oob_radius:
         penalty_sum += OOB_PENALTY
         active_reasons.append("oob")
-    if abs(roll) > np.radians(ATTITUDE_ROLL_DEG):
+    if abs(roll) > np.radians(roll_deg):
         penalty_sum += ATTITUDE_PENALTY
         active_reasons.append("attitude-ROLL")
-    if abs(pitch) > np.radians(ATTITUDE_PITCH_DEG):
+    if abs(pitch) > np.radians(pitch_deg):
         penalty_sum += ATTITUDE_PENALTY
         active_reasons.append("attitude-PITCH")
 
@@ -300,11 +300,14 @@ def reward_func(env):
 
     # oob_radius scales with this episode's start_dist so a far target isn't structurally unreachable.
     oob_radius = max(OOB_RADIUS, env.start_dist * 3.0)
-    term_sum, term_reason, _term_list = terminal_checks(pos, roll, pitch, oob_radius=oob_radius)
+    # the viewer env sets attitude_roll_deg / attitude_pitch_deg to the limits the run was trained with (rc runs switch them off)
+    term_sum, term_reason, _term_list = terminal_checks(
+        pos, roll, pitch, oob_radius=oob_radius, roll_deg=getattr(env, "attitude_roll_deg", ATTITUDE_ROLL_DEG),
+        pitch_deg=getattr(env, "attitude_pitch_deg", ATTITUDE_PITCH_DEG))
     if term_reason:
         return term_sum, True, term_reason
 
-    if hit_target(dist):
+    if dist < getattr(env, "hit_radius", HIT_THRESHOLD):      # the viewer env sets hit_radius per run (serve_run's Hit zone field)
         return HIT_REWARD, True, "Hit"
 
     # phi_now - phi_prev without gamma: the gamma form pays for standing still

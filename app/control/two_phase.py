@@ -5,8 +5,11 @@ import json
 
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation
 
 from app.control.pid import PIDController
+from app.dynamics.drone import Quaternion, Vector3D
+from app.dynamics.drone_params import GRAVITY, MASS
 from app.environmental.base_drone_env import POS_SCALE, _symlog_scale
 from app.control.tune_pid import compute_gains_for_distance
 
@@ -34,8 +37,31 @@ def gains_for_distance(dist: float):
     return label, gains
 
 
+def snap_handoff_state(drone_state, target_pos, speed, lateral_frac=0.0, tilt_deg=0.0, rng=None):
+    """What the trainers' _handoff_snap_obs does at the takeover: velocity = `speed` toward the target plus a random sideways part of up
+    to lateral_frac * speed, roll and pitch random within +-tilt_deg (yaw 0, body rates 0). With both at 0 only the speed is set and
+    the attitude is left alone. Returns the new velocity."""
+    rng = rng or np.random.default_rng()
+    p = drone_state.position
+    to_t = np.asarray(target_pos, dtype=np.float64) - np.array([p.x, p.y, p.z])
+    unit = to_t / max(float(np.linalg.norm(to_t)), 1e-6)
+    vel = unit * speed
+    if lateral_frac > 0.0 and speed > 0.0:
+        side = rng.normal(size=3)
+        side = side - float(side @ unit) * unit
+        vel = vel + side / max(float(np.linalg.norm(side)), 1e-9) * lateral_frac * speed * rng.uniform()
+    drone_state.velocity = Vector3D(*(float(c) for c in vel))
+    if tilt_deg > 0.0:
+        t = np.radians(tilt_deg)
+        roll, pitch = rng.uniform(-t, t, size=2)
+        qx, qy, qz, qw = Rotation.from_euler("xyz", [roll, pitch, 0.0]).as_quat()
+        drone_state.orientation = Quaternion(float(qx), float(qy), float(qz), float(qw))
+        drone_state.angular_velocity = Vector3D(0.0, 0.0, 0.0)
+    return vel
+
+
 class CarrotController:
-    """Numpy port of rtl_train_isaac's carrot controller: trapezoid speed profile along the spawn->target line."""
+    """Numpy port of angle_rtl_train_isaac's carrot controller: trapezoid speed profile along the spawn->target line."""
 
     def __init__(self, gains_by_dist: dict, cruise_speed: float, handoff_speed: float, cruise_gain: float = 1.0):
         self.table = sorted(((float(k), v) for k, v in gains_by_dist.items()), key=lambda kv: kv[0])
@@ -46,12 +72,14 @@ class CarrotController:
         self.max_tilt = base.get("max_tilt_rad", 0.3)
         self.accel = 0.5 * 9.81 * np.tan(self.max_tilt)   # same default as training: half the tilt-limited accel
         self.pid = PIDController(**base)                   # only for its action bounds / yaw wrapping helpers
+        self.hover_thrust = MASS * GRAVITY
 
     def reset(self, drone_state, target_pos, switch_dist):
         self.spawn = np.array([drone_state.position.x, drone_state.position.y, drone_state.position.z])
         to_t = np.asarray(target_pos, dtype=np.float64) - self.spawn
         total = float(np.linalg.norm(to_t))
         self.unit = to_t / max(total, 1e-6)
+        self.total = total
         self.prefix = max(total - switch_dist, 0.5)
         vh = min(self.handoff_speed, self.cruise_speed)
         self.vh = vh
@@ -74,7 +102,13 @@ class CarrotController:
         roll, pitch, yaw = Rotation.from_quat([o.x, o.y, o.z, o.w]).as_euler("xyz")
         g = self._gains(float(np.linalg.norm(np.asarray(target_pos) - pos)))
 
-        s = float(np.clip(np.dot(pos - self.spawn, self.unit), 0.0, self.prefix))
+        # pure pursuit: aim at the target from where the drone is now, not along the fixed spawn->target line, so sideways drift
+        # is steered out instead of carried past the target (off the line the old fixed direction never came back).
+        # Progress is the distance already covered; on the line it equals the projection onto it, so on-line flights are unchanged.
+        to_target = np.asarray(target_pos, dtype=np.float64) - pos
+        remaining = float(np.linalg.norm(to_target))
+        unit = to_target / max(remaining, 1e-6)
+        s = float(np.clip(self.total - remaining, 0.0, self.prefix))
         if s < self.d_up:
             v_cmd = np.sqrt(max(2 * self.accel * s, 0.0))
         elif s < self.d_up + self.d_cruise:
@@ -83,8 +117,11 @@ class CarrotController:
             v_cmd = np.sqrt(max(self.vpeak ** 2 - 2 * self.accel * (s - self.d_up - self.d_cruise), self.vh ** 2))
         v_cmd = max(v_cmd, 0.1)
 
-        accel_xy = self.cruise_gain * (self.unit[:2] * v_cmd - vel[:2])
+        accel_xy = self.cruise_gain * (unit[:2] * v_cmd - vel[:2])
         thrust_delta = g["kp_pos"] * (target_pos[2] - pos[2]) - g["kd_pos"] * vel[2]
+        # tilt costs vertical thrust (weight / cos(tilt) - weight to stay level); with real drag the tilt is large, and the weak
+        # per-distance z gains otherwise lose the climb to it. Same line in angle_rtl_train_isaac._carrot_action.
+        thrust_delta += self.hover_thrust * (1.0 / max(np.cos(roll) * np.cos(pitch), 0.2) - 1.0)
         c, sn = np.cos(yaw), np.sin(yaw)
         ax, ay = accel_xy[0] * c + accel_xy[1] * sn, -accel_xy[0] * sn + accel_xy[1] * c
         des_roll = np.clip(-ay / 9.81, -self.max_tilt, self.max_tilt)
@@ -100,7 +137,8 @@ class TwoPhaseAgent:
 
     def __init__(self, model, gains_by_dist: dict | None = None, switch_dist: float = DEFAULT_SWITCH_DIST,
                  device: str = "cpu", log=None, cruise_speed: float | None = 18.0,
-                 handoff_speed: float | None = None, recentre_z: float | None = None):
+                 handoff_speed: float | None = None, recentre_z: float | None = None,
+                 lateral_frac: float = 0.0, tilt_deg: float = 0.0, rng=None):
         """See docs.md "Two-phase agent" for gains_by_dist, cruise_speed, handoff_speed and recentre_z."""
         self.model = model
         self.gains_by_dist = gains_by_dist
@@ -117,6 +155,7 @@ class TwoPhaseAgent:
         self.switch_step: int | None = None
         self._step = 0
         self.recentre_z = recentre_z
+        self.lateral_frac, self.tilt_deg, self.rng = lateral_frac, tilt_deg, rng
         self._pos_offset: np.ndarray | None = None
 
     def reset(self, env):
@@ -150,13 +189,10 @@ class TwoPhaseAgent:
             self.log(f"[SWITCH] PID -> pure RL  dist={dist:6.2f}m  threshold={self.switch_dist}m  "
                      f"speed={speed:5.2f}m/s  step={self._step}")
             if self.carrot is not None:
-                # snap velocity to the trained handoff speed along the line to target, then rebuild obs
-                p = env.drone_state.position
-                to_t = np.asarray(env.target_pos, dtype=np.float64) - np.array([p.x, p.y, p.z])
-                unit = to_t / max(float(np.linalg.norm(to_t)), 1e-6)
-                vx, vy, vz = (float(c) * self.handoff_speed for c in unit)
-                env.drone_state.velocity = type(v)(vx, vy, vz)
-                self.log(f"[SNAP]   velocity set to handoff speed {self.handoff_speed:.2f}m/s along the line to target")
+                # snap velocity to the handoff speed toward the target (+ the optional random sideways speed and tilt), rebuild obs
+                snap_handoff_state(env.drone_state, env.target_pos, self.handoff_speed, self.lateral_frac, self.tilt_deg, self.rng)
+                self.log(f"[SNAP]   velocity set to handoff speed {self.handoff_speed:.2f}m/s toward the target "
+                         f"(sideways <= {self.lateral_frac:.0%}, tilt <= {self.tilt_deg:g} deg)")
                 obs = env._get_obs()
             if self.recentre_z is not None and env.position_mode == "full":
                 p = env.drone_state.position

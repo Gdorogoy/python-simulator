@@ -31,7 +31,7 @@ kd_pos = 2 * zeta_pos * wn_pos
 
 The attitude (roll/pitch) and yaw loops obey the same identity, but through
 `I * angular_accel = torque` instead (`angular_acceleration()` in
-`dynamics/methods.py` divides net torque by inertia per axis):
+`dynamics/angle_style_methods.py` divides net torque by inertia per axis):
 
 ```
 kp_att = I_xx * wn_att**2      kd_att = 2 * zeta_att * wn_att * I_xx

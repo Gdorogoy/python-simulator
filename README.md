@@ -1,6 +1,16 @@
 # python-simulator: quadcopter interception with RL
 
-A quadcopter has to **hit a target**: get within 0.25 m of it. The drone flies on custom rigid-body physics, a
+## Update
+
+- The acro policy now flies the full 1000-1500 m leg in one pass: 0.966 hit rate, 35.1 s (PID 85s , LoS 45s) 37.1 m/s avg on hit.
+- Reference notes live in `app/<folder>/docs.md` and `logs_guide.md`.
+
+- starting to teach the drones on not relaying on 2-phase but rather fly from 0 → target.
+- angle has 2 version: 1 for interceptor based on LoS chasing him , 1 w/o (evader & non_evader)
+
+- updates that were applied on acro : new reward functions (v3 & v4) adding penalty for non-optimal path and not using enough speed.
+
+A quadcopter has to **hit a target**: get within 1 m of it. The drone flies on custom rigid-body physics, a
 classical PID controller acts as both teacher and baseline, and PPO policies are trained on thousands of drones in
 parallel in **NVIDIA Isaac Lab**.
 
@@ -20,37 +30,48 @@ spawn ──── PID / carrot cruise (≤ 18 m/s) ────► handoff (3-5
 - **Imitation pipeline**: PID demonstrations -> behaviour cloning -> DAgger.
 - **RTL trainer**: PPO with a decaying PID-teacher distillation loss, an eval-driven teacher guard, phased unfreezing
   and a realistic controller->policy handoff stage. Runs on 8192 envs on one GPU.
-- **Web viewer** to fly any checkpoint (single policy or two-phase) and inspect the 3D trajectory, plus **MLflow** for
+- **Acro trainer**: a single-pass policy for 250-1500 m legs, thrust + body-rate actions, rewards v1-v4 on a shared
+  per-step scaling contract.
+- **Web viewer** to fly any checkpoint (two-phase, plus an acro eval tab) and inspect the 3D trajectory, plus **MLflow** for
   every run.
 
 ## Results (released models in `stable_models/`)
 
-| Model | Task | Eval hit rate |
-|---|---|---|
-| `handoff_v3_150_250_30_50_18ms` | Two-phase: 150-250 m spawn (can be any dist 150-250 is base), handoff at 3-50 m, up to 18 m/s, `height` obs | **0.95** |
-| `handoff_v5_3_50m_18` | Handoff stage at 3-50 m, up to 18 m/s (no long leg) | 0.91 |
-| `3_10m_v2_res01` | Earlier PID-residual policy, 3-10 m from rest | grade 0.92 |
-| `3_30m_v1_res01` | Earlier PID-residual policy, 3-30 m from rest | grade 0.85 |
+| Model                           | Task                                                                                                        | Eval hit rate |
+|---------------------------------|-------------------------------------------------------------------------------------------------------------|---------------|
+| `handoff_v3_150_250_30_50_18ms` | Two-phase: 150-250 m spawn (can be any dist 150-250 is base), handoff at 3-50 m, up to 18 m/s, `height` obs | **0.95**      |
+| `handoff_v5_3_50m_18`           | Handoff stage at 3-50 m, up to 18 m/s (no long leg)                                                         | 0.91          |
+| `acro_1000_1500_40ms`           | Acro: one pass over 1000-1500 m, no handoff, 1 m hit radius, 80 deg tilt cap, `height` obs                  | **0.966**     |
+| `acro_1000_1500_40ms_unstable`  | Same stage after the 25-chunk constant-LR fine-tune; kept to document the failure (peaks 0.960, ends 0.758)  | 0.960         |
+| `angle_600_40ms_non_evader`     | Handoff 60-160 m from a 400-600 m spawn, up to 40 m/s, no threats                                           | 0.964         |
+| `anlge_evader_600_40ms`         | Handoff 100-250 m from a 600-800 m spawn, up to 45 m/s, 1 active threat of 5                                | 0.846         |
+| `3_10m_v2_res01`                | Earlier PID-residual policy, 3-10 m from rest                                                               | grade 0.92    |
+| `3_30m_v1_res01`                | Earlier PID-residual policy, 3-30 m from rest                                                               | grade 0.85    |
 
-Hit rates are the trainer's deterministic in-Isaac evaluation on fresh random targets (`BEST.json`). Grades are the
-older composite score (`SOLID.json`).
+Hit rates are the trainer's deterministic in-Isaac evaluation on fresh random targets (`BEST.json`); grades are the
+older composite score (`SOLID.json`). The two acro rows are the v4 speed run: 35.1 s and 37.1 m/s mean over the leg,
+against a 52.1 m/s airframe limit; the `_unstable` copy is the failed fine-tune, not a candidate to deploy. The angle
+rows use `height` obs and the rc reward in the two-phase setup. The `3_10m` / `3_30m` folders predate
+`run_config.json` and ship without it.
 
 ## Repository layout
 
 ```
 app/
-  dynamics/          physics engine (numpy oracle + torch mirror)
-  environmental/     numpy Gymnasium env + Isaac Lab env
-  control/           PID, gain tuning, demos / BC / DAgger, two-phase agent
-  reward_functions/  reward_qv2 (current) + termination geometry
+  dynamics/          physics engine (numpy oracle + torch mirror), angle + acro plants
+  environmental/     numpy Gymnasium env + Isaac Lab env, threats, perception
+  control/           PID, gain tuning, demos / BC / DAgger, two-phase agent, LOS guidance
+  reward_functions/  angle qv2 / rc, acro v1-v4, shared per-leg contract
   guidance/          ActorCritic + PPO, replay/recording, web viewer, plots
-  training/          rtl_train_isaac.py (current trainer) + eval tools
+  training/          angle_rtl_train_isaac.py, acro_rtl_train_isaac.py + eval tools
   navigation/        Kalman estimator (standalone)
-  test/              physics/config validation
+  test/              physics, reward, LOS, threat and checkpoint tests
+guide/               the intuition guide, 7 chapters read as a book
 stable_models/       released checkpoints (best.pt, .onnx, metrics, plots)
 scripts/             numpy <-> torch/Isaac parity tests
+future/              roadmap notes
+logs_guide.md        how to read the trainer's console line
 deprecated/          retired trainers, rewards and migration scripts
-info/                design notes, project defense guide, migration log
 ```
 
 Every `app/<folder>/docs.md` explains that folder's design, gotchas and history. Start with [`app/docs.md`](app/docs.md).
@@ -97,8 +118,7 @@ mkdir -p runs && cp -r stable_models/handoff_v3_150_250_30_50_18ms runs/
 | Tab | What it does |
 |---|---|
 | **Two-phase** | The PID / carrot cruise flies to the switch distance, then the checkpoint takes over. Pick a listed checkpoint, or **Upload .pt** (an upload has no `run_config.json`, so it is treated as a `full`-mode model). Set the target distance, switch distance, cruise speed (use the run's `--max-speed`) and handoff speed. **Run & play in 3D** gives an interactive replay (orbit, zoom, scrub, follow); **Run test batch** gives the hit rate over N random scenarios. |
-| **Single policy** | The policy flies the whole episode from rest and returns an mp4. It uses server-listed checkpoints only. |
-| **Rank checkpoints** | Evaluates every `.pt` in a directory and shows the top ones by grade. |
+| **Acro eval** | Scores an acro checkpoint the way the trainer's eval does (clean start from rest, deterministic, first episode, per-distance budget) in the numpy plant: hit / out of bounds / tilt / hover / timeout, per scenario and per distance. **Fly one episode & play in 3D** gives the same interactive replay as the two-phase tab. Start "as trained" launches the drone with the run's spawn speed (what the trainer's eval does), "from rest" starts at rest. Use it to check that the viewer plant agrees with the Isaac eval. |
 
 Keep the switch distance inside the range the model was trained on (3-50 m for the released handoff models). The observation
 mode (`full`/`height`) is read from the `run_config.json` next to the checkpoint. Without one, a `height` model would
@@ -109,10 +129,9 @@ the episode is done.
 The same functionality is available from the command line:
 
 ```bash
-uv run python -m app.guidance.record_run stable_models/handoff_v5_3_50m_18/best.pt --distance-low 3 --distance-high 50
 uv run python -m app.guidance.record_run stable_models/handoff_v3_150_250_30_50_18ms/best.pt \
     --two-phase --distance 200 --switch-dist 30 --cruise-speed 18 --evaluate --n-scenarios 50
-uv run python -m app.guidance.record_run --rank-dir runs/<run> --top-n 5     # leaderboard of a run's checkpoints
+uv run python -m app.guidance.record_run runs/<acro run>/best.pt --acro --n-scenarios 75 --distance-low 3 --distance-high 5
 ```
 
 ## MLflow
@@ -148,7 +167,7 @@ uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_
     --out-path app/control/pretrained_bc_dagger.pt
 
 # 4. RTL training with the handoff stage (Isaac)
-<isaac-python> -u app/training/rtl_train_isaac.py --headless \
+<isaac-python> -u app/training/angle_rtl_train_isaac.py --headless \
     --num_envs 8192 --handoff --max-speed 18 \
     --distance-low 3 --distance-high 50 \
     --spawn-dist-low 150 --spawn-dist-high 250 \
@@ -158,9 +177,9 @@ uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_
     --checkpoint-dir runs/<new_run_name>
 ```
 
-Outputs go to `runs/<new_run_name>/`: `best.pt`, `latest_full.pt` (resume), `model_*.pt/.onnx`, `metrics.csv`,
-`run_config.json`, plots. Runs also log to MLflow. `runs/` is never committed. Copy a good run into `stable_models/` to
-release it.
+Outputs go to `runs/<new_run_name>/`: `best.pt`, `latest_full.pt` (the full training state; there is no `--resume`
+flag), `model_*.pt/.onnx`, `metrics.csv`, `run_config.json`, plots. Runs also log to MLflow. `runs/` is never
+committed. Copy a good run into `stable_models/` to release it.
 
 **Sizing a run.** One PPO update ("chunk") uses `256 x num_envs` samples, and `--total_timesteps` (default 128M) counts
 samples across all envs. At 8192 envs that is about 61 updates. Chunk-based settings (warmup, eval cadence, teacher
@@ -170,10 +189,21 @@ updates.
 Run `--help` on any script for every flag. The trainer's flags and logs are explained in
 [`app/training/rtl-handoff.md`](app/training/rtl-handoff.md).
 
+### Acro runs (single pass, no handoff)
+
+The acro policy flies the whole leg itself: no cruise controller, no switch distance. The stages lengthen the leg:
+250-500 m (s1, s2), 500-1000 m (s3), 1000-1500 m (s4). The exact commands are in `commands.txt`; the reward versions
+(`--reward v1` to `v4`) and the flags are in [`app/training/docs.md`](app/training/docs.md), and every console field is
+explained in [`logs_guide.md`](logs_guide.md). The v4 run hit 0.966 at 35.1 s with a 37.1 m/s mean, 1.0 m/s faster
+than the tuned reward-v3 run. It converges at a ~38 m/s cruise with thrust saturation at only 5-7%, so the ceiling is
+the reward (a hit pays the same at any pass speed), not the plant. A 25-chunk constant-LR fine-tune made it slower,
+which confirms it: the next lever is a terminal `v_hit` term, not more training.
+
 ## Tests
 
 ```bash
 uv run python -c "from app.test.test_config import test; test()"   # physics/config validation
+uv run pytest app/test --ignore=app/test/test_config.py              # reward / LOS / threat / checkpoint unit tests
 uv run python scripts/isaac_lab/diff_test_physics.py                 # torch physics == numpy oracle
 uv run python scripts/isaac_lab/diff_test_pid.py                     # torch PID == numpy PID
 <isaac-python> -u scripts/isaac_lab/diff_test_trajectory.py --headless --num_steps 100   # PhysX vs oracle
@@ -181,7 +211,9 @@ uv run python scripts/isaac_lab/diff_test_pid.py                     # torch PID
 
 ## Known limitations
 - The policy observes the **exact** target position. A noisy server-feed / camera estimator is planned
-  (`info/alt_model.md` section 4.2; `app/navigation` is the starting point).
-- The progress reward is path-independent, so handoff policies may climb before approaching
+  (`app/environmental/perception.py` is the starting point, `app/navigation` the estimator).
+- The handoff rewards are path-independent, so handoff policies may climb before approaching
+  (`app/reward_functions/docs.md`). The acro v4 reward adds an explicit path term.
+- The acro policy cruises at ~38 m/s, below the 52.1 m/s airframe limit: nothing in v4 pays for the pass speed
   (`app/reward_functions/docs.md`).
 - Wind and mass randomisation exist but are disabled.

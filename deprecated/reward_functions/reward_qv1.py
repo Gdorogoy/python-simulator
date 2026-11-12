@@ -1,4 +1,6 @@
-"""Isaac reward qv1: hit / log-potential progress / step / timeout / crash / tumble / tilt. See app/reward_functions/docs.md "qv1"."""
+"""Isaac reward qv1: hit / log-potential progress / step / timeout / crash / tumble / tilt.
+ See app/reward_functions/docs.md "qv1".
+ """
 
 from __future__ import annotations
 

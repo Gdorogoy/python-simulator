@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
+from app.training.config import WEIGHT_DECAY
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DEFAULT_LOG_STD_MIN, DEFAULT_LOG_STD_MAX = -3.0, 0.0
@@ -44,8 +46,10 @@ class ActorCritic(nn.Module):
         self.critic_head = nn.Linear(hidden, 1)
 
         # tanh-squashed actor output is rescaled into [action_low, action_high]; buffers so they are saved
-        self.register_buffer("action_low", torch.as_tensor(action_low, dtype=torch.float32))
-        self.register_buffer("action_high", torch.as_tensor(action_high, dtype=torch.float32))
+        # .clone(): as_tensor SHARES memory with a numpy input, so loading a checkpoint's buffers would overwrite the caller's
+        # array (the env's single_action_space bounds) and the "use this env's bounds" copy afterwards copied it onto itself
+        self.register_buffer("action_low", torch.as_tensor(action_low, dtype=torch.float32).clone())
+        self.register_buffer("action_high", torch.as_tensor(action_high, dtype=torch.float32).clone())
 
     def forward(self, obs):
         x = nn.functional.relu(self.shared(obs))
@@ -93,6 +97,16 @@ def load_bc_checkpoint(model, path, map_location=None):
     for ckpt_idx, model_idx in zip(ckpt_linear_idxs, model_linear_idxs):
         remapped[f"shared.{model_idx}.weight"] = raw_state[f"shared.{ckpt_idx}.weight"]
         remapped[f"shared.{model_idx}.bias"] = raw_state[f"shared.{ckpt_idx}.bias"]
+
+    # A checkpoint trained on a narrower observation (e.g. before threat slots were appended) still loads: the extra input
+    # columns start at zero, so the policy ignores them until training gives them weight. New features must go at the END.
+    first = f"shared.{model_linear_idxs[0]}.weight"
+    want, have = model.shared[model_linear_idxs[0]].in_features, remapped[first].shape[1]
+    if have > want:
+        raise ValueError(f"checkpoint {path!r} expects {have} observation inputs but the model has {want}")
+    if have < want:
+        remapped[first] = torch.cat([remapped[first], remapped[first].new_zeros(remapped[first].shape[0], want - have)], dim=1)
+        print(f"[load] {path}: observation widened {have} -> {want} (new inputs start at zero weight)")
 
     model.load_state_dict(remapped)
     return model
@@ -235,7 +249,7 @@ def ppo_train(env, total_timesteps: int, num_steps: int,
                              hidden=hidden, num_hidden_layers=num_hidden_layers, dropout=dropout,
                              log_std_min=log_std_min, log_std_max=log_std_max).to(device)
     if optimizer is None:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     if global_total_timesteps is None:
         global_total_timesteps = total_timesteps
 
@@ -321,7 +335,7 @@ def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
                              hidden=hidden, num_hidden_layers=num_hidden_layers, dropout=dropout,
                              log_std_min=log_std_min, log_std_max=log_std_max).to(device)
     if optimizer is None:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     if global_total_timesteps is None:
         global_total_timesteps = total_timesteps
 
@@ -399,7 +413,7 @@ def vec_ppo_train(vec_env, total_timesteps: int, num_steps: int,
 def warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: float, lam: float, lr: float = 3e-5,
                    max_grad_norm: float = 0.5):
     """Critic-only warm-up with the actor frozen (cosine-decayed lr)."""
-    critic_optimizer = torch.optim.Adam(model.critic_head.parameters(), lr=lr)
+    critic_optimizer = torch.optim.AdamW(model.critic_head.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     obs, _ = env.reset()
 
     for round_idx in range(num_rounds):
@@ -511,7 +525,7 @@ def isaac_ppo_train(env, total_timesteps: int, num_steps: int,
                              hidden=hidden, num_hidden_layers=num_hidden_layers, dropout=dropout,
                              log_std_min=log_std_min, log_std_max=log_std_max).to(device)
     if optimizer is None:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     if global_total_timesteps is None:
         global_total_timesteps = total_timesteps
 
@@ -604,7 +618,7 @@ def isaac_warmup_critic(env, model, num_rounds: int, num_steps: int, gamma: floa
     obs_dim = env.unwrapped.single_observation_space["policy"].shape[0]
     action_dim = env.unwrapped.single_action_space.shape[0]
 
-    critic_optimizer = torch.optim.Adam(model.critic_head.parameters(), lr=lr)
+    critic_optimizer = torch.optim.AdamW(model.critic_head.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     obs = env.reset()[0]["policy"]
 
     for round_idx in range(num_rounds):

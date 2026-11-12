@@ -6,7 +6,7 @@ tested.
 
 | Path | What it was | Replaced by |
 |---|---|---|
-| `training/train_isaac.py` | Non-RTL Isaac PPO trainer (produced the `stable_models/*_res01` models, PID-residual mode). | `app/training/rtl_train_isaac.py` |
+| `training/train_isaac.py` | Non-RTL Isaac PPO trainer (produced the `stable_models/*_res01` models, PID-residual mode). | `app/training/angle_rtl_train_isaac.py` |
 | `training/best_hparams_isaac.json` | Optuna-tuned hyperparameters for `train_isaac.py`. | RTL CLI defaults |
 | `training/base_training.py` | Numpy/PyBullet-era trainer (multiprocess CPU envs). | Isaac trainers. Shared constants moved to `app/training/config.py`. |
 | `training/phase_0_training.py`, `phase_1_training.py` | Original hover / single-axis curriculum. `phase_1_training` is already broken: it imports `reward_fn_phase1`, deleted in `c5c8775`. | `reward_qv2` + RTL |

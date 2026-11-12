@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drone Policy Viewer</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+
+<!-- No build step: the browser loads every library straight from a CDN and our own files from js/.
+     The importmap below is what makes `import React from 'react'` work in the .js files. -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://cdn.jsdelivr.net/npm/react@18.3.1/+esm",
+    "react-dom/client": "https://cdn.jsdelivr.net/npm/react-dom@18.3.1/client/+esm",
+    "htm": "https://cdn.jsdelivr.net/npm/htm@3.1.1/+esm",
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

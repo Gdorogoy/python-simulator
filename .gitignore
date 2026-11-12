@@ -22,6 +22,8 @@ mlartifacts/
 optuna/
 optuna_isaac/
 info/
+guide/
+
 
 # Demonstration datasets (regenerate with app/control/collect_demo_isaac.py)
 *.npz

@@ -6,7 +6,7 @@ monkeypatching _apply_action to send ONLY a known force (hover thrust, zero
 torque) or ONLY a known torque, one step at a time, and reading back
 root_lin_vel_w / root_ang_vel_b directly -- bypassing our own physics
 entirely so the numbers reflect PhysX/wrench-composer behavior alone, not
-anything in app.dynamics.torch_methods (already diff-tested bit-exact
+anything in app.dynamics.angle_style_torch_methods (already diff-tested bit-exact
 against the numpy oracle separately, see diff_test_physics.py).
 
 Kept for future debugging if this ever regresses (e.g. after an IsaacLab

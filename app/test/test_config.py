@@ -2,9 +2,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from app.dynamics import drone_params as P
 from app.dynamics.drone import create_quad_config
 from app.dynamics.drone import QuadState, Vector3D, Quaternion, QuadConfig
-from app.dynamics.methods import (
+from app.dynamics.angle_style_methods import (
     mixer, mixer_inversion, timestamp_update, thrust, torque,
 )
 
@@ -287,12 +288,12 @@ def test_configuration(config: QuadConfig, verbose: bool = True) -> bool:
 
 def test():
     config = create_quad_config(
-        mass=1.5,
-        inertia=(0.02, 0.02, 0.04),
-        arm_length=0.22,
-        drag_coeff=0.035,
-        max_rpm=12000,
-        motor_tau=0.05,
+        mass=P.MASS,
+        inertia=P.INERTIA,
+        arm_length=P.ARM_LENGTH,
+        drag_coeff=P.DRAG_COEFF,
+        max_rpm=P.MAX_RPM,
+        motor_tau=P.MOTOR_TAU,
     )
 
     test_configuration(config)

@@ -2,60 +2,123 @@ cd /mnt/e/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator
 
 
 
-#=====================mlflow and site for testing
+#===================== site for testing
 
 uv run uvicorn app.guidance.serve_run:app --port 8000
- /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db
-
-
-
-# 1. Collect demonstrations
-  /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/control/collect_demo_isaac.py --headless --num_envs 4096 --n_target_rows 2000000 --distance-low 3 --distance-high 10 --save-path app/control/demonstrations_isaac.npz
-
-
-# 2. BC pretrain
-uv run python -m app.control.pretrain_bc --demo-path app/control/demonstrations_isaac.npz --out-path app/control/pretrained_bc.pt
-
-# 3. DAgger refine
-
-/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/control/dagger_isaac.py --headless \
-      --num_envs 4096 --n_rounds 5 --rows_per_round 500000 \
-      --distance-low 3 --distance-high 10 \
-      --checkpoint-path app/control/pretrained_bc.pt \
-      --demo-path app/control/demonstrations_isaac.npz \
-      --out-path app/control/pretrained_bc_dagger.pt
-
-
-# 4. Full training
-/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/train_isaac.py --headless \
-    --num_envs 4096 --total_timesteps 128000000 \
-    --distance-low 3 --distance-high 50 \
-    --checkpoint-dir runs/base_training_isaac_3_50 \
-    --bc-checkpoint app/control/pretrained_bc_dagger.pt
-
-
-
-
-
-
-
-
-/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/rtl_train_isaac.py --headless \
-      --num_envs 8192 --handoff --max-speed 18 \
-      --distance-low 3 --distance-high 50 \
-      --spawn-dist-low 150 --spawn-dist-high 250 \
-      --obs-position-mode height \
-      --checkpoint-dir runs/rtl_handoff_v3_2p_150_250_3_50m \
-      --distill-start 0.25 --distill-end 0.05 --init-std 0.1 \
-      --bc-checkpoint runs/rtl_handoff_v2_2p_150_250_3_50m/best.pt \
-      --warmup-chunks 8
-
-
-
 
 
 ###============== mlflow
 
-/mnt/e/Isaac/env_igsaaclab/Scripts/python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -m mlflow ui --backend-store-uri sqlite:///mlflow_isaac.db
 
 
+#============== training  
+
+
+#======= angle
+
+
+
+
+cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/angle_rtl_train_isaac.py \
+  --headless \
+  --num_envs 8192 \
+  --total_timesteps 128000000 \
+  --handoff \
+  --max-speed 45 \
+  --distance-low 100 --distance-high 250 \
+  --spawn-dist-low 600 --spawn-dist-high 800 \
+  --obs-position-mode height \
+  --obs-layout v2 \
+  --reward rc \
+  --reward-json '{"intercept_radius": 1.0, "closing_lambda": 1.5, "c_step": 0.03, "los_k": 0.10, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 15, "los_b": 60, "zone_time": 0.0167, "post_hit_steps": 5, "r_zone_entry": 0, "tilt_limit_deg": 180, "roll_limit_deg": 360, "pitch_limit_deg": 360}' \
+  --teacher los \
+  --teacher-cruise-gain 4.0 \
+  --los-stop-speed 45 \
+  --los-max-tilt-deg 90 \
+  --teacher-bc-chunks 0 --teacher-bc-epochs 4 --teacher-bc-lr 3e-5 \
+  --bc-checkpoint runs/angle_los_40_160_600/best.pt \
+  --distill-start 1.0 --distill-end 0.05 --distill-decay-chunks 5 \
+  --settle-chunks 2 --warmup-chunks 2 --head-chunks 2 \
+  --init-std 0.15 --log-std-max -1.2 \
+  --lr-actor 1e-4 --lr-min-ratio 0.3 \
+  --abort-hit-rate 0 \
+  --num-allies 0 \
+  --num-threats 5 --active-threats 1 \
+  --threat-radius 1.0 --threat-speed 50 --threat-speed-min 45 \
+  --threat-spawn geometry --threat-geometry-weights 1 0 \
+  --threat-reaction-s 0.65 \
+  --threat-tail-gap 3 3 \
+  --threat-jitter 2 \
+  --threat-release-after 0 0 \
+  --checkpoint-dir runs/angle_evades_45_600
+
+
+#=========== acro
+
+cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe app/training/acro_rtl_train_isaac.py \
+    --num_envs 8192 \
+    --num-steps-per-chunk 256 \
+    --total_timesteps 52428800 \
+    --distance-low 1000 \
+    --distance-high 1500 \
+    --obs-position-mode height \
+    --tilt-limit 80 \
+    --tilt-margin 45 \
+    --hit-radius 1.0 \
+    --reward v4 \
+    --reward-json '{"speed_target": 50, "speed_accel": 16, "speed_end_speed": 50, "speed_leg": 75, "line_path_leg": 30, "line_lead_s": 0.5, "line_ref": 150, "attitude_soft_deg": 85, "attitude_leg": 8, "los_k": 0.1, "los_leg": 25, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 5, "los_b": 30, "closing_speed_k": 0.02, "closing_speed_ref": 20, "close_speed_leg": 10, "c_step": 0.03, "step_leg": 8, "closing_lambda": 2.5, "c_decel": 0.0, "tilt_limit_deg": 80, "k_miss": 2.0, "near_limit_s": 0, "r_time_bonus": 20, "time_bonus_budget_s": 40, "path_leg": 30, "path_slack": 0.10}' \
+    --gamma 0.995 \
+    --lam 1.0 \
+    --bc-checkpoint runs/acro_speed_s4_1000_1500_v4/best.pt \
+    --lr-actor 1e-4 \
+    --lr-min-ratio 1.0 \
+    --settle-chunks 0 \
+    --warmup-chunks 2 \
+    --head-chunks 0 \
+    --lr-ramp-chunks 0 \
+    --init-std 0.12 \
+    --log-std-max -1.5 \
+    --ent-coef 0.001 \
+    --guard-gain 1 \
+    --desync-steps 256 \
+    --eval-every 5 \
+    --stop-hit 0 \
+    --checkpoint-dir runs/acro_speed_s4_1000_1500_v5_ft \
+    --headless
+
+
+#========== test
+cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
+/mnt/e/Isaac/env_isaaclab/Scripts/python.exe app/training/acro_rtl_train_isaac.py \
+  --num_envs 8192 \
+  --total_timesteps 300000000 \
+  --distance-low 1000\
+  --distance-high 1500 \
+  --obs-position-mode height \
+  --tilt-limit 180 \
+  --hit-radius 1.0 \
+  --max-speed 65 \
+  --reward v2 \
+  --reward-json '{"closing_lambda": 2.5, "closing_speed_k": 0.02, "closing_speed_ref": 20, "c_step": 0.03, "c_decel": 0.0, "los_k": 0.10, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 5, "los_b": 30, "tilt_limit_deg": 180, "k_miss": 2.0, "near_limit_s": 0}' \
+  --gamma 0.995 \
+  --lam 0.98 \
+  --teacher acro \
+  --teacher-checkpoint runs/acro_speed_s4_1000_1500/best.pt\
+  --bc-checkpoint runs/acro_speed_s4_1000_1500/best.pt \
+  --distill-start 0.2 \
+  --distill-end 0.05 \
+  --distill-decay-chunks 20 \
+  --guard-gain 1 \
+  --lr-actor 3e-5 \
+  --init-std 0.12 \
+  --log-std-max -1.5 \
+  --ent-coef 0.001 \
+  --stop-hit 0.99 \
+  --stop-patience 2 \
+  --checkpoint-dir runs/acro_speed_s4_1000_1500_v2 \
+  --desync-steps 256\
+  --eval-every 15 \
+  --headless

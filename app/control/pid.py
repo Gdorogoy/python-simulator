@@ -1,6 +1,10 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from app.dynamics.drone_params import angle_action_bounds
+
+ANGLE_ACTION_LOW, ANGLE_ACTION_HIGH = angle_action_bounds()   # the env's bounds, so PID labels are never clipped differently
+
 
 def wrap_angle(angle):
     """Wraps an angle (rad) into (-pi, pi] so a yaw error never sees the
@@ -12,8 +16,8 @@ class PIDController:
     def __init__(self, kp_pos, kd_pos, kp_att, kd_att, kp_yaw, kd_yaw, max_tilt_rad=0.3,
                  ki_pos=0.0, ki_att=0.0, ki_yaw=0.0,
                  integral_limit_pos=0.3, integral_limit_att=0.3,
-                 action_low=(-1.5 * 9.81, -0.5, -0.5, -0.5),
-                 action_high=(1.5 * 9.81, 0.5, 0.5, 0.5)):
+                 action_low=ANGLE_ACTION_LOW,
+                 action_high=ANGLE_ACTION_HIGH):
 
         # p reacts to current error, d to rate of change (damps overshoot), i to accumulated error (kills steady-state offset).
 
