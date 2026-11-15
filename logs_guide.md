@@ -61,15 +61,19 @@ to 1.
 
 ## Eval chunks
 
-Two extra lines (three in handoff runs):
+Two extra lines (three in handoff runs, plus one more with a distance curriculum):
 
 ```
 [rtl]   eval endings: hit=0.950 caught=0.000 hover=0.010 oob=0.020 tilt=0.010 timeout=0.005 near_miss=0.005 escape=0.000 unfinished=0.000
 [rtl]   closest approach: perpendicular miss mean 1.40 m (p50 1.10, p90 2.70) | hit-flight mean speed 44.1 m/s
+[rtl]   distance buckets (training distribution): d0 hit 0.97 crash 0.02 (n=1013) | d1 hit 0.94 crash 0.03 (n=1427) | d2 hit 0.88 crash 0.05 (n=1656)
 ```
 
 - `eval endings` is the outcome split of the deterministic eval. `crash by bucket` (handoff only) splits `oob`+`tilt`
   by takeover speed.
+- `distance buckets` (`--buckets` only) is a separate deterministic pass on the **training** distribution. `eval_hit`
+  above it stays on `--distance-low/high`, so this line is where a long-range regression is visible even when the
+  aggregate rises on the short bucket. `d0/d1/d2` are the buckets in the order they were given.
 - The closest-approach line (v4) separates the two failure shapes:
   - **large `perp`** -> it flew past the target on a parallel line;
   - **small `perp` + large `min_dist`** -> it stopped short.
@@ -87,6 +91,8 @@ over time:
 - `eval_min_dist_p10/p50/p90` — sampled centre distance at closest approach.
 - `eval_perp_miss_mean/p50/p90`, `eval_hit_speed` — v4 only. `eval_hit_speed` is the episode mean over the
   episodes that hit (it includes the spool-up from rest), not the speed on the hit step.
+- `eval_hit_d0..d2`, `eval_crash_d0..d2`, `eval_n_d0..d2` — `--buckets` only: hit / crash / episode count per
+  distance bucket, from the extra pass on the training distribution.
 - `train_mean_lateral_m`, `train_speed_short_frac`, `train_perp_miss_m`, `train_hit_speed`.
 - `rew_*` — per-step contribution of each reward part.
 - `best_eval_hit` — the running best (what `BEST.json` records, with the checkpoint path, chunk and timesteps).

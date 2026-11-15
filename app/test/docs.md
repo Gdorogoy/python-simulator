@@ -27,7 +27,7 @@ Prints PASS/WARN/FAIL per check and ends with `RESULT: 7/7 checks passed`.
 project's standard config.
 
 ## Unit tests (pytest)
-Pure torch / numpy, no Isaac needed: `uv run pytest app/test --ignore=app/test/test_config.py` (95 tests). `test_config.py` is
+Pure torch / numpy, no Isaac needed: `uv run pytest app/test --ignore=app/test/test_config.py` (100 tests). `test_config.py` is
 not a pytest file: pytest collects its `test_configuration(config)` helper and errors on the missing `config` fixture.
 
 | File | What it pins down |
@@ -38,6 +38,7 @@ not a pytest file: pytest collects its `test_configuration(config)` helper and e
 | `test_reward_v3.py` | acro v3: the brake-limited target-speed profile and its cap, the crossing speed (`speed_end_speed`) and that it charges the final creep, the speed term paying exactly `speed_leg` per leg / tracking / sideways / away / near-target braking / gate / 0 = off, the cross-track term (saturates at `line_ref`, overshoot along the line is free), the soft attitude ramp to the hard cap and the "180 deg + no margin" no-op, `time_bonus_budget_s` accepted, unknown override refused, and `install_acro_reward_v3` end-to-end on a fake env (charges the slow env only, reset hook, `rew_*` and the `lat`/`short` diagnostics). |
 | `test_reward_v4.py` | acro v4: `segment_min_dist` on the step segment, the swept hit (crossing between two samples counts, point-only does not, a reset step cannot, `zone_time > 0` still needs sampled time inside), cross-track per METRE (same total at any speed, linear to `line_ref`), the `line_lead_s` look-ahead (drifting off the line is charged, a stationary offset is not), the terminal path bonus (full straight, half at half slack, 0 at slack / beyond / without a hit / with `path_leg` 0), v4 defaults and overrides, and `install_acro_reward_v4` on a fake env (forces `line_leg` 0, per-metre charge, reset odometer, `r_path` on a swept hit, `rew_path` / `train_hit_speed`). |
 | `test_reward_proportion.py` | `proportion.py`: `N(D)` at the 55 m/s limit and its clamps, per-step terms total one leg at 250/500/1000/1500 m, terminals are the leg values, miss at the radius edge, attempt beats giving up, `0 = off`, `auto_scale=False` unchanged, overrides. |
+| `test_distance_buckets.py` | `distance_buckets.py`: the default `--buckets` spec parses to the three weighted ranges, optional weights and whitespace, `none`/`off`/`0`/empty disable it, malformed specs are refused, the summary normalises weights, and the time-bonus clock is `distance / speed` clamped to the leg window (0 speed = keep the fixed clock). |
 | `test_threats_layout.py` | `layout_from_obs_dim` (23 + 7K [+2]), the sphere spawn shell and speed range, the numpy threat env's observation size and release wait. |
 | `test_carrot_pursuit.py` | `CarrotController`: flies straight on the spawn line, steers back toward the target when off it. |
 | `test_widen_checkpoint.py` | `load_bc_checkpoint`: a narrower checkpoint loads into a wider model (zero-padded inputs); a wider one is refused. |

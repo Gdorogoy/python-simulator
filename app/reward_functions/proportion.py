@@ -41,6 +41,12 @@ class RewardProportionMixin:
     # reference_speed), which no real flight ever beats (it starts at rest), so the bonus was always 0; set this to the
     # episode cap (e.g. 62.5) to pay for arriving early instead.
     time_bonus_budget_s: float = 0.0
+    # Distance-dependent version of the same clock: budget_s = clamp(start_distance / time_bonus_speed, min_leg_s,
+    # max_leg_s), recomputed per episode. 0 = off (fall back to time_bonus_budget_s, then to the reference-speed leg).
+    # A speed of 30 means "be faster than a 30 m/s average to earn bonus": 1200 m -> 40 s (the v4 fixed clock),
+    # 150 m -> 5 s (floored at min_leg_s). This is what makes the time bonus meaningful in a distance curriculum
+    # instead of paying ~max on every short episode.
+    time_bonus_speed: float = 0.0
     # ---- per-step accruals: total over one leg flown at the reference speed ----
     step_leg: float = 5.0                 # c_step: living cost of a whole leg
     hover_accrual_leg: float = 5.0        # c_hover: extra cost of stalling for the whole leg

@@ -231,6 +231,8 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         self._spawn_speed_range = None  # see set_spawn_speed_range
         self._obs_position_mode = "full"  # see set_obs_position_mode
         self._target_dist_range = None  # see set_target_distance_range
+        self._dist_buckets = None       # see set_target_distance_buckets (overrides the uniform range for resets)
+        self._bucket_id = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         # ---- threats (interceptors) and allies; K slots are allocated up front, unused ones are masked by *_alive ----
         K = int(cfg.max_threats)
@@ -1047,6 +1049,31 @@ class BaseDroneEnvIsaac(DirectRLEnv):
         """Fresh random target per reset (no pair pool): distance ~ U(low, high), uniform direction, random yaw."""
         self._target_dist_range = None if (low is None or high is None) else (float(low), float(high))
 
+    def set_target_distance_buckets(self, buckets):
+        """Distance curriculum: sample the spawn distance from weighted ranges instead of one uniform range.
+
+        `buckets` is a list of (low, high, weight); None or [] restores the uniform `set_target_distance_range` sampler.
+        The reward does not need to know: `proportion.leg` is derived from the episode's own start distance, so each
+        bucket rescales its own per-step costs. Used by the acro trainer's `--buckets`; eval clears it so the eval
+        stays on `--distance-low/high` (see `acro_rtl_train_isaac.isaac_eval`).
+        """
+        if not buckets:
+            self._dist_buckets = None
+            return
+        rows = [(float(lo), float(hi), float(w)) for lo, hi, w in buckets]
+        for lo, hi, w in rows:
+            if not (0.0 < lo < hi):
+                raise ValueError(f"distance bucket needs 0 < low < high, got {lo}..{hi}")
+            if w <= 0.0:
+                raise ValueError(f"distance bucket weight must be > 0, got {w}")
+        total = sum(w for _lo, _hi, w in rows)
+        dev = self.device
+        self._dist_buckets = (
+            torch.tensor([lo for lo, _hi, _w in rows], device=dev),
+            torch.tensor([hi for _lo, hi, _w in rows], device=dev),
+            torch.tensor([w / total for _lo, _hi, w in rows], device=dev),
+        )
+
     def set_spawn_speed_range(self, low: float | None, high: float | None = None):
         """Spawn already moving toward the target at U(low, high) m/s (simulates a handoff); None = spawn at rest."""
         self._spawn_speed_range = None if (low is None or high is None) else (float(low), float(high))
@@ -1089,12 +1116,21 @@ class BaseDroneEnvIsaac(DirectRLEnv):
             target_local = self._target_pairs_target[pool_idx]
             target_yaw = self._target_pairs_yaw[pool_idx]
             dist_mag = torch.linalg.norm(target_local - spawn_local, dim=-1)
+            bkt = None
         else:
-            lo, hi = self._target_dist_range or (3.0, 10.0)
-            dist_mag = torch.empty(n, device=self.device).uniform_(lo, hi)
+            if self._dist_buckets is not None:
+                # distance curriculum: pick a weighted range per env, then uniform inside it
+                blo, bhi, bw = self._dist_buckets
+                bkt = torch.multinomial(bw, n, replacement=True)
+                dist_mag = blo[bkt] + (bhi[bkt] - blo[bkt]) * torch.rand(n, device=self.device)
+            else:
+                bkt = None
+                lo, hi = self._target_dist_range or (3.0, 10.0)
+                dist_mag = torch.empty(n, device=self.device).uniform_(lo, hi)
+            sampled = self._dist_buckets is not None or self._target_dist_range is not None
             direction = torch.randn(n, 3, device=self.device)
             direction = direction / torch.linalg.norm(direction, dim=-1, keepdim=True).clamp_min(1e-6)
-            if self._target_dist_range is not None:
+            if sampled:
                 # mirror underground directions so the 0.5 m floor clamp never changes the distance
                 flip = (5.0 + direction[:, 2] * dist_mag) < 0.5
                 direction[:, 2] = torch.where(flip, -direction[:, 2], direction[:, 2])
@@ -1103,7 +1139,7 @@ class BaseDroneEnvIsaac(DirectRLEnv):
             target_local = spawn_local + direction * dist_mag.unsqueeze(-1)
             target_local[:, 2] = target_local[:, 2].clamp(min=0.5)
             target_yaw = torch.zeros(n, device=self.device)
-            if self._target_dist_range is not None:
+            if sampled:
                 target_yaw.uniform_(-math.pi, math.pi)
 
         self._desired_pos_w[env_ids] = target_local + self._terrain.env_origins[env_ids]
@@ -1134,6 +1170,7 @@ class BaseDroneEnvIsaac(DirectRLEnv):
             self._rate_cmd[env_ids] = 0.0
 
         self._start_dist[env_ids] = dist_mag
+        self._bucket_id[env_ids] = -1 if bkt is None else bkt
         self._prev_distance[env_ids] = dist_mag
         self._prev_position[env_ids] = spawn_local
         self._milestones_hit[env_ids] = False

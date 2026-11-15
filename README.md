@@ -2,7 +2,7 @@
 
 ## Update
 
-- The acro policy now flies the full 1000-1500 m leg in one pass: 0.966 hit rate, 35.1 s (PID 85s , LoS 45s) 37.1 m/s avg on hit.
+- The acro policy now flies the full 1000-1500 m leg in one pass: 0.966 hit rate, 35.1 s (PID 85s , LoS 45s) 37.1 m/s avg on hit, and `--buckets` now trains 100-200 / 500-800 / 1000-1500 m slices with a distance-scaled reward clock.
 - Reference notes live in `app/<folder>/docs.md` and `logs_guide.md`.
 
 - starting to teach the drones on not relaying on 2-phase but rather fly from 0 → target.
@@ -197,7 +197,9 @@ The acro policy flies the whole leg itself: no cruise controller, no switch dist
 explained in [`logs_guide.md`](logs_guide.md). The v4 run hit 0.966 at 35.1 s with a 37.1 m/s mean, 1.0 m/s faster
 than the tuned reward-v3 run. It converges at a ~38 m/s cruise with thrust saturation at only 5-7%, so the ceiling is
 the reward (a hit pays the same at any pass speed), not the plant. A 25-chunk constant-LR fine-tune made it slower,
-which confirms it: the next lever is a terminal `v_hit` term, not more training.
+which confirms it: the next lever is a terminal `v_hit` term, not more training. Add `--buckets` to train on the
+100-200 / 500-800 / 1000-1500 m distribution with a distance-scaled time clock; the eval stays on
+`--distance-low/high` and logs a per-bucket split (`eval_hit_d0..d2`).
 
 ## Tests
 

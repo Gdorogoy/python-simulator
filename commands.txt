@@ -68,13 +68,18 @@ cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
     --tilt-limit 80 \
     --tilt-margin 45 \
     --hit-radius 1.0 \
+    --max-speed 60 \
     --reward v4 \
-    --reward-json '{"speed_target": 50, "speed_accel": 16, "speed_end_speed": 50, "speed_leg": 75, "line_path_leg": 30, "line_lead_s": 0.5, "line_ref": 150, "attitude_soft_deg": 85, "attitude_leg": 8, "los_k": 0.1, "los_leg": 25, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 5, "los_b": 30, "closing_speed_k": 0.02, "closing_speed_ref": 20, "close_speed_leg": 10, "c_step": 0.03, "step_leg": 8, "closing_lambda": 2.5, "c_decel": 0.0, "tilt_limit_deg": 80, "k_miss": 2.0, "near_limit_s": 0, "r_time_bonus": 20, "time_bonus_budget_s": 40, "path_leg": 30, "path_slack": 0.10}' \
+    --reward-json '{"speed_target": 50, "speed_accel": 16, "speed_end_speed": 22, "speed_leg": 50, "line_path_leg": 30, "line_lead_s": 0.5, "line_ref": 150, "attitude_soft_deg": 85, "attitude_leg": 8, "los_k": 0.1, "los_leg": 25, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 5, "los_b": 30, "closing_speed_k": 0.02, "closing_speed_ref": 20, "close_speed_leg": 10, "c_step": 0.03, "step_leg": 8, "closing_lambda": 2.5, "c_decel": 0.0, "tilt_limit_deg": 80, "k_miss": 2.0, "near_limit_s": 0, "r_time_bonus": 20, "time_bonus_budget_s": 62.5, "path_leg": 30, "path_slack": 0.10}' \
     --gamma 0.995 \
     --lam 1.0 \
-    --bc-checkpoint runs/acro_speed_s4_1000_1500_v4/best.pt \
-    --lr-actor 1e-4 \
-    --lr-min-ratio 1.0 \
+    --bc-checkpoint stable_models/acro_1000_1500_40ms/best.pt \
+    --teacher acro \
+    --teacher-checkpoint stable_models/acro_1000_1500_40ms/best.pt \
+    --distill-start 0.33 \
+    --distill-end 0.0 \
+    --lr-actor 3e-4 \
+    --lr-min-ratio 0.05 \
     --settle-chunks 0 \
     --warmup-chunks 2 \
     --head-chunks 0 \
@@ -86,39 +91,16 @@ cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
     --desync-steps 256 \
     --eval-every 5 \
     --stop-hit 0 \
-    --checkpoint-dir runs/acro_speed_s4_1000_1500_v5_ft \
+    --buckets \
+    --runner \
+    --runner-speed 30 \
+    --runner-escape-dist 750 \
+    --checkpoint-dir runs/interceptor_v1_bckts_runner30 \
     --headless
 
 
-#========== test
+#========== for workflow
+
+
 cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
 /mnt/e/Isaac/env_isaaclab/Scripts/python.exe app/training/acro_rtl_train_isaac.py \
-  --num_envs 8192 \
-  --total_timesteps 300000000 \
-  --distance-low 1000\
-  --distance-high 1500 \
-  --obs-position-mode height \
-  --tilt-limit 180 \
-  --hit-radius 1.0 \
-  --max-speed 65 \
-  --reward v2 \
-  --reward-json '{"closing_lambda": 2.5, "closing_speed_k": 0.02, "closing_speed_ref": 20, "c_step": 0.03, "c_decel": 0.0, "los_k": 0.10, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 5, "los_b": 30, "tilt_limit_deg": 180, "k_miss": 2.0, "near_limit_s": 0}' \
-  --gamma 0.995 \
-  --lam 0.98 \
-  --teacher acro \
-  --teacher-checkpoint runs/acro_speed_s4_1000_1500/best.pt\
-  --bc-checkpoint runs/acro_speed_s4_1000_1500/best.pt \
-  --distill-start 0.2 \
-  --distill-end 0.05 \
-  --distill-decay-chunks 20 \
-  --guard-gain 1 \
-  --lr-actor 3e-5 \
-  --init-std 0.12 \
-  --log-std-max -1.5 \
-  --ent-coef 0.001 \
-  --stop-hit 0.99 \
-  --stop-patience 2 \
-  --checkpoint-dir runs/acro_speed_s4_1000_1500_v2 \
-  --desync-steps 256\
-  --eval-every 15 \
-  --headless

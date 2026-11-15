@@ -63,12 +63,18 @@ approach: at 1500 m `N = 1636` steps ≈ 27 s, so a 30 s run already pays 3 step
 The `min_leg_s` floor keeps short legs from getting an impossibly tight budget (250 m would be 4.5 s at the limit; it is
 scored against 7.5 s of settling time instead).
 
-**The time bonus and `time_bonus_budget_s`.** `r_time_bonus` is paid on a hit, scaled by the fraction of its budget
+**The time bonus and its clock.** `r_time_bonus` is paid on a hit, scaled by the fraction of its budget
 left. With `auto_scale` that budget is `N`, which no real flight beats (the drone starts at rest, so a 1250 m leg takes
-~2500 steps against `N = 1364`) — `time_left` clamps to 0 and the bonus was **always 0**. Set
-`time_bonus_budget_s` to a real clock (e.g. 62.5, the episode cap) to pay for arriving early: a hit at 30 s pays ~52 %
-of `r_time_bonus`, a hit at the cap pays 0. Default 0 keeps the per-leg budget (the old behaviour), so nothing changes
-unless you opt in.
+~2500 steps against `N = 1364`) — `time_left` clamps to 0 and the bonus was **always 0**. Two fields replace the clock:
+
+- `time_bonus_budget_s`: one fixed clock for every episode (e.g. 62.5, the episode cap). A hit at 30 s pays ~52 % of
+  `r_time_bonus`, a hit at the cap pays 0.
+- `time_bonus_speed`: a **distance-dependent** clock, `budget_s = clamp(start_distance / time_bonus_speed, min_leg_s,
+  max_leg_s)`, recomputed per episode. Use it with a distance curriculum: a fixed clock saturates at short range (a
+  150 m hit pays nearly the full bonus however it flies). `time_bonus_speed = 30` reproduces a fixed 40 s at ~1200 m
+  and gives a 150 m leg 7.5 s (the floor). It takes priority over `time_bonus_budget_s`.
+
+Default 0 / 0 keeps the per-leg budget (the old behaviour), so nothing changes unless you opt in.
 
 **Defaults.** Per-step accruals: `step_leg` 5, `hover_accrual_leg` 5, `away_leg` 3, `decel_leg` 3, `tumble_leg` 2,
 `tilt_leg` 5, `progress_leg` 10, `closing_leg` 15, `axis_leg` 15, `los_leg` 3, `close_speed_leg` 10. One-off
@@ -76,7 +82,8 @@ terminals: `hit_leg` 50, `hover_leg` 45, `crash_leg` 45, `timeout_leg` 45, `esca
 `intercepted_leg` 45, `zone_entry_leg` 7, `path_leg` 0, `miss_leg` 30. Acro v3 only: `speed_leg` 25 (on), `line_leg` 0
 and `attitude_leg` 0 (off until enabled). Acro v4: `line_path_leg` 0, `line_lead_s` 0, `path_slack` 0.10 (with
 `path_leg` 0 = off). Leg window: `reference_speed` 55 m/s, `min_leg_s` 7.5
-(settling floor, same as `step_budget.MIN_EPISODE_SECONDS`), `max_leg_s` 62.5 (the default episode).
+(settling floor, same as `step_budget.MIN_EPISODE_SECONDS`), `max_leg_s` 62.5 (the default episode). Time-bonus clock:
+`time_bonus_budget_s` 0 (fixed seconds) and `time_bonus_speed` 0 (distance-dependent, m/s; takes priority) — both off.
 
 **Why `c_step` is there.** `c_step` is the **per-step living cost**, not a terminal, so it is the one term that has to
 be divided by `N`: flying the whole leg costs `step_leg` (5) whatever the distance. Without it a policy can park/loiter
@@ -92,7 +99,8 @@ Every give-up ending costs more than a failed attempt (`hover`, `timeout`, `cras
 `compute_*` functions keep using the fields exactly as given, which is what the unit tests call — `auto_scale` is
 deliberately inert there. The acro time bonus (`r_time_bonus * time_left_frac`) is measured against `N` when
 `auto_scale` is on, instead of the old `steps_for_dist` budget (which was about 1 m/s and made a normal approach score
-`time_left ≈ 0.95`); `time_bonus_budget_s` replaces `N` with a fixed clock, because `N` is unreachable in practice.
+`time_left ≈ 0.95`); `time_bonus_budget_s` replaces `N` with a fixed clock, because `N` is unreachable in practice,
+and `time_bonus_speed` replaces it with a per-episode `start_distance / speed` clock for a distance curriculum.
 
 Because the absolute fields are derived, when `auto_scale=True` the `*_leg` fields win and the old absolute fields
 (`c_step`, `r_hit`, `r_crash`, `r_hover`, `r_timeout`, `los_k`, ...) are ignored — set a leg field instead. To turn a

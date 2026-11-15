@@ -1,1 +1,41 @@
-# test
+name: Run Python Simulator
+
+
+#when to run
+on:
+  push:
+    branches: [ "main", "dev" ]
+  workflow_dispatch:
+# to not run too much
+concurrency:
+  group: gpu-sim-runner
+  cancel-in-progress: true
+
+# what to run
+jobs:
+  simulate:
+    runs-on: self-hosted # to run this pc
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[train-drone]')  # to run only if needed
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      #some checks
+      - name: Check GPU
+        run: nvidia-smi
+
+      # self explanatory
+      - name: Sync code to Windows project folder
+        run: |
+          rsync -av --delete \
+            --exclude='.git' \
+            --exclude='runs/' \
+            --exclude='stable_models/' \
+            ./ /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator/
+
+      # finally trian it
+      - name: Run simulation
+        run: |
+          cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator
+          python3 app/workflow/workflow.py

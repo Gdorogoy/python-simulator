@@ -11,6 +11,7 @@ history.
 |---|---|
 | `angle_rtl_train_isaac.py` | **Main trainer.** PPO with a separate critic, PID-teacher distillation with an adaptive guard, phased unfreezing, the controller->policy handoff stage, in-Isaac eval, MLflow and plots. |
 | `acro_rtl_train_isaac.py` | **Acro trainer.** DAgger-BC from a teacher (the LOS controller by default, or a frozen angle-style policy), then PPO + fading distillation with `acro_reward_v1`. Same console line as the angle trainer. |
+| `distance_buckets.py` | Pure helpers for the acro trainer's `--buckets`: parse `lo-hi:weight` specs, summarise them, and size the distance-dependent time-bonus clock (`distance / speed`, clamped to the leg window). |
 | `rtl-handoff.md` | Guide for the trainer above. |
 | `base_training_isaac.py` | Earlier Isaac stage trainer (`train()`, PID-residual mode). The RTL trainer still imports its imitation stage, kinematics helper and JSON metric log. `train()` itself is only used by `deprecated/training/train_isaac.py`. |
 | `config.py` | Shared PPO / imitation hyperparameters (`PARAMS`, imitation and entropy constants). |
@@ -36,7 +37,8 @@ Useful flags (all have `--help` text):
 | Flag | What it does |
 |---|---|
 | `--handoff`, `--max-speed`, `--spawn-dist-low/high` | Handoff stage: speed buckets, and the carrot leg flown from spawn. |
-| `--distance-low/high` | The policy's own range: handoff distance `h`. |
+| `--distance-low/high` | The policy's own range: handoff distance `h`, and the eval range when a curriculum is on. |
+| `--buckets [SPEC]` (acro) | Distance curriculum: pass alone for `100-200:0.25,500-800:0.35,1000-1500:0.40`, or give `lo-hi:weight,...`. Also turns on the distance-dependent time bonus. See "Distance buckets" in the acro section. |
 | `--obs-position-mode {full,height}` | `height` removes absolute x/y. Use it for new runs. |
 | `--bc-checkpoint`, `--anchor-checkpoint` | Start weights, and the frozen policy used as the distillation anchor. |
 | `--distill-start/end/decay-chunks`, `--guard-*` | Teacher-loss schedule and the eval-driven guard that boosts it. |
@@ -174,7 +176,8 @@ the other drone's current position.
 
 ## acro_rtl_train_isaac
 Trainer for `Isaac-Acro-Drone-Direct-v0`. It reuses the PPO update, phases and logging of the angle trainer: the task is
-"reach a target at U(distance-low, distance-high) m", optionally behind the same handoff stage (`--handoff`).
+"reach a target at U(distance-low, distance-high) m" (or from the `--buckets` curriculum), optionally behind the same
+handoff stage (`--handoff`).
 
 **Teacher (`--teacher`, 2026-10-24).** `los` = `LosTeacher`: the angle trainer's line-of-sight controller (`make_los_label`) produces
 an angle-style action `[thrust_delta, tau_x, tau_y, tau_z]`, and `angle_to_acro` turns it into a rate command with the same
@@ -228,6 +231,29 @@ control then passes to the policy, with a random sideways velocity (<= `--latera
 - Hit time includes the controller leg. The eval start is the clean spawn point, so it is not comparable with from-rest or launched evals.
 Checked in Isaac with a 15-chunk, 256-env smoke run only (wiring, not performance): all 256 eval envs reached the takeover point (distance error
 +0.02 m, takeover speed about 9 m/s) and training, eval and the summary ran to the end.
+
+**Distance buckets (`--buckets`, 2026-11-12).** `--buckets` with no value samples each training episode's spawn distance from
+`100-200:0.25, 500-800:0.35, 1000-1500:0.40` instead of U(`--distance-low`, `--distance-high`). An explicit spec overrides it
+(`--buckets "200-400:0.5,800-1200:0.5"`); omitting the flag (or `--buckets none`) keeps the single uniform range. Weights are
+normalised and the distance is uniform inside a range. The sampler is in the shared env
+(`base_drone_env_isaac.set_target_distance_buckets`, `_reset_idx`), not in an acro subclass, because there is one Isaac env class
+and both trainers use it (`drone_style` only changes the plant); the *default* lives in the acro trainer, so the angle trainer
+gets no curriculum unless it opts in. `_bucket_id` records each running episode's bucket (used by the eval and available to any
+reward). `--distance-low/high` stay the eval range, so every eval still measures the long-range skill.
+- The per-leg reward needs no change: `proportion.resolve_proportion` computes `leg = clamp(start_distance / 55, min_leg_s,
+  max_leg_s)` once per episode, so each bucket rescales its own per-step costs. Consequence: the 100-200 m bucket hits the 7.5 s
+  floor, so its per-step terms are ~2.5x stronger per second of flight than the 1000-1500 m bucket. That is the per-leg contract
+  working, but the short bucket is not "the same task, shorter" — judge the buckets separately, never by the aggregate alone.
+- `--buckets` also turns on the distance-dependent time bonus (`proportion.time_bonus_speed = 30`, unless `--reward-json`
+  sets `time_bonus_speed`; a fixed `time_bonus_budget_s` in the JSON is replaced, with a printed note): `budget =
+  clamp(start_distance / 30, min_leg_s, max_leg_s) s`, so a 150 m hit is
+  scored against ~7.5 s and a 1200 m hit against 40 s (the v4 fixed clock). A fixed `time_bonus_budget_s` would pay nearly the
+  full bonus on every short episode and leave no pace gradient there.
+- Eval runs one extra deterministic pass on the training buckets (after the normal `--distance-low/high` pass and the noisy pass)
+  and logs `eval_hit_d0..d2`, `eval_crash_d0..d2`, `eval_n_d0..d2`; the console prints
+  `distance buckets (training distribution): d0 hit ... crash ... (n=...)`. `eval_hit` / `success_rate` stay on the eval range.
+- `run_name` carries `_bk<N>` instead of the distance pair. Ignored with `--handoff` (the handoff stage sets every episode's
+  distance), with a printed note.
 
 **Teacher conversion.** The angle actor outputs `[thrust_delta, tau_x, tau_y, tau_z]`; the acro action is
 `[thrust_delta, p, q, r]`. The rate loop outputs `I * kp * (cmd - w)`, so `cmd = w + tau / (I * kp)` reproduces the

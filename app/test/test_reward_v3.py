@@ -173,9 +173,11 @@ def test_attitude_ramps_from_soft_to_the_hard_cap():
 
 def test_overrides_accept_every_new_field():
     cfg = _cfg(speed_target=48.0, speed_accel=14.0, speed_leg=20.0, speed_min_dist=2.0,
-               line_leg=6.0, line_ref=40.0, attitude_soft_deg=80.0, attitude_leg=5.0, time_bonus_budget_s=62.5)
+               line_leg=6.0, line_ref=40.0, attitude_soft_deg=80.0, attitude_leg=5.0,
+               time_bonus_budget_s=62.5, time_bonus_speed=30.0)
     assert (cfg.speed_target, cfg.speed_leg, cfg.line_leg, cfg.attitude_soft_deg) == (48.0, 20.0, 6.0, 80.0)
     assert cfg.time_bonus_budget_s == 62.5                      # from proportion.py: restores the time bonus
+    assert cfg.time_bonus_speed == 30.0                         # ... and the distance-dependent version
 
 
 def test_unknown_override_is_refused():

@@ -55,6 +55,11 @@ replaced per instance by `install_reward_qv1/qv2` (see `reward_functions/docs.md
 - **Spawn and targets:** use `set_target_pairs` (a fixed pool) or `set_target_distance_range` (a fresh target each
   reset: uniform direction and random yaw). Underground directions are mirrored upward, so the 0.5 m floor clamp
   never changes the distance.
+- **`set_target_distance_buckets`** replaces the single uniform distance with a weighted distance curriculum
+  (`[(100, 200, 0.25), (500, 800, 0.35), (1000, 1500, 0.40)]`): one range is drawn per reset, then a uniform
+  distance inside it. It overrides `set_target_distance_range` while set; `None` restores the uniform sampler.
+  `_bucket_id` records the drawn bucket per env (`-1` = uniform). Used by the acro trainer's `--buckets`; the
+  angle trainer keeps its single range.
 - **`set_spawn_speed_range`** spawns the drone already moving toward its target, simulating a PID handoff. A policy
   trained only from rest never sees the cruise-speed state a real handoff leaves it in.
 - **Action space** must be an explicit bounded `Box`. A bare int creates an unbounded Box, and `ActorCritic`'s tanh

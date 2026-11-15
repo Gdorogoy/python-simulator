@@ -348,10 +348,14 @@ def install_acro_reward(unwrapped_env, cfg: AcroRewardConfig | None = None) -> A
         cfg_eff = resolve_proportion(self._acro_cfg, ref_dist, step_dt)      # one leg = one unit of reward
         # time bonus: with auto_scale it is measured against the physical per-leg flight time; otherwise against the same
         # per-distance budget the eval uses (control.step_budget.steps_for_dist, in policy steps), NOT the 62 s episode.
-        # `time_bonus_budget_s` overrides both with a fixed clock: the per-leg budget is the flight time at the REFERENCE
-        # speed, and no real flight beats it (it starts at rest), so the bonus was 0 on every hit. Set it to the episode
-        # cap to pay for arriving early.
-        if cfg.time_bonus_budget_s > 0:
+        # `time_bonus_speed` / `time_bonus_budget_s` override both: the former with a per-episode distance / speed
+        # clock (distance curricula), the latter with one fixed clock. The per-leg budget is the flight time at the
+        # REFERENCE speed, and no real flight beats it (it starts at rest), so the bonus was 0 on every hit.
+        if getattr(cfg, "time_bonus_speed", 0.0) > 0:
+            # distance-dependent clock: one budget per episode, from the leg this env actually has to fly
+            budget_steps = torch.clamp(ref_dist / float(cfg.time_bonus_speed),
+                                       min=float(cfg.min_leg_s), max=float(cfg.max_leg_s)) / step_dt
+        elif cfg.time_bonus_budget_s > 0:
             budget_steps = float(cfg.time_bonus_budget_s) / step_dt
         elif cfg.auto_scale:
             budget_steps = leg_steps(ref_dist, step_dt, cfg)

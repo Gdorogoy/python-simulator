@@ -24,6 +24,7 @@ import torch
 
 from app.guidance.train import ActorCritic, load_bc_checkpoint
 from app.training.config import WEIGHT_DECAY
+from app.training.distance_buckets import DEFAULT_BUCKETS, describe_buckets, parse_buckets
 # angle trainer pieces that do not depend on the angle env / PID teacher (Isaac is only imported inside its functions)
 from app.training.angle_rtl_train_isaac import (
     NAN, PidTeacher, RTLActorCritic, RunLog, _py, apply_phase, cosine_factor, distill_scheduled, log_prob_raw,
@@ -324,14 +325,25 @@ def bc_train(model, optimizer, buf, steps, minibatch):
 # ===== Eval =====
 
 @torch.no_grad()
-def isaac_eval(env, model, steps, tilt_limit_deg, noisy=False, teacher=None):
+def isaac_eval(env, model, steps, tilt_limit_deg, noisy=False, teacher=None, dist_buckets=None):
     """Eval on the real task; first episode per env only, with a per-distance time budget. noisy=False: tanh(mean);
-    noisy=True: the exploration noise of training (to tell a policy that needs its noise from one that does not)."""
+    noisy=True: the exploration noise of training (to tell a policy that needs its noise from one that does not).
+
+    `dist_buckets`: None pins the eval to U(--distance-low, --distance-high), even when the trainer samples a distance
+    curriculum (the saved curriculum is restored right after the reset that samples it). Pass the bucket list to run the
+    pass on the curriculum instead: the returned `hit_d*/crash_d*/n_d*` rows are grouped by the bucket each env was
+    spawned in.
+    """
     from app.control.step_budget import steps_for_dist
     u = env.unwrapped
     N, dev = u.num_envs, u.device
     from app.reward_functions.acro_reward_v1 import zero_acro_clock
+    saved_buckets = getattr(u, "_dist_buckets", None)
+    u.set_target_distance_buckets(dist_buckets)   # None = uniform --distance-low/high
     obs = env.reset()[0]["policy"]
+    bucket0 = getattr(u, "_bucket_id", None)
+    bucket0 = bucket0.clone() if bucket0 is not None else None
+    u._dist_buckets = saved_buckets               # the sampler only runs on reset; training keeps its curriculum
     zero_acro_clock(u)   # eval scores true first episodes: every clock back to 0
     speed0 = getattr(u, "_spawn_speed", torch.zeros(N, device=dev)).clone()   # handoff: the sampled takeover speed
     outcome = torch.zeros(N, dtype=torch.long, device=dev)
@@ -448,6 +460,13 @@ def isaac_eval(env, model, steps, tilt_limit_deg, noisy=False, teacher=None):
             res[f"hit_b{bi}"] = ((outcome == EVAL_CODES["hit"]) & m).sum().item() / n_b
             res[f"crash_b{bi}"] = (((outcome == EVAL_CODES["oob"]) | (outcome == EVAL_CODES["tilt"])) & m).sum().item() / n_b
             res[f"n_b{bi}"] = float(m.sum().item())
+    if dist_buckets and bucket0 is not None and bool((bucket0 >= 0).any()):
+        for bi in range(len(dist_buckets)):       # distance-curriculum eval pass: one row per spawn bucket
+            m = bucket0 == bi
+            n_b = max(int(m.sum().item()), 1)
+            res[f"hit_d{bi}"] = ((outcome == EVAL_CODES["hit"]) & m).sum().item() / n_b
+            res[f"crash_d{bi}"] = (((outcome == EVAL_CODES["oob"]) | (outcome == EVAL_CODES["tilt"])) & m).sum().item() / n_b
+            res[f"n_d{bi}"] = float(m.sum().item())
     hit = outcome == EVAL_CODES["hit"]
     res["hit_time_s"] = (hit_step[hit].mean() * float(u.step_dt)).item() if bool(hit.any()) else NAN
     res["tilt_max_mean_deg"] = math.degrees(tilt_max.mean().item())
@@ -585,6 +604,13 @@ def build_parser():
     p.add_argument("--total_timesteps", type=int, default=128_000_000, help="PPO samples (the BC stage is extra)")
     p.add_argument("--distance-low", type=float, default=3.0)
     p.add_argument("--distance-high", type=float, default=50.0)
+    p.add_argument("--buckets", nargs="?", const=DEFAULT_BUCKETS, default=None, metavar="SPEC",
+                   help="distance curriculum: draw each training episode's spawn distance from weighted ranges instead of "
+                        f"U(--distance-low, --distance-high). Pass --buckets alone for the default '{DEFAULT_BUCKETS}', or give a "
+                        "spec like '200-400:0.5,800-1200:0.5'. --distance-low/high stay the eval range. Also switches the time "
+                        "bonus to a distance-dependent clock (budget = start_distance / 30 m/s, clamped to the leg bounds); an "
+                        "explicit time_bonus_speed in --reward-json wins, and a fixed time_bonus_budget_s is replaced. "
+                        "Ignored with --handoff.")
     p.add_argument("--checkpoint-dir", default="runs/acro_isaac")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--num-steps-per-chunk", type=int, default=256)
@@ -749,6 +775,18 @@ def run(env, args):
         overrides.setdefault("zone_time", args.zone_time)
     overrides.setdefault("tilt_limit_deg", args.tilt_limit)
     overrides.setdefault("tilt_hard_margin_deg", args.tilt_margin)
+    dist_buckets = args.dist_buckets
+    if args.handoff and dist_buckets is not None:
+        print("[rtl] --buckets ignored with --handoff: the handoff stage sets every episode's distance")
+        dist_buckets = None
+    if dist_buckets is not None and "time_bonus_speed" not in overrides:
+        # A fixed clock saturates on the short buckets (a 150 m episode leaves ~max bonus no matter how it flies), so
+        # the budget follows the episode's own distance. 30 m/s reproduces the v4 run's fixed 40 s at ~1200 m.
+        # An explicit "time_bonus_speed": 0 in --reward-json keeps a fixed clock (set budget_s as well).
+        if "time_bonus_budget_s" in overrides:
+            print("[rtl] --buckets: replacing the fixed time_bonus_budget_s with a distance-dependent clock")
+            overrides.pop("time_bonus_budget_s")
+        overrides["time_bonus_speed"] = 30.0
     if args.reward == "v4":
         from app.reward_functions.acro_reward_v4 import AcroRewardV4Config, install_acro_reward_v4
         rcfg = install_acro_reward_v4(u, AcroRewardV4Config.from_overrides(overrides))
@@ -808,13 +846,21 @@ def run(env, args):
     u.set_obs_position_mode(args.obs_position_mode)
     u.set_target_pairs(None)
     u.set_target_distance_range(args.distance_low, args.distance_high)
+    u.set_target_distance_buckets(dist_buckets)
+    if dist_buckets is not None:
+        clock = (f"start_distance / {rcfg.time_bonus_speed:g} m/s, clamped to {rcfg.min_leg_s:g}-{rcfg.max_leg_s:g} s"
+                 if getattr(rcfg, "time_bonus_speed", 0.0) > 0 else "off")
+        print(f"[rtl] distance buckets: {describe_buckets(dist_buckets)} | eval stays on U({args.distance_low:g}, "
+              f"{args.distance_high:g}) m | time bonus clock {clock}")
     if args.spawn_speed_low is not None and args.spawn_speed_high is not None:
         u.set_spawn_speed_range(args.spawn_speed_low, args.spawn_speed_high)
         print(f"[rtl] spawn: moving at U({args.spawn_speed_low}, {args.spawn_speed_high}) m/s toward the target")
     else:
         u.set_spawn_speed_range(None, None)
         print("[rtl] spawn: from rest")
-    print(f"[rtl] distance U({args.distance_low}, {args.distance_high}) m | hit radius {rcfg.hit_threshold:g} m for {rcfg.zone_time:g} s | tilt limit {rcfg.tilt_limit_deg} deg "
+    dist_txt = (f"distance buckets {describe_buckets(dist_buckets)}" if dist_buckets is not None
+                else f"distance U({args.distance_low:g}, {args.distance_high:g}) m")
+    print(f"[rtl] {dist_txt} | hit radius {rcfg.hit_threshold:g} m for {rcfg.zone_time:g} s | tilt limit {rcfg.tilt_limit_deg} deg "
           f"(hard cap {rcfg.tilt_limit_deg + rcfg.tilt_hard_margin_deg} deg) | obs position mode {args.obs_position_mode}")
 
     teacher = (LosTeacher(env, gains_by_dist, args) if teacher_mode == "los"
@@ -905,7 +951,8 @@ def run(env, args):
     base_lr = {g["name"]: g["lr"] for g in groups}
     plain = ActorCritic(obs_dim, a_dim, low, high, hidden=hidden, num_hidden_layers=layers, dropout=0.0).to(device)
 
-    run_name = f"acro_isaac_{args.distance_low:g}_{args.distance_high:g}_L{rcfg.tilt_limit_deg:g}" + (f"_run{args.runner_speed:g}" if args.runner else "")
+    dist_tag = f"bk{len(dist_buckets)}" if dist_buckets is not None else f"{args.distance_low:g}_{args.distance_high:g}"
+    run_name = f"acro_isaac_{dist_tag}_L{rcfg.tilt_limit_deg:g}" + (f"_run{args.runner_speed:g}" if args.runner else "")
     run_key = f"{run_name}_{run_start.strftime('%Y%m%d_%H%M%S')}"
     start_run(experiment_name="acro-isaac", run_name=run_name)
     with open(os.path.join(args.checkpoint_dir, "run_config.json"), "w") as f:
@@ -984,6 +1031,12 @@ def run(env, args):
             eval_row["success_rate"] = success
             evn = isaac_eval(env, model, args.eval_steps, rcfg.tilt_limit_deg, noisy=True)
             eval_row.update({f"evalnoisy_{k}": v for k, v in evn.items()})
+            if dist_buckets is not None:
+                # extra deterministic pass on the training distribution: the aggregate eval above stays on
+                # --distance-low/high, so this is what tells a long-range regression apart from a short-bucket gain
+                evd = isaac_eval(env, model, args.eval_steps, rcfg.tilt_limit_deg, dist_buckets=dist_buckets)
+                eval_row.update({f"eval_{k}": v for k, v in evd.items()
+                                 if k.startswith(("hit_d", "crash_d", "n_d"))})
             if teacher is not None and (chunk % max(1, args.pid_eval_every) == 0 or not pid_row):
                 pv = isaac_eval(env, model, args.eval_steps, rcfg.tilt_limit_deg, teacher=teacher)
                 pid_success = pv["hit"]
@@ -1079,6 +1132,12 @@ def run(env, args):
                             ("hit", "caught", "hover", "oob", "tilt", "timeout", "near_miss", "escape", "unfinished"))   # no chasers here: caught is always 0
             print(f"[rtl]   eval endings: {ends}" + (f" | crash by bucket "
                   + "/".join("%.2f" % eval_row["eval_crash_b%d" % i] for i in range(3)) if "eval_crash_b0" in eval_row else ""))
+            if "eval_hit_d0" in eval_row:
+                btxt = " | ".join(
+                    f"d{i} hit {eval_row['eval_hit_d%d' % i]:.2f} crash {eval_row['eval_crash_d%d' % i]:.2f} "
+                    f"(n={eval_row['eval_n_d%d' % i]:.0f})"
+                    for i in range(len(dist_buckets)))
+                print(f"[rtl]   distance buckets (training distribution): {btxt}")
             if "eval_ho_n" in eval_row:
                 e = eval_row
                 print(f"[rtl]   handoff check (n={e['eval_ho_n']:.0f}, before perturbation): "
@@ -1147,6 +1206,10 @@ def main():
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    try:
+        args.dist_buckets = parse_buckets(args.buckets)   # fail before the Isaac app starts
+    except ValueError as e:
+        parser.error(str(e))
     sim_app = AppLauncher(args).app
 
     import gymnasium as gym
