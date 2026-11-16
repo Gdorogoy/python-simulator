@@ -1,10 +1,9 @@
 name: Run Python Simulator
 
-
 #when to run
 on:
   push:
-    branches: [ "main", "dev" ]
+    branches: ["main", "dev"]
   workflow_dispatch:
 # to not run too much
 concurrency:
@@ -15,7 +14,7 @@ concurrency:
 jobs:
   simulate:
     runs-on: self-hosted # to run this pc
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[train-drone]')  # to run only if needed
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[train-drone]') # to run only if needed
 
     steps:
       - name: Checkout repository
@@ -39,3 +38,15 @@ jobs:
         run: |
           cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator
           python3 app/workflow/workflow.py
+
+      # so the weight could actually be stored
+      - name: Collect training results
+        run: python3 app/workflow/collect_results.py
+
+      # so the weigths could actually be used
+      - name: Upload training artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-results-${{ github.run_number }}
+          path: runs/
+          retention-days: 3

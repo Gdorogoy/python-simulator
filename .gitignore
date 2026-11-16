@@ -31,3 +31,7 @@ guide/
 # Released models: keep best.pt / .onnx / configs / plots, drop resume + intermediate weights
 stable_models/*/latest_full.pt
 stable_models/handoff_*/model_*.pt
+
+
+#brain graph file
+./brain
