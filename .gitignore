@@ -34,4 +34,4 @@ stable_models/handoff_*/model_*.pt
 
 
 #brain graph file
-./brain
+.brain/
