@@ -296,6 +296,9 @@ PROFILES = {
         "script": "app/training/angle_rtl_train_isaac.py",
         "checkpoint_dir": "runs/angle_evader_workflow",
         "params": {
+            # the trainer's default is runs/rtl_isaac; pass the profile's dir explicitly so collect_results.py
+            # (which reads checkpoint_dir from this file) finds the run afterwards
+            "--checkpoint-dir": "runs/angle_evader_workflow",
             # Environment & rollout: ground start, NO handoff -- the policy flies the whole leg from rest.
             # (--handoff False emits no flag; the handoff-only --spawn-dist-*/--prefix-*/--lateral-frac/
             #  --handoff-tilt-* are gone with it. --from-rest also kills the legacy --spawn-speed-* spawn.)
@@ -333,10 +336,12 @@ PROFILES = {
             "--log-std-min": -3.5,
             "--log-std-max": -1.2,
             "--ent-coef": 0.0,
-            # frozen-policy teacher. The angle trainer has no --teacher-checkpoint (that is the acro flag):
-            # --anchor-checkpoint defaults to --bc-checkpoint, so one path feeds both the student init and the teacher.
-            "--teacher": "policy",
+            # teacher = straight line of sight (no checkpoint is used as a teacher). --bc-checkpoint only seeds the
+            # STUDENT; its 60-160 m hover prior tumbles from rest (teacher check: hit 0.08, tilt crash 0.92), so it
+            # is not trusted to demonstrate takeoff -- PPO + the LOS teacher have to discover that.
+            "--teacher": "los",
             "--bc-checkpoint": "stable_models/angle_600_40ms_non_evader/best.pt",
+            # no --anchor-checkpoint / --teacher-checkpoint: with --teacher los there is no frozen policy teacher
             "--distill-start": 0.25,
             "--distill-end": 0.00,
             "--distill-decay-chunks": 20,
