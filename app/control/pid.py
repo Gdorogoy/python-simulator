@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from app.control.tilt import tilt_cone_np
 from app.dynamics.drone_params import angle_action_bounds
 
 ANGLE_ACTION_LOW, ANGLE_ACTION_HIGH = angle_action_bounds()   # the env's bounds, so PID labels are never clipped differently
@@ -76,8 +77,7 @@ class PIDController:
         accel_body_x = accel_cmd[0] * cos_yaw + accel_cmd[1] * sin_yaw
         accel_body_y = -accel_cmd[0] * sin_yaw + accel_cmd[1] * cos_yaw
 
-        des_roll=np.clip(-accel_body_y/9.81,-self.max_tilt_rad,self.max_tilt_rad)
-        des_pitch=np.clip(accel_body_x/9.81,-self.max_tilt_rad,self.max_tilt_rad)
+        des_roll, des_pitch = tilt_cone_np(-accel_body_y/9.81, accel_body_x/9.81, self.max_tilt_rad)
 
         att_err = np.array([des_roll - roll, des_pitch - pitch])
         self.integral_att = np.clip(self.integral_att + att_err * dt,

@@ -6,6 +6,8 @@ WIN_PROJECT = Path(
     "/mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator"
 )
 
+
+# correct path goes here use the same as in -checkpoint-dir
 RUN_REL_DIR = Path("runs/interceptor_v1_bckts_runner30")
 
 EXACT_FILES = [

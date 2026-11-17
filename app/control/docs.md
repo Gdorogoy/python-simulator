@@ -11,6 +11,7 @@ The classical controllers and the imitation-learning pipeline built on them. The
 | File | What it holds |
 |---|---|
 | `pid.py` | `PIDController`: cascaded position -> attitude P(I)D (numpy, one drone). |
+| `tilt.py` | `tilt_cone_np` / `tilt_cone_torch`: the one isotropic tilt-cone clamp (`|roll, pitch| <= tan(max_tilt)`) used by the PID, the teacher, the carrot and LOS. |
 | `torch_pid.py` | `TorchPIDController`: batched mirror with per-env gains, plus `assign_gains_by_distance`. |
 | `los.py` / `los_np.py` | Line-of-sight velocity controller: `velocity_to_action` (shared by the LOS teacher and the threat/runner drones) and `chase_velocity` / `hold_velocity`. The two files are identical maths (torch / numpy); `test_los_np.py` diffs them. |
 | `tune_pid.py` | Closed-form gains per distance -> `best_pid_gains_per_dist.json` and `best_pid_gains.json`. |
@@ -28,7 +29,8 @@ The classical controllers and the imitation-learning pipeline built on them. The
 
 ## PID
 - **Outer loop:** `accel_cmd = kp_pos * err - kd_pos * vel`. The x/y acceleration becomes a desired tilt (`accel / g`,
-  clipped to `max_tilt_rad`). z drives thrust directly.
+  scaled isotropically onto the tilt cone `|roll, pitch| <= tan(max_tilt_rad)` by `tilt.py`; one definition shared by
+  the numpy PID, the torch teacher, the carrot and LOS). z drives thrust directly.
 - The world-frame x/y acceleration is rotated by **-yaw** into the drone's heading frame before mapping to roll and
   pitch. Without this, the mapping is only correct at yaw = 0.
 - **Inner loops:** roll, pitch and yaw torque from the attitude error and rate.
@@ -57,11 +59,13 @@ There is no search: the gains come from pole placement on the real plant (`creat
 - `v_des` comes from the caller: the braking profile for the LOS teacher, full speed for a chaser. The loop is
   `a_cmd = cruise_gain * (v_des - vel)`; `a_cmd_xy` is rotated by -yaw into the heading frame and mapped to
   `roll = -a_y / g`, `pitch = a_x / g`; thrust compensates the bank (`/ cos(tilt)`).
-- **The tilt clamp is isotropic.** The `(roll, pitch)` vector is scaled so that
-  `|roll, pitch| <= tan(max_tilt)`, i.e. the total tilt `atan(|a_xy| / g)` is the cap. The older form clipped roll and
-  pitch **per axis** to `max_tilt`, so on a diagonal target one axis saturated first, the commanded direction rotated,
-  and the teacher bowed (~90 m on a 30 deg azimuth) or left the bounds. The diagonal now gets the same tilt budget as a
-  cardinal direction, and the direction is preserved. `max_tilt` is in **radians**.
+- **The tilt clamp is isotropic, and shared.** `app/control/tilt.py` (`tilt_cone_np` / `tilt_cone_torch`) scales the
+  `(roll, pitch)` vector so that `|roll, pitch| <= tan(max_tilt)`, i.e. the total tilt `atan(|a_xy| / g)` is the cap.
+  The older form clipped roll and pitch **per axis** to `max_tilt`, so on a diagonal target one axis saturated first, the
+  commanded direction rotated, and the teacher bowed (~90 m on a 30 deg azimuth) or left the bounds. The diagonal now gets
+  the same tilt budget as a cardinal direction, and the direction is preserved. `max_tilt` is in **radians**. LOS was the
+  first user of the cone; the numpy PID, the torch PID teacher (BC labels), the carrot (`two_phase.py`,
+  `angle_rtl_train_isaac._carrot_action`) now call the same helper, so the limit cannot drift between controllers.
 - `chase_velocity` has no braking profile and no lead; it points at `rel` and applies `speed_cap`. The tilt clamp is
   the airframe's limit, not a chaser setting.
 

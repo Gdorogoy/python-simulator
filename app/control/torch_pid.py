@@ -6,6 +6,7 @@ import math
 
 import torch
 
+from app.control.tilt import tilt_cone_torch
 from app.dynamics.drone_params import angle_action_bounds
 
 ANGLE_ACTION_LOW, ANGLE_ACTION_HIGH = angle_action_bounds()   # the env's bounds, as in control/pid.py
@@ -91,8 +92,7 @@ class TorchPIDController:
         accel_body_x = accel_cmd[:, 0] * cos_yaw + accel_cmd[:, 1] * sin_yaw
         accel_body_y = -accel_cmd[:, 0] * sin_yaw + accel_cmd[:, 1] * cos_yaw
 
-        des_roll = torch.clamp(-accel_body_y / 9.81, -self.max_tilt_rad, self.max_tilt_rad)
-        des_pitch = torch.clamp(accel_body_x / 9.81, -self.max_tilt_rad, self.max_tilt_rad)
+        des_roll, des_pitch = tilt_cone_torch(-accel_body_y / 9.81, accel_body_x / 9.81, self.max_tilt_rad)
 
         att_err_roll = des_roll - roll
         att_err_pitch = des_pitch - pitch

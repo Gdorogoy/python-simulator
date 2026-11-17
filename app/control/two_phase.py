@@ -8,6 +8,7 @@ import torch
 from scipy.spatial.transform import Rotation
 
 from app.control.pid import PIDController
+from app.control.tilt import tilt_cone_np
 from app.dynamics.drone import Quaternion, Vector3D
 from app.dynamics.drone_params import GRAVITY, MASS
 from app.environmental.base_drone_env import POS_SCALE, _symlog_scale
@@ -124,8 +125,7 @@ class CarrotController:
         thrust_delta += self.hover_thrust * (1.0 / max(np.cos(roll) * np.cos(pitch), 0.2) - 1.0)
         c, sn = np.cos(yaw), np.sin(yaw)
         ax, ay = accel_xy[0] * c + accel_xy[1] * sn, -accel_xy[0] * sn + accel_xy[1] * c
-        des_roll = np.clip(-ay / 9.81, -self.max_tilt, self.max_tilt)
-        des_pitch = np.clip(ax / 9.81, -self.max_tilt, self.max_tilt)
+        des_roll, des_pitch = tilt_cone_np(-ay / 9.81, ax / 9.81, self.max_tilt)
         roll_t = g["kp_att"] * (des_roll - roll) - g["kd_att"] * ang[0]
         pitch_t = g["kp_att"] * (des_pitch - pitch) - g["kd_att"] * ang[1]
         yaw_t = g["kp_yaw"] * wrap_angle(target_yaw - yaw) - g["kd_yaw"] * ang[2]

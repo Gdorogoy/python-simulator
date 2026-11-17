@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 from app.control.los import velocity_to_action
+from app.control.tilt import tilt_cone_torch
 from app.environmental.base_drone_env import VEL_SCALE  # obs-normalisation constant, needed outside run() too
 from app.guidance.train import ActorCritic, compute_gae, load_bc_checkpoint
 from app.training.config import WEIGHT_DECAY
@@ -406,8 +407,7 @@ def install_handoff_stage(u, *, max_speed, prefix_low, prefix_high, lateral_frac
         accel_body_x = accel_xy[:, 0] * cos_yaw + accel_xy[:, 1] * sin_yaw
         accel_body_y = -accel_xy[:, 0] * sin_yaw + accel_xy[:, 1] * cos_yaw
         max_tilt = carrot_pid.max_tilt_rad
-        des_roll = torch.clamp(-accel_body_y / 9.81, -max_tilt, max_tilt)
-        des_pitch = torch.clamp(accel_body_x / 9.81, -max_tilt, max_tilt)
+        des_roll, des_pitch = tilt_cone_torch(-accel_body_y / 9.81, accel_body_x / 9.81, max_tilt)
 
         roll_torque = carrot_pid.kp_att * (des_roll - roll) - carrot_pid.kd_att * ang_vel[:, 0]
         pitch_torque = carrot_pid.kp_att * (des_pitch - pitch) - carrot_pid.kd_att * ang_vel[:, 1]

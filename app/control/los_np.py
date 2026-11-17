@@ -7,6 +7,8 @@ import math
 
 import numpy as np
 
+from app.control.tilt import tilt_cone_np
+
 G = 9.81
 CHASER_CRUISE_GAIN = 4.0     # velocity-loop gain of a chasing drone: the same as the teacher's (--teacher-cruise-gain 4), so it brakes and turns like the learner
 
@@ -26,13 +28,8 @@ def velocity_to_action(v_des, vel, ang_vel, roll, pitch, yaw, yaw_des, *, hover_
     cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
     accel_body_x = accel_cmd[:, 0] * cos_yaw + accel_cmd[:, 1] * sin_yaw
     accel_body_y = -accel_cmd[:, 0] * sin_yaw + accel_cmd[:, 1] * cos_yaw
-    # isotropic tilt clamp: scale the (roll, pitch) vector to the cone |a_xy| / g <= tan(max_tilt)
-    raw_roll, raw_pitch = -accel_body_y / G, accel_body_x / G
-    cap = math.tan(float(max_tilt))
-    norm = np.maximum(np.sqrt(raw_roll ** 2 + raw_pitch ** 2), 1e-9)
-    scale = np.minimum(cap / norm, 1.0)
-    des_roll = raw_roll * scale
-    des_pitch = raw_pitch * scale
+    # isotropic tilt cone (shared definition, see app/control/tilt.py)
+    des_roll, des_pitch = tilt_cone_np(-accel_body_y / G, accel_body_x / G, max_tilt)
 
     roll_torque = kp_att * (des_roll - roll) - kd_att * ang_vel[:, 0]
     pitch_torque = kp_att * (des_pitch - pitch) - kd_att * ang_vel[:, 1]
