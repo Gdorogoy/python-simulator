@@ -5,6 +5,12 @@ on:
   push:
     branches: ["main", "dev"]
   workflow_dispatch:
+    inputs:
+      profile:
+        description: "Training profile"
+        type: choice
+        options: [acro, angle]
+        default: acro
 # to not run too much
 concurrency:
   group: gpu-sim-runner
@@ -15,6 +21,8 @@ jobs:
   simulate:
     runs-on: self-hosted # to run this pc
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[train-drone]') # to run only if needed
+    env:
+      PROFILE: ${{ inputs.profile || 'acro' }} # manual runs pick it, pushes default to acro
 
     steps:
       - name: Checkout repository
@@ -37,16 +45,16 @@ jobs:
       - name: Run simulation
         run: |
           cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator
-          python3 app/workflow/workflow.py
+          python3 app/workflow/workflow.py --profile "$PROFILE"
 
       # so the weight could actually be stored
       - name: Collect training results
-        run: python3 app/workflow/collect_results.py
+        run: python3 app/workflow/collect_results.py --profile "$PROFILE"
 
       # so the weigths could actually be used
       - name: Upload training artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: training-results-${{ github.run_number }}
+          name: training-results-${{ inputs.profile || 'acro' }}-${{ github.run_number }}
           path: runs/
           retention-days: 3

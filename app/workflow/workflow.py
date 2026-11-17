@@ -1,106 +1,96 @@
+"""Run a training profile on the self-hosted runner (called by .github/workflows/main.yml).
+
+    python3 app/workflow/workflow.py                     # profile: acro (default)
+    python3 app/workflow/workflow.py --profile angle
+    python3 app/workflow/workflow.py --profile angle --set num_envs=4096 --set total_timesteps=10000000
+    python3 app/workflow/workflow.py --profile acro --dry-run     # print the command only
+    python3 app/workflow/workflow.py --list
+
+The profile (trainer script, CLI params, run folder) lives in app/workflow/profiles.py. --set overrides one value
+without editing anything: booleans as true/false, numbers/JSON as JSON, everything else as a string.
+"""
+from __future__ import annotations
+
+import argparse
 import json
 import subprocess
 import sys
+from pathlib import Path
 
-ISAAC_PYTHON = "/mnt/e/Isaac/env_isaaclab/Scripts/python.exe"
-TRAIN_SCRIPT = "app/training/acro_rtl_train_isaac.py"
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-REWARD_CONFIG = {
-    "speed_target": 50,
-    "speed_accel": 16,
-    "speed_end_speed": 22,
-    "speed_leg": 50,
-    "line_path_leg": 30,
-    "line_lead_s": 0.5,
-    "line_ref": 150,
-    "attitude_soft_deg": 85,
-    "attitude_leg": 8,
-    "los_k": 0.1,
-    "los_leg": 25,
-    "los_gate_frac": 0.0,
-    "los_aligned": 0.0,
-    "los_a": 5,
-    "los_b": 30,
-    "closing_speed_k": 0.02,
-    "closing_speed_ref": 20,
-    "close_speed_leg": 10,
-    "c_step": 0.03,
-    "step_leg": 8,
-    "closing_lambda": 2.5,
-    "c_decel": 0.0,
-    "tilt_limit_deg": 80,
-    "k_miss": 2.0,
-    "near_limit_s": 0,
-    "r_time_bonus": 20,
-    "time_bonus_budget_s": 62.5,
-    "path_leg": 30,
-    "path_slack": 0.10,
-}
-
-PARAMS = {
-    # Environment & rollout
-    "--num_envs": 8192,
-    "--num-steps-per-chunk": 256,
-    "--total_timesteps": 52428800,
-    "--distance-low": 1000,
-    "--distance-high": 1500,
-    "--obs-position-mode": "height",
-    "--tilt-limit": 80,
-    "--tilt-margin": 45,
-    "--hit-radius": 1.0,
-    "--max-speed": 60,
-
-    # Reward
-    "--reward": "v4",
-    "--reward-json": json.dumps(REWARD_CONFIG),
-
-    # PPO & Distillation
-    "--gamma": 0.995,
-    "--lam": 1.0,
-    "--bc-checkpoint": "stable_models/acro_1000_1500_40ms/best.pt",
-    "--teacher": "acro",
-    "--teacher-checkpoint": "stable_models/acro_1000_1500_40ms/best.pt",
-    "--distill-start": 0.33,
-    "--distill-end": 0.0,
-    "--lr-actor": 3e-4,
-    "--lr-min-ratio": 0.05,
-    "--settle-chunks": 0,
-    "--warmup-chunks": 2,
-    "--head-chunks": 0,
-    "--lr-ramp-chunks": 0,
-    "--init-std": 0.12,
-    "--log-std-max": -1.5,
-    "--ent-coef": 0.001,
-    "--guard-gain": 1,
-    "--desync-steps": 256,
-
-    # Eval & Curriculum / Runner
-    "--eval-every": 5,
-    "--stop-hit": 0,
-    "--buckets": True,
-    "--runner": True,
-    "--runner-speed": 30,
-    "--runner-escape-dist": 750,
-
-    # Output & Execution
-    "--checkpoint-dir": "runs/interceptor_v1_bckts_runner30",
-    "--headless": True,
-}
+from app.workflow.profiles import ISAAC_PYTHON, get_profile, profile_names  # noqa: E402
 
 
-def main():
-    cmd = [ISAAC_PYTHON, TRAIN_SCRIPT]
-    for flag, value in PARAMS.items():
-        if isinstance(value, bool):
-            if value:
-                cmd.append(flag)
+def normalize_flag(flag: str) -> str:
+    return flag if flag.startswith("--") else f"--{flag}"
+
+
+def parse_value(text: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def build_cmd(profile: str, overrides: dict | None = None, isaac_python: str = ISAAC_PYTHON) -> list[str]:
+    """Full command for the profile: python + trainer + every CLI flag (dict -> JSON, list -> one token each)."""
+    prof = get_profile(profile)
+    params = dict(prof["params"])
+    params.update(overrides or {})
+    cmd = [isaac_python, prof["script"]]
+    for flag, value in params.items():
+        if value is None or value is False:
+            continue
+        flag = normalize_flag(flag)
+        if value is True:
+            cmd.append(flag)
+        elif isinstance(value, dict):
+            cmd.extend([flag, json.dumps(value)])
+        elif isinstance(value, (list, tuple)):
+            cmd.append(flag)
+            cmd.extend(str(v) for v in value)
         else:
             cmd.extend([flag, str(value)])
+    return cmd
 
-    print("Executing command:\n", " ".join(cmd), "\n", flush=True)
-    result = subprocess.run(cmd)
-    sys.exit(result.returncode)
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--profile", default="acro", choices=profile_names(), help="which trainer config to run")
+    p.add_argument("--set", dest="overrides", action="append", default=[], metavar="FLAG=VALUE",
+                   help="override one profile value, repeatable (the flag may be written with or without --)")
+    p.add_argument("--isaac-python", default=ISAAC_PYTHON, help="interpreter that has Isaac Lab (default: $ISAAC_PYTHON)")
+    p.add_argument("--dry-run", action="store_true", help="print the command, do not run it")
+    p.add_argument("--print-run-dir", action="store_true", help="print the profile's checkpoint dir and exit (for CI)")
+    p.add_argument("--list", action="store_true", help="list the profiles and exit")
+    args = p.parse_args(argv)
+
+    if args.list:
+        for name in profile_names():
+            prof = get_profile(name)
+            print(f"{name:8s} {prof['script']}  ->  {prof['checkpoint_dir']}  ({len(prof['params'])} params)")
+        return 0
+
+    overrides: dict[str, object] = {}
+    for item in args.overrides:
+        if "=" not in item:
+            p.error(f"--set expects FLAG=VALUE, got {item!r}")
+        flag, _, value = item.partition("=")
+        overrides[normalize_flag(flag)] = parse_value(value)
+
+    if args.print_run_dir:
+        print(get_profile(args.profile)["checkpoint_dir"])
+        return 0
+
+    cmd = build_cmd(args.profile, overrides, args.isaac_python)
+    print(f"profile: {args.profile}\ncommand: {' '.join(cmd)}\n", flush=True)
+    if args.dry_run:
+        return 0
+    return subprocess.run(cmd).returncode
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

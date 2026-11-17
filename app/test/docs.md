@@ -27,12 +27,13 @@ Prints PASS/WARN/FAIL per check and ends with `RESULT: 7/7 checks passed`.
 project's standard config.
 
 ## Unit tests (pytest)
-Pure torch / numpy, no Isaac needed: `uv run pytest app/test --ignore=app/test/test_config.py` (107 tests). `test_config.py` is
+Pure torch / numpy, no Isaac needed: `uv run pytest app/test --ignore=app/test/test_config.py` (117 tests). `test_config.py` is
 not a pytest file: pytest collects its `test_configuration(config)` helper and errors on the missing `config` fixture.
 
 | File | What it pins down |
 |---|---|
 | `test_tilt_cone.py` | `app/control/tilt.py`: numpy and torch agree, a diagonal saturates the cone (not 1.41x the cap at the box's corner), an off-diagonal keeps its heading, inside the cone nothing changes, and the numpy PID / torch teacher both use it. |
+| `test_workflow_profiles.py` | `app/workflow`: every profile's script exists and every flag is a real trainer flag, `build_cmd` handles dict/list/bool/None, `--set` typing, distinct run dirs, and `collect_results` copying out of the run folder (and failing loudly when it is missing). |
 | `test_rc_reward.py` | `compute_reward_rc`: closing and retreat, the potential telescopes, hover and timeout, zone entry then hold, the post-hit window, caught beats hit, attitude limits, zone-timer features, per-axis progress, the line-of-sight term and its bands. |
 | `test_acro_reward.py` | `compute_acro_reward`: quaternion tilt, tilt zones, no limit at 180 deg, faster hits pay more, the away penalty's grace, the braking penalty's zone and direction (and that it ignores attitude). |
 | `test_acro_reward_v2.py` | `compute_los_term` (acro v2): aligned / sideways / away cost, slow and gated = 0, `los_k 0` off, `cos` mode, unknown override refused. |
