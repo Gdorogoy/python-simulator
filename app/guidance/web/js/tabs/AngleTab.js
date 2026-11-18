@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { html } from '../html.js';
 import { postForm } from '../api.js';
 import { addHandoffFields, useCheckpointChoice, useHandoffForm, useRunner, useStoredState } from '../hooks.js';
-import { Card, Chips, NumberField, Status, Toggle } from '../components/ui.js';
+import { Card, Chips, NumberField, SelectField, Status, Toggle } from '../components/ui.js';
 import { CheckpointCard } from '../components/CheckpointCard.js';
 import { HandoffFields, HandoffToggle } from '../components/HandoffFields.js';
 import { ChasersCard, THREAT_DEFAULTS, addChaserFields, useChasers } from '../components/ChasersCard.js';
@@ -21,6 +21,14 @@ const PRESETS = {
   rtl: { label: 'Isaac RTL checkpoint (250 m, switch 40)', distance: 250, switchDist: 40 },
   short: { label: 'Short test (30 m, switch 20)', distance: 30, switchDist: 20 },
 };
+const RATE_OPTIONS = [
+  { value: '4', label: '60 Hz (4 physics steps per action, as in Isaac)' },
+  { value: '1', label: '240 Hz (1 step per action)' },
+];
+const HIT_RULE_OPTIONS = [
+  { value: 'acro', label: 'First step inside / swept (like acro)' },
+  { value: 'trained', label: 'Trained dwell (hold the zone)' },
+];
 
 // One sentence about what the selected checkpoint was trained with.
 function describeCheckpoint(info) {
@@ -29,6 +37,7 @@ function describeCheckpoint(info) {
   if (info.max_speed != null) parts.push(`max speed ${info.max_speed} m/s`);
   if (info.spawn_dist_low != null) parts.push(`spawn leg ${info.spawn_dist_low}-${info.spawn_dist_high} m`);
   if (info.num_threats) parts.push(`${info.active_threats} of ${info.num_threats} chasing drone slots on (speed ${info.threat_speed ?? '?'} m/s)`);
+  if (info.rc_reward) parts.push(`trained rc endings: hit ${info.rc_hit_radius} m held ${info.rc_zone_time_s} s, tilt crash at ${info.rc_tilt_limit_deg} deg`);
   parts.push(`position input: ${info.obs_position_mode}`);
   let text = parts.join(', ');
   if (info.distance_high != null) text += ` | switch distance should be <= ${info.distance_high} m`;
@@ -56,6 +65,8 @@ export function AngleTab({ checkpoints }) {
   const [recentre, setRecentre] = useState(false);
   const [recentreZ, setRecentreZ] = useStoredState('tpRecentreZ', '20');
   const [hitRadius, setHitRadius] = useStoredState('tpHitRadius', '');
+  const [policyRate, setPolicyRate] = useStoredState('tpRepeat', '4');
+  const [hitRule, setHitRule] = useStoredState('tpHitRule', 'acro');
   const { status, busy, run, setStatus } = useRunner();
   const [result, setResult] = useState(null);       // { kind: 'flight' | 'batch', data, ... }
 
@@ -63,6 +74,7 @@ export function AngleTab({ checkpoints }) {
   const info = choice.info;
   useEffect(() => {
     if (!info) { setRecentre(false); return; }
+    if (info.handoff != null) form.setHandoffOn(!!info.handoff);   // start in the mode the run was trained/evaluated in
     if (info.lateral_frac != null) {
       form.setLateral(String(info.lateral_frac));
       form.setTilt(String(info.handoff_tilt_deg ?? 0));
@@ -101,6 +113,8 @@ export function AngleTab({ checkpoints }) {
     addHandoffFields(formData, form, 0);
     if (recentre && !recentreDisabled) formData.append('recentre_z', recentreZ || 20);
     addChaserFields(formData, chasers);
+    formData.append('action_repeat', policyRate);
+    formData.append('hit_rule', hitRule);
     if (hitRadius) formData.append('hit_radius', hitRadius);
     return formData;
   }
@@ -129,6 +143,16 @@ export function AngleTab({ checkpoints }) {
     form.setSwitchDist(String(PRESETS[key].switchDist));
   }
 
+  const hitZoneHint = info && info.rc_reward
+    ? (hitRule === 'acro'
+        ? `The first policy step inside counts as a Hit; a pass through the sphere between two policy steps also counts (the acro eval's rule). Empty = ${info.rc_hit_radius} m (the run's value). The model's zone-timer inputs keep the radius it was trained with.`
+        : `The flight scores a Hit after the drone has stayed this close for the run's trained dwell (${info.rc_zone_time_s} s), then keeps flying ${info.rc_post_hit_steps} more policy steps. Empty = ${info.rc_hit_radius} m (the run's value). The model's zone-timer inputs keep the radius it was trained with.`)
+    : 'The flight ends as a Hit the moment the drone is this close to the target. Empty = 0.25 m.';
+
+  const hitRuleNote = !info || !info.rc_reward ? null : (hitRule === 'acro'
+    ? `Scored like the acro eval: first policy step inside the zone, or a swept pass-through between steps. This is NOT the rc checkpoint's trained rule (hit = ${info.rc_hit_radius} m held ${info.rc_zone_time_s} s). Tilt crash at ${info.rc_tilt_limit_deg} deg, hover terminates after ${info.rc_hover_limit_s} s below ${info.rc_stall_speed} m/s.`
+    : `Scored like training's eval: hit = ${info.rc_hit_radius} m held ${info.rc_zone_time_s} s, tilt crash at ${info.rc_tilt_limit_deg} deg (roll/pitch limits ${info.rc_roll_limit_deg}/${info.rc_pitch_limit_deg} deg), hover terminates after ${info.rc_hover_limit_s} s below ${info.rc_stall_speed} m/s.`);
+
   return html`
     <div>
       <${CheckpointCard} choice=${choice} note=${info ? describeCheckpoint(info) : ''} />
@@ -138,9 +162,15 @@ export function AngleTab({ checkpoints }) {
         <${HandoffFields} form=${form} controller="PID" cruiseMin="0"
           cruiseHint="Use the run's --max-speed. 0 = old slow PID (arrives at ~0.5 m/s).">
           <${NumberField} label="Hit zone radius (m)"
-            hint="The flight ends as a Hit the moment the drone is this close to the target. Empty = 0.25 m. The model's zone-timer inputs keep the radius it was trained with."
-            value=${hitRadius} onChange=${setHitRadius} placeholder="0.25" step="0.05" min="0.01" />
+            hint=${hitZoneHint}
+            value=${hitRadius} onChange=${setHitRadius}
+            placeholder=${info && info.rc_hit_radius != null ? String(info.rc_hit_radius) : '0.25'} step="0.05" min="0.01" />
+          ${info && info.rc_reward && html`
+            <${SelectField} label="Hit rule" value=${hitRule} onChange=${setHitRule} options=${HIT_RULE_OPTIONS} />`}
+          <${SelectField} label="Policy rate" value=${policyRate} onChange=${setPolicyRate} options=${RATE_OPTIONS} />
         <//>
+        ${hitRuleNote && html`
+          <p className=${'note' + (hitRule === 'acro' ? ' warn' : '')}>${hitRuleNote} Target yaw is sampled like the eval reset.</p>`}
         <${Toggle} checked=${recentre} disabled=${recentreDisabled} onChange=${setRecentre} style=${{ marginTop: '14px' }}
           title="Re-centre the position input at the handoff">
           From the handoff on, the policy sees x,y measured from the handoff point (like training's re-centring); the drone still flies in real coordinates.

@@ -56,7 +56,7 @@ The learning side and the tools for looking at its results. It holds:
 
 ```bash
 python -m app.guidance.record_run ckpt.pt --two-phase --distance 200 --switch-dist 20 --cruise-speed 18   # mp4
-python -m app.guidance.record_run ckpt.pt --two-phase --evaluate --n-scenarios 50 --distance 200
+python -m app.guidance.record_run ckpt.pt --two-phase --evaluate --n-scenarios 50 --distance 200 [--action-repeat 4] [--hit-radius 1.0] [--hit-rule trained|acro]
 python -m app.guidance.record_run acro_ckpt.pt --acro --n-scenarios 75 --distance-low 3 --distance-high 5 [--action-repeat 4] [--start auto|rest]
 ```
 
@@ -74,8 +74,8 @@ python -m app.guidance.record_run acro_ckpt.pt --acro --n-scenarios 75 --distanc
   acro), then from the saved action bounds. Acro checkpoints saved before the bounds fix carry torque-style bounds (+-0.5
   rad/s); they are evaluated with the bounds they were trained with.
 
-- **Handoff or just the model (web viewer, both tabs).** Each tab has a "Handoff" checkbox. Off = the policy flies from the spawn point
-  by itself. On = a scripted carrot controller flies from the spawn distance to the handoff point, then the policy takes over:
+- **Handoff or just the model (web viewer, both tabs).** Each tab has a "Handoff" checkbox, and the Angle tab pre-sets it from the
+  selected run's `run_config.json` (`handoff`). Off = the policy flies from the spawn point by itself. On = a scripted carrot controller flies from the spawn distance to the handoff point, then the policy takes over:
   - Angle (Two-phase tab): target distance = spawn distance, switch distance = handoff point, cruise speed = max speed, handoff speed,
     plus "sideways speed" (fraction of the handoff speed, random, like the trainer's `--lateral-frac`) and "tilt at handoff" (random
     roll/pitch within +-deg, `--handoff-tilt-deg`). Both default to 0 (the old behaviour: velocity along the line, attitude untouched)
@@ -151,11 +151,38 @@ python -m app.guidance.record_run acro_ckpt.pt --acro --n-scenarios 75 --distanc
   catch radius (the run's `reward_qv2.intercept_radius`, else 0.25 m, swept per tick) ends the flight as `Intercepted`. The viewer has
   no contact: a chaser does not bounce off the drone or other chasers, `threat_radius` only sizes the drawn body and the base spacing.
   The track carries `threat_radius`; the 3D player draws each chaser in its slot colour (the Isaac palette).
-- **Hit zone** (angle tab): `/api/two_phase/*` take `hit_radius` (m, empty = 0.25). The numpy env ends the flight as `Hit` the moment
-  the drone is that close (`rewards.reward_func` reads `env.hit_radius`), the 3D player draws the zone sphere at that size, and logs,
-  the distance plot and the batch summary use it. It does not change what the model sees: a checkpoint trained with the zone timer
-  keeps the `hit_radius` / `zone_time` from its run_config.json for those two inputs.
+- **Hit zone** (angle tab): `/api/two_phase/*` take `hit_radius` (m, empty = the run's own radius). For a `--reward rc` checkpoint
+  (run_config.json `reward == "rc"`) a Hit is scored by the selected hit rule (next bullet); the flight then keeps going for
+  `post_hit_steps` (6) more policy steps (a crash in that window still counts as a Hit, as `isaac_eval` keeps the first outcome). The
+  3D player draws the zone sphere at the effective radius and the logs, distance plot and batch summary use it. It does not change what
+  the model sees: a checkpoint trained with the zone timer keeps the `hit_radius` / `zone_time` from its run_config.json for those two
+  inputs. Checkpoints without an rc run config keep the old instant rule (`rewards.reward_func` ends the flight the moment the drone is
+  inside `env.hit_radius`, empty = 0.25 m).
+- **Hit rule** (angle tab, rc checkpoints): the "Hit rule" selector has two settings.
+  - `trained` = the run's own rule: a Hit needs the drone to stay inside the zone for the run's `zone_time` (0.05 s = 3 consecutive
+    60 Hz policy steps). This is exactly what `isaac_eval` scored, so batch numbers stay comparable to `eval_hit` / `eval_roll`.
+  - `acro` (the tab's default) = the acro eval's rule: the first policy step inside the radius is a Hit, and a pass through the sphere
+    between two policy samples also counts (the straight-segment test from `acro_reward_v1.segment_min_dist`, which was added because
+    one 60 Hz step at speed can jump over the sphere). This is a viewer override, not what the rc checkpoint trained with; batch numbers
+    then mean "reached the target", not the trained metric. The zone-timer observation always keeps the trained radius/time.
+  The CLI exposes the same choice as `--hit-rule trained|acro` (default `trained` for the CLI, so scripted batches stay faithful).
 - **Attitude limits** (angle tab): the numpy env ends a flight as `attitude-ROLL` / `attitude-PITCH` past a roll / pitch limit. It takes them from the run (`run_config.json` -> `reward_qv2.roll_limit_deg` / `pitch_limit_deg`; `--reward rc` runs often set 360 = off), else the numpy reward's own 65 / 80 deg. Before this, a run trained with the limits off still ended at 65 deg in the viewer.
+- **rc endings** (angle tab, `--reward rc` checkpoints): the old numpy `reward_func` terminals are switched off (`hit_radius = -1`,
+  attitude 360 deg, `oob_radius = inf`) because they would fire every 240 Hz step with the wrong rules. `_RCTerminalChecker` in
+  `record_run.py` is the numpy twin of `angle_reward_rc.compute_reward_rc` and judges once per policy step instead:
+  - **tilt**: angle between body-z and world-up (from the quaternion) above `tilt_limit_deg`; isaac_eval buckets it as `roll`, so the
+    viewer reports `attitude-ROLL` (the batch's `attitude` total). Roll/pitch limits are separate and usually 360 (off).
+  - **hover**: `hover_limit_s` seconds (after `hover_grace_s`) with distance > hit radius and speed < `stall_speed`, outside the zone.
+  - **oob**: position outside `max(oob_min_radius, oob_start_dist_mult * start distance)`, z < 0, or NaN.
+  - **timeout**: the per-distance budget `steps_for_dist(distance)`, rounded up to a whole number of policy steps.
+  All thresholds come from the run (`/api/checkpoint_info` returns them as `rc_*` so the page can show them). The batch totals now
+  include `hover`, and each scenario carries `tilt_max_deg`, `time_s`, `mean_speed`, `policy_steps`, `hit_step` and
+  `post_hit_end_reason`.
+- **Policy rate** (angle tab, both drone styles): Isaac evaluates at 60 Hz (`decimation = 4`), so each policy action is held for 4
+  physics steps by default. The page's "Policy rate" selector also offers 240 Hz (1 step) for comparison; the timer inputs and every rc
+  terminal advance per policy step either way. A batch and a single flight use the same rate.
+- **Target yaw**: like the trainer's reset, each angle flight draws the target yaw uniformly from [-pi, pi]. A batch varies direction
+  and yaw per scenario. Distances are still one chosen value per batch; training's eval samples U(distance_low, distance_high).
 - **Line of sight** (every `/trajectory`, angle and acro; acro reads `los_*` from the run's `acro_reward`, else acro v2 defaults): `track` gains `los_deg` (angle between the velocity and the direction to the
   target; 0 = straight at it, 90 = sideways, 180 = away), `los_reward` (the rc reward's line-of-sight term, `-los_k * m(angle)` by default, 0 below `los_min_speed`,
   per 60 Hz policy step), `los_reward_sum` (running total, each 240 Hz sim step counts a quarter) and `los_meta` (`k`, `min_speed`, `mode`,

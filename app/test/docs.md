@@ -27,11 +27,12 @@ Prints PASS/WARN/FAIL per check and ends with `RESULT: 7/7 checks passed`.
 project's standard config.
 
 ## Unit tests (pytest)
-Pure torch / numpy, no Isaac needed: `uv run pytest app/test --ignore=app/test/test_config.py` (117 tests). `test_config.py` is
+Pure torch / numpy, no Isaac needed: `uv run pytest app/test --ignore=app/test/test_config.py` (140 tests). `test_config.py` is
 not a pytest file: pytest collects its `test_configuration(config)` helper and errors on the missing `config` fixture.
 
 | File | What it pins down |
 |---|---|
+| `test_rc_terminals.py` | `record_run._RCTerminalChecker`, the numpy twin of `compute_reward_rc`: zone dwell (3 steps at 60 Hz) then the post-hit window, dwell reset on leaving the zone, tilt mapped to the trainer's roll bucket, crash in the post-hit window still scoring a Hit, hover, OOB radius/floor, the zone-timer progress, and quaternion tilt. Also the acro hit rule: first step inside, swept crossing between two samples, no swept test on the reset step, crash beats hit, and the trained rule unchanged. |
 | `test_tilt_cone.py` | `app/control/tilt.py`: numpy and torch agree, a diagonal saturates the cone (not 1.41x the cap at the box's corner), an off-diagonal keeps its heading, inside the cone nothing changes, and the numpy PID / torch teacher both use it. |
 | `test_workflow_profiles.py` | `app/workflow`: every profile's script exists and every flag is a real trainer flag, `build_cmd` handles dict/list/bool/None, `--set` typing, distinct run dirs, and `collect_results` copying out of the run folder (and failing loudly when it is missing). |
 | `test_rc_reward.py` | `compute_reward_rc`: closing and retreat, the potential telescopes, hover and timeout, zone entry then hold, the post-hit window, caught beats hit, attitude limits, zone-timer features, per-axis progress, the line-of-sight term and its bands. |

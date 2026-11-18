@@ -59,23 +59,8 @@ ACRO_V4_REWARD = {
     "path_slack": 0.10,
 }
 
-# ---- angle: the rc reward with head-on 600-800 m handoff and the LOS teacher (anlge_evader_600_40ms) ----
-ANGLE_RC_REWARD = {
-    "intercept_radius": 1.0,
-    "closing_lambda": 1.5,
-    "c_step": 0.03,
-    "los_k": 0.10,
-    "los_gate_frac": 0.0,
-    "los_aligned": 0.0,
-    "los_a": 15,
-    "los_b": 60,
-    "zone_time": 0.05,
-    "post_hit_steps": 6,
-    "r_zone_entry": 0,
-    "tilt_limit_deg": 85,
-    "roll_limit_deg": 360,
-    "pitch_limit_deg": 360,
-}
+# ---- angle: minimal fallback. Run-specific flags are passed per run with --command (or --set when using the profile);
+# only the flags that must match the profile's run folder / CI stay here. ----
 
 # ---- angle, ground start (no handoff, no threats): the rc2 reward on top of rc ----
 # Per-step numbers are only on/off markers under auto_scale: the per-leg totals below are what the run actually pays.
@@ -296,82 +281,9 @@ PROFILES = {
         "script": "app/training/angle_rtl_train_isaac.py",
         "checkpoint_dir": "runs/angle_evader_workflow",
         "params": {
-            # the trainer's default is runs/rtl_isaac; pass the profile's dir explicitly so collect_results.py
-            # (which reads checkpoint_dir from this file) finds the run afterwards
+            # fallback when no --command is given; the real flags are passed per run with --command
             "--checkpoint-dir": "runs/angle_evader_workflow",
-            # Environment & rollout: ground start, NO handoff -- the policy flies the whole leg from rest.
-            # (--handoff False emits no flag; the handoff-only --spawn-dist-*/--prefix-*/--lateral-frac/
-            #  --handoff-tilt-* are gone with it. --from-rest also kills the legacy --spawn-speed-* spawn.)
-            "--num_envs": 8192,
-            "--num-steps-per-chunk": 256,
-            "--total_timesteps": 128000000,
-            "--distance-low": 100,
-            "--distance-high": 250,
             "--from-rest": True,
-            "--handoff": False,
-            "--max-speed": 45,
-            "--obs-position-mode": "height",
-            # Reward
-            "--reward": "rc",
-            "--reward-json": ANGLE_RC_REWARD,
-            # PPO & distillation
-            "--gamma": 0.99,
-            "--lam": 0.95,
-            "--settle-chunks": 2,
-            "--warmup-chunks": 2,
-            "--head-chunks": 2,
-            "--lr-ramp-chunks": 3,
-            "--epochs": 5,
-            "--warmup-epochs": 8,
-            "--num-minibatches": 32,
-            "--target-kl": 0.01,
-            "--max-grad-norm": 0.5,
-            "--lr-actor": 1e-4,
-            "--weight-decay": 1e-4,
-            "--lr-critic": 3e-4,
-            "--lr-min-ratio": 0.3,
-            "--critic-hidden": 128,
-            "--critic-layers": 2,
-            "--init-std": 0.15,
-            "--log-std-min": -3.5,
-            "--log-std-max": -1.2,
-            "--ent-coef": 0.0,
-            # teacher = straight line of sight (no checkpoint is used as a teacher). --bc-checkpoint only seeds the
-            # STUDENT; its 60-160 m hover prior tumbles from rest (teacher check: hit 0.08, tilt crash 0.92), so it
-            # is not trusted to demonstrate takeoff -- PPO + the LOS teacher have to discover that.
-            "--teacher": "los",
-            "--bc-checkpoint": "stable_models/angle_600_40ms_non_evader/best.pt",
-            # no --anchor-checkpoint / --teacher-checkpoint: with --teacher los there is no frozen policy teacher
-            "--distill-start": 0.25,
-            "--distill-end": 0.00,
-            "--distill-decay-chunks": 20,
-            "--distill-max": 1.0,
-            "--guard-margin": 0.25,
-            "--guard-gain": 0,
-            "--guard-boost-max": 20,
-            # Threats
-            "--num-threats": 0,
-            "--active-threats": 1,
-            "--threat-speed": 50,
-            "--threat-speed-min": 45,
-            "--threat-radius": 1.0,
-            "--threat-spread": 30,
-            "--threat-spawn-min": 15,
-            "--threat-spawn": "geometry",
-            "--threat-geometry-weights": (1.0, 0.0),
-            "--threat-reaction-s": 0.65,
-            "--threat-tail-gap": (3.0, 3.0),
-            "--threat-jitter": 2,
-            "--threat-prob": 0.6,
-            "--threat-buffer": 0.5,
-            "--threat-release-after": (0.0, 0.0),
-            "--obs-layout": "v2",
-            "--num-allies": 0,
-            # Eval
-            "--eval-every": 5,
-            "--eval-burnin": 600,
-            "--pid-eval-every": 10,
-            # Output
             "--headless": True,
         },
     },

@@ -19,41 +19,71 @@ uv run uvicorn app.guidance.serve_run:app --port 8000
 
 
 
-
-cd /mnt/c/Users/Pc-Egor/PycharmProjects/WelcomeScreen/python-simulator && \
-/mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/angle_rtl_train_isaac.py \
-  --headless \
-  --num_envs 8192 \
-  --total_timesteps 128000000 \
-  --handoff \
-  --max-speed 45 \
-  --distance-low 100 --distance-high 250 \
-  --spawn-dist-low 600 --spawn-dist-high 800 \
-  --obs-position-mode height \
-  --obs-layout v2 \
-  --reward rc \
-  --reward-json '{"intercept_radius": 1.0, "closing_lambda": 1.5, "c_step": 0.03, "los_k": 0.10, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 15, "los_b": 60, "zone_time": 0.0167, "post_hit_steps": 5, "r_zone_entry": 0, "tilt_limit_deg": 180, "roll_limit_deg": 360, "pitch_limit_deg": 360}' \
-  --teacher los \
-  --teacher-cruise-gain 4.0 \
-  --los-stop-speed 45 \
-  --los-max-tilt-deg 90 \
-  --teacher-bc-chunks 0 --teacher-bc-epochs 4 --teacher-bc-lr 3e-5 \
-  --bc-checkpoint runs/angle_los_40_160_600/best.pt \
-  --distill-start 1.0 --distill-end 0.05 --distill-decay-chunks 5 \
-  --settle-chunks 2 --warmup-chunks 2 --head-chunks 2 \
-  --init-std 0.15 --log-std-max -1.2 \
-  --lr-actor 1e-4 --lr-min-ratio 0.3 \
-  --abort-hit-rate 0 \
-  --num-allies 0 \
-  --num-threats 5 --active-threats 1 \
-  --threat-radius 1.0 --threat-speed 50 --threat-speed-min 45 \
-  --threat-spawn geometry --threat-geometry-weights 1 0 \
-  --threat-reaction-s 0.65 \
-  --threat-tail-gap 3 3 \
-  --threat-jitter 2 \
-  --threat-release-after 0 0 \
-  --checkpoint-dir runs/angle_evades_45_600
-
+ gh workflow run main.yml -f profile=angle -f command="-u app/training/angle_rtl_train_isaac.py \
+    --checkpoint-dir runs/angle_evader_workflow \
+    --num_envs 8192 \
+    --num-steps-per-chunk 256 \
+    --total_timesteps 128000000 \
+    --distance-low 200 \
+    --distance-high 500 \
+    --from-rest \
+    --max-speed 50 \
+    --obs-position-mode height \
+    --reward rc \
+    --reward-json '{"intercept_radius": 1.0, "closing_lambda": 1.5, "c_step": 0.03, "los_k": 0.1, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 15, "los_b": 60, "zone_time": 0.05, "post_hit_steps": 6, "r_zone_entry": 0, "tilt_limit_deg": 85, "roll_limit_deg": 360, "pitch_limit_deg": 360}' \
+    --gamma 0.99 \
+    --lam 0.995 \
+    --settle-chunks 2 \
+    --warmup-chunks 2 \
+    --head-chunks 2 \
+    --lr-ramp-chunks 3 \
+    --epochs 5 \
+    --warmup-epochs 8 \
+    --num-minibatches 32 \
+    --target-kl 0.01 \
+    --max-grad-norm 0.5 \
+    --lr-actor 0.0001 \
+    --weight-decay 0.0001 \
+    --lr-critic 0.0003 \
+    --lr-min-ratio 0.3 \
+    --critic-hidden 128 \
+    --critic-layers 2 \
+    --init-std 0.15 \
+    --log-std-min -3.5 \
+    --log-std-max -1.2 \
+    --ent-coef 0.0 \
+    --bc-checkpoint runs/angle_evader_workflow/best.pt \
+    --teacher checkpoint runs/angle_evader_workflow/best.pt \
+    --teacher acro \
+    --distill-start 0.25 \
+    --distill-end 0.0 \
+    --distill-decay-chunks 20 \
+    --distill-max 1.0 \
+    --guard-margin 0.25 \
+    --guard-gain 0 \
+    --guard-boost-max 20 \
+    --abort-hit-rate 0.0 \
+    --num-threats 0 \
+    --active-threats 1 \
+    --threat-speed 50 \
+    --threat-speed-min 45 \
+    --threat-radius 1.0 \
+    --threat-spread 30 \
+    --threat-spawn-min 15 \
+    --threat-spawn geometry \
+    --threat-geometry-weights 1.0 0.0 \
+    --threat-reaction-s 0.65 \
+    --threat-tail-gap 3.0 3.0 \
+    --threat-jitter 2 \
+    --threat-prob 0.6 \
+    --threat-buffer 0.5 \
+    --threat-release-after 0.0 0.0 \
+    --obs-layout v2 \
+    --num-allies 0 \
+    --eval-every 5 \
+    --eval-burnin 600 \
+    --pid-eval-every 10 \
+    --headless "
 
 #=========== acro
 

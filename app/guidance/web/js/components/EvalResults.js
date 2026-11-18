@@ -55,9 +55,14 @@ export function BatchResult({ result, distance, switchDist }) {
   const parked = scenarios.filter((s) => s.reason === 'timeout' && (s.stall_steps || 0) > 1000).length;
   const crash = (totals.attitude || 0) + (totals.tilt || 0);        // roll/pitch crash (angle) or tilt crash (acro)
   const rate = data.action_repeat ? ` | ${(60 * 4) / data.action_repeat} Hz policy` : '';
+  const hitRule = data.hit_radius != null
+    ? ` | hit ${fmt(data.hit_radius)} m` + (data.hit_rule === 'acro'
+        ? ' first step / swept'
+        : data.zone_time_s ? ` held ${fmt(data.zone_time_s, 2)} s` : '')
+    : '';
   return html`
     <div className="results card">
-      <div className="note">${data.checkpoint} | ${count} scenarios | distance ${distance} m, switch ${switchDist} m${rate}</div>
+      <div className="note">${data.checkpoint} | ${count} scenarios | distance ${distance} m, switch ${switchDist} m${hitRule}${rate}</div>
       <div className="kpis">
         <${Kpi} label="Hit" count=${totals.hit || 0} total=${count} tone="good" />
         <${Kpi} label="Attitude crash (roll / pitch / tilt)" count=${crash} total=${count} tone="bad" />

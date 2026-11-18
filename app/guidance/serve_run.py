@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from app.guidance.record_run import (
     CHECKPOINT_SEARCH_DIRS, N_EVAL_SCENARIOS, DEFAULT_SWITCH_DIST,
     evaluate_acro, trajectory_acro,
-    record_checkpoint_two_phase, evaluate_two_phase, trajectory_two_phase,
+    record_checkpoint_two_phase, evaluate_two_phase, trajectory_two_phase, rc_config_for,
 )
 
 # ----------------------------------------------------------------------------------------------------------
@@ -33,7 +33,8 @@ from app.guidance.record_run import (
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")   # index.html, styles.css, js/
 RECORDINGS_DIR = "recordings"     # mp4 videos and text summaries made by the endpoints
 UPLOAD_DIR = "uploaded_weights"   # .pt files uploaded from the page
-ALLOWED_ACTION_REPEATS = (1, 2, 4, 8)   # physics steps (240 Hz) each acro action is held; 4 = the 60 Hz Isaac trains at
+ALLOWED_ACTION_REPEATS = (1, 2, 4, 8)   # physics steps (240 Hz) each policy action is held; 4 = the 60 Hz Isaac trains at
+ALLOWED_HIT_RULES = ("acro", "trained") # acro = first step inside / swept (default in the tab); trained = the run's zone dwell
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -125,10 +126,18 @@ class TwoPhaseSettings:
         lateral_frac: float = Form(0.0),
         tilt_deg: float = Form(0.0),
         hit_radius: float | None = Form(None),
+        action_repeat: int = Form(4),
+        hit_rule: str = Form("acro"),
     ):
         if hit_radius is not None and hit_radius <= 0:
             raise HTTPException(400, "hit_radius must be above 0 m")
-        self.hit_radius = hit_radius                 # None = the viewer env's default zone (rewards.HIT_THRESHOLD)
+        if action_repeat not in ALLOWED_ACTION_REPEATS:
+            raise HTTPException(400, "action_repeat must be 1, 2, 4 or 8")
+        if hit_rule not in ALLOWED_HIT_RULES:
+            raise HTTPException(400, "hit_rule must be 'acro' or 'trained'")
+        self.hit_radius = hit_radius                 # None = the run's trained rc zone, else rewards.HIT_THRESHOLD
+        self.action_repeat = action_repeat           # physics steps per policy action (4 = the 60 Hz Isaac rate)
+        self.hit_rule = hit_rule                     # acro = first step inside / swept; trained = the run's dwell
         self.distance = distance
         self.seed = seed
         self.recentre_z = recentre_z
@@ -149,7 +158,7 @@ class TwoPhaseSettings:
         return dict(
             distance=self.distance, seed=self.seed, switch_dist=self.switch_dist, cruise_speed=self.cruise_speed,
             handoff_speed=self.handoff_speed, recentre_z=self.recentre_z, lateral_frac=self.lateral_frac, tilt_deg=self.tilt_deg,
-            hit_radius=self.hit_radius,
+            hit_radius=self.hit_radius, action_repeat=self.action_repeat, hit_rule=self.hit_rule,
         )
 
 
@@ -290,8 +299,22 @@ def api_checkpoint_info(path: str):
         return {"has_config": False}
     trained_with_handoff = bool(config.get("handoff"))
     has_spawn_leg = config.get("spawn_dist_low") is not None
+    rc = rc_config_for(path)
+    rc_fields = {} if rc is None else {
+        "rc_reward": True,
+        "rc_hit_radius": rc.hit_radius,
+        "rc_zone_time_s": rc.zone_time,
+        "rc_tilt_limit_deg": rc.tilt_limit_deg,
+        "rc_roll_limit_deg": rc.roll_limit_deg,
+        "rc_pitch_limit_deg": rc.pitch_limit_deg,
+        "rc_post_hit_steps": rc.post_hit_steps,
+        "rc_hover_limit_s": rc.hover_limit_s,
+        "rc_stall_speed": rc.stall_speed,
+    }
     return {
         "has_config": True,
+        **rc_fields,
+        "handoff": bool(config.get("handoff")),
         "distance_low": config.get("distance_low"),
         "distance_high": config.get("distance_high"),
         "spawn_dist_low": config.get("spawn_dist_low"),

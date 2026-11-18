@@ -298,8 +298,11 @@ def milestone_bonus(env, dist, start_dist):
 def reward_func(env):
     pos, vel, _ang_vel, roll, pitch, _yaw, dist = _kinematics(env)
 
-    # oob_radius scales with this episode's start_dist so a far target isn't structurally unreachable.
-    oob_radius = max(OOB_RADIUS, env.start_dist * 3.0)
+    # oob_radius scales with this episode's start_dist so a far target isn't structurally unreachable. The viewer can
+    # override it (rc runs: inf here, the rc terminal checker owns the trainer's per-policy-step OOB test).
+    oob_radius = getattr(env, "oob_radius", None)
+    if oob_radius is None:
+        oob_radius = max(OOB_RADIUS, env.start_dist * 3.0)
     # the viewer env sets attitude_roll_deg / attitude_pitch_deg to the limits the run was trained with (rc runs switch them off)
     term_sum, term_reason, _term_list = terminal_checks(
         pos, roll, pitch, oob_radius=oob_radius, roll_deg=getattr(env, "attitude_roll_deg", ATTITUDE_ROLL_DEG),

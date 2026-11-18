@@ -33,12 +33,42 @@ def test_build_cmd_expands_every_value_type():
     cmd = workflow.build_cmd("acro", {"--num_envs": 4096, "--buckets": True, "--runner": False,
                                       "--threat-tail-gap": (1.0, 2.0), "--reward-json": {"los_k": 0.2}},
                              isaac_python="/py")
-    assert cmd[:2] == ["/py", "app/training/acro_rtl_train_isaac.py"]
+    assert cmd[:3] == ["/py", "-u", "app/training/acro_rtl_train_isaac.py"]
     assert cmd[cmd.index("--num_envs") + 1] == "4096"
     assert "--buckets" in cmd and "--runner" not in cmd            # False drops the flag
     assert cmd[cmd.index("--threat-tail-gap") + 1:cmd.index("--threat-tail-gap") + 3] == ["1.0", "2.0"]
     reward = cmd[cmd.index("--reward-json") + 1]
     assert reward.startswith('{"los_k"')                          # dict -> JSON string
+
+
+def test_command_text_accepts_the_forms_copied_from_the_runner():
+    script = "app/training/angle_rtl_train_isaac.py"
+    # the form the page / CI input uses: -u script ...
+    assert workflow.command_argv(f"-u {script} --headless", "/py") == ["/py", "-u", script, "--headless"]
+    # the full command with the Isaac interpreter at the front
+    assert workflow.command_argv(f"/mnt/e/Isaac/python.exe -u {script} --headless", "/py") == \
+        ["/mnt/e/Isaac/python.exe", "-u", script, "--headless"]
+    # just the script
+    assert workflow.command_argv(f"{script} --headless", "/py") == ["/py", "-u", script, "--headless"]
+    # backslash-newline / plain newlines and a leading cd ... &&
+    assert workflow.command_argv(f"cd /proj &&\npython3 -u {script} \\\n  --headless", "/py") == \
+        ["python3", "-u", script, "--headless"]
+    # uv run drops the uv wrapper
+    assert workflow.command_argv(f"uv run {script} --headless", "/py") == ["/py", "-u", script, "--headless"]
+
+
+def test_command_run_dir_reads_checkpoint_dir_or_falls_back_to_the_profile():
+    argv = ["/py", "-u", "app/training/angle_rtl_train_isaac.py", "--checkpoint-dir", "runs/mine"]
+    assert workflow.command_run_dir(argv, "angle") == "runs/mine"
+    argv = ["/py", "-u", "app/training/angle_rtl_train_isaac.py", "--checkpoint-dir=runs/eq"]
+    assert workflow.command_run_dir(argv, "angle") == "runs/eq"
+    assert workflow.command_run_dir(["/py", "-u", "x.py"], "angle") == get_profile("angle")["checkpoint_dir"]
+
+
+def test_print_run_dir_follows_a_pasted_command(capsys):
+    code = workflow.main(["--profile", "angle", "--print-run-dir", "--command",
+                          "-u app/training/angle_rtl_train_isaac.py --checkpoint-dir runs/mine"])
+    assert code == 0 and capsys.readouterr().out.strip() == "runs/mine"
 
 
 def test_overrides_accept_the_flag_with_or_without_dashes():

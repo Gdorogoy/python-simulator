@@ -4,18 +4,23 @@
     python3 app/workflow/workflow.py --profile angle
     python3 app/workflow/workflow.py --profile angle --set num_envs=4096 --set total_timesteps=10000000
     python3 app/workflow/workflow.py --profile acro --dry-run     # print the command only
+    python3 app/workflow/workflow.py --profile angle --command "-u app/training/angle_rtl_train_isaac.py --headless ..."
     python3 app/workflow/workflow.py --list
 
 The profile (trainer script, CLI params, run folder) lives in app/workflow/profiles.py. --set overrides one value
-without editing anything: booleans as true/false, numbers/JSON as JSON, everything else as a string.
+without editing anything: booleans as true/false, numbers/JSON as JSON, everything else as a string. --command instead
+runs a trainer command pasted as one string (the form copied from the runner: "-u app/training/... --flag ..."), so CI
+can take the whole command as a workflow input.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
+
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -40,7 +45,7 @@ def build_cmd(profile: str, overrides: dict | None = None, isaac_python: str = I
     prof = get_profile(profile)
     params = dict(prof["params"])
     params.update(overrides or {})
-    cmd = [isaac_python, prof["script"]]
+    cmd = [isaac_python, "-u", prof["script"]]
     for flag, value in params.items():
         if value is None or value is False:
             continue
@@ -57,14 +62,52 @@ def build_cmd(profile: str, overrides: dict | None = None, isaac_python: str = I
     return cmd
 
 
+def command_argv(text: str, isaac_python: str = ISAAC_PYTHON) -> list[str]:
+    """argv for a trainer command pasted as one string.
+
+    Accepts the forms copied from the runner:
+        -u app/training/angle_rtl_train_isaac.py --headless ...
+        /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/angle_rtl_train_isaac.py ...
+        app/training/angle_rtl_train_isaac.py --headless ...
+    Backslash-newline continuations, plain newlines and a leading `cd ... &&` are tolerated."""
+    text = text.replace("\\\r\n", " ").replace("\\\n", " ").replace("\r", " ").replace("\n", " ").strip()
+    if "&&" in text:
+        text = text.rsplit("&&", 1)[1].strip()
+    parts = shlex.split(text)
+    if not parts:
+        raise ValueError("--command is empty")
+    if parts[:2] == ["uv", "run"]:
+        parts = parts[2:]
+    name = Path(parts[0]).name.lower()
+    if name.startswith("python") or name.endswith(".exe"):
+        return parts
+    if parts[0] == "-u":
+        return [isaac_python, *parts]
+    return [isaac_python, "-u", *parts]
+
+
+def command_run_dir(argv: list[str], profile: str) -> str:
+    """The run folder a pasted command writes: its --checkpoint-dir (or --checkpoint-dir=X), else the profile's."""
+    for i, token in enumerate(argv):
+        if token == "--checkpoint-dir" and i + 1 < len(argv):
+            return argv[i + 1]
+        if token.startswith("--checkpoint-dir="):
+            return token.split("=", 1)[1]
+    return get_profile(profile)["checkpoint_dir"]
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--profile", default="acro", choices=profile_names(), help="which trainer config to run")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="FLAG=VALUE",
                    help="override one profile value, repeatable (the flag may be written with or without --)")
+    p.add_argument("--command", default=None, metavar="TEXT",
+                   help="run this trainer command instead of the profile's params, pasted as one string (e.g. "
+                        "'-u app/training/angle_rtl_train_isaac.py --headless --num_envs 8192 ...'); the python "
+                        "interpreter at the front is optional")
     p.add_argument("--isaac-python", default=ISAAC_PYTHON, help="interpreter that has Isaac Lab (default: $ISAAC_PYTHON)")
     p.add_argument("--dry-run", action="store_true", help="print the command, do not run it")
-    p.add_argument("--print-run-dir", action="store_true", help="print the profile's checkpoint dir and exit (for CI)")
+    p.add_argument("--print-run-dir", action="store_true", help="print the run dir and exit (for CI)")
     p.add_argument("--list", action="store_true", help="list the profiles and exit")
     args = p.parse_args(argv)
 
@@ -81,12 +124,26 @@ def main(argv=None) -> int:
         flag, _, value = item.partition("=")
         overrides[normalize_flag(flag)] = parse_value(value)
 
+    command = args.command.strip() if args.command else None
+    if command and overrides:
+        p.error("--set cannot be combined with --command: edit the pasted command instead")
+    if command:
+        try:
+            cmd = command_argv(command, args.isaac_python)
+        except ValueError as error:
+            p.error(str(error))
+        run_dir = command_run_dir(cmd, args.profile)
+        source = "pasted command"
+    else:
+        cmd = build_cmd(args.profile, overrides, args.isaac_python)
+        run_dir = get_profile(args.profile)["checkpoint_dir"]
+        source = f"profile {args.profile}"
+
     if args.print_run_dir:
-        print(get_profile(args.profile)["checkpoint_dir"])
+        print(run_dir)
         return 0
 
-    cmd = build_cmd(args.profile, overrides, args.isaac_python)
-    print(f"profile: {args.profile}\ncommand: {' '.join(cmd)}\n", flush=True)
+    print(f"profile: {args.profile}  ({source})\nrun dir: {run_dir}\ncommand: {' '.join(cmd)}\n", flush=True)
     if args.dry_run:
         return 0
     return subprocess.run(cmd).returncode

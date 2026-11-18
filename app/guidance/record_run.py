@@ -10,6 +10,7 @@ import json
 import math
 import os
 import time
+from dataclasses import fields
 
 import imageio.v3 as iio
 import matplotlib
@@ -145,6 +146,161 @@ def _zone_for(checkpoint_path):
         return 1.0, 2.0
 
 
+def rc_config_for(checkpoint_path):
+    """The RewardRCConfig an --reward rc run trained with, else None. run_config.json stores reward == "rc" and the
+    reward's own fields under reward_qv2 (it also holds qv2 bookkeeping such as auto_scale, which is filtered out here)."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "run_config.json")) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if cfg.get("reward") != "rc":
+        return None
+    from app.reward_functions.angle_reward_rc import RewardRCConfig
+    known = {f.name for f in fields(RewardRCConfig)}
+    return RewardRCConfig.from_overrides({k: v for k, v in (cfg.get("reward_qv2") or {}).items() if k in known})
+
+
+def _tilt_from_quat_deg(quat):
+    """Angle (deg) between body-z and world-up, the rc reward's tilt. `quat` is w,x,y,z: either a sequence or the env's
+    Quaternion (with .w/.x/.y/.z). Same formula as angle_reward_rc.tilt_from_quat."""
+    if hasattr(quat, "w"):
+        w, x, y, z = quat.w, quat.x, quat.y, quat.z
+    else:
+        w, x, y, z = quat
+    cos_t = 1.0 - 2.0 * (x * x + y * y)
+    return float(np.degrees(np.arccos(np.clip(cos_t, -1.0, 1.0))))
+
+
+def _segment_min_dist(a, b):
+    """Distance from the origin to the segment a->b (a/b are target - pos at consecutive policy steps). The numpy twin
+    of acro_reward_v1.segment_min_dist: a sphere crossed between two 60 Hz samples still has min distance < radius."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    ab = b - a
+    denom = float(ab @ ab)
+    t = 0.0 if denom <= 1e-12 else float(np.clip(-(a @ ab) / denom, 0.0, 1.0))
+    return float(np.linalg.norm(a + t * ab))
+
+
+class _RCTerminalChecker:
+    """The rc reward's terminal rules, advanced once per POLICY step (Isaac's 60 Hz control rate).
+
+    This is the numpy twin of app.reward_functions.angle_reward_rc.compute_reward_rc's terminals -- keep the two in sync:
+      * hit: `zone_time` seconds of consecutive policy steps inside `cfg.hit_radius`, then (`post_hit_steps` > 0) a
+        post-hit window in which the flight continues (the eval still counts the episode as a Hit);
+      * crash: tilt > tilt_limit_deg, |roll| > roll_limit_deg, |pitch| > pitch_limit_deg, NaN / z < 0 / outside
+        max(oob_min_radius, oob_start_dist_mult * start distance);
+      * hover: `hover_limit_s` seconds stalled (distance > hit_radius and speed < stall_speed) outside the zone.
+
+    `hit_rule` selects the scoring used by the viewer. "trained" is the run's own rule above. "acro" scores like the acro
+    rewards: the first policy step inside the radius is a hit, and a pass through the sphere between two samples also
+    counts (the straight-segment test, acro_reward_v1.segment_min_dist). The acro rule is a viewer override -- it is
+    not what the rc checkpoint was trained with.
+
+    The viewer's reward_func still flies/pays the plant, but `_make_two_phase_env` switches its terminals off for rc
+    runs so this checker is the only judge. The zone-timer observation keeps the radius/time the checkpoint was trained
+    with (`timer`), even when the viewer overrides the hit radius."""
+
+    HIT_RULES = ("trained", "acro")
+
+    def __init__(self, cfg, step_dt, timer=None, hit_rule="trained"):
+        if hit_rule not in self.HIT_RULES:
+            raise ValueError(f"hit_rule must be one of {self.HIT_RULES}, got {hit_rule!r}")
+        self.cfg = cfg
+        self.step_dt = float(step_dt)
+        self.hit_rule = hit_rule
+        self.grace_steps = max(1, int(round(cfg.hover_grace_s / step_dt)))
+        self.limit_steps = max(self.grace_steps + 1, int(round(cfg.hover_limit_s / step_dt)))
+        self.limit_steps_hit = (1 if hit_rule == "acro"
+                                else max(1, int(round(cfg.zone_time / step_dt))))
+        self.hit_radius = float(cfg.hit_radius)
+        self.timer_radius, self.timer_zone_time = (None, None) if timer is None else (float(timer[0]), float(timer[1]))
+        self.timer_limit = None if timer is None else max(1, int(round(self.timer_zone_time / step_dt)))
+        self.reset(0.0)
+
+    @property
+    def hit_dwell_s(self):
+        """Effective time inside the zone before the hit scores (0 = first step / swept, like the acro rule)."""
+        return 0.0 if self.hit_rule == "acro" else float(self.cfg.zone_time)
+
+    def reset(self, start_dist):
+        self.start_dist = float(start_dist)
+        self.zone_count = 0
+        self.timer_zone_count = 0
+        self.stall_count = 0
+        self.zone_entered = False
+        self.hit_done = False
+        self.post_hit = 0
+        self.policy_steps = 0
+        self.hit_step = None
+        self.hit_scored = False
+        self.prev_pos = None        # acro rule: the previous policy-step position, target segment for the swept test
+
+    def timer_progress(self):
+        """The policy's second timer input (0..1), exactly the trainer's zone_count / limit_steps_hit."""
+        if self.timer_limit is None:
+            return 0.0
+        return min(self.timer_zone_count / self.timer_limit, 1.0)
+
+    def step(self, pos, dist, speed, tilt_deg, roll_deg, pitch_deg, target_pos=None):
+        """Advance one policy step -> (terminal reason or None, hit scored on this step). A hit with post_hit_steps > 0
+        does not end the episode: keep flying until the window ends or a crash/catch ends it (the caller keeps the
+        Hit outcome, like isaac_eval's first-outcome-wins). `target_pos` is only used by the acro swept test."""
+        cfg = self.cfg
+        pos = np.asarray(pos, dtype=np.float64)
+        oob_radius = max(cfg.oob_min_radius, self.start_dist * cfg.oob_start_dist_mult)
+        oob = bool(np.isnan(pos).any()) or pos[2] < 0.0 or float(np.linalg.norm(pos)) > oob_radius
+        tilt_bad = tilt_deg > cfg.tilt_limit_deg
+        roll_bad = abs(roll_deg) > cfg.roll_limit_deg
+        pitch_bad = abs(pitch_deg) > cfg.pitch_limit_deg
+        crash = oob or tilt_bad or roll_bad or pitch_bad
+
+        # compute_reward_rc's order: stall counter (outside the zone), then the zone counter
+        stalled = dist > self.hit_radius and speed < cfg.stall_speed
+        self.stall_count = self.stall_count + 1 if stalled else 0
+        in_zone = dist < self.hit_radius
+        self.zone_entered = self.zone_entered or in_zone
+        self.zone_count = self.zone_count + 1 if in_zone else 0
+        if self.timer_radius is not None:
+            self.timer_zone_count = self.timer_zone_count + 1 if dist < self.timer_radius else 0
+
+        # acro rule: a crossing between two policy samples counts. prev_pos is None on the first step after reset.
+        swept = False
+        if self.hit_rule == "acro" and self.prev_pos is not None and target_pos is not None:
+            target = np.asarray(target_pos, dtype=np.float64)
+            swept = _segment_min_dist(target - self.prev_pos, target - pos) < self.hit_radius
+
+        after = self.hit_done and not crash
+        post_hit = self.post_hit + (1 if self.hit_done else 0)
+        hit = (self.zone_count >= self.limit_steps_hit or swept) and not self.hit_done and not crash
+        window_over = after and post_hit >= cfg.post_hit_steps
+        hover_term = self.stall_count >= self.limit_steps and not crash and not hit and not after
+
+        self.policy_steps += 1
+        self.hit_done = self.hit_done or hit
+        self.post_hit = post_hit
+        self.prev_pos = pos.copy()
+        if hit:
+            self.hit_scored = True
+            self.hit_step = self.policy_steps
+
+        # isaac_eval's precedence: hover, oob, roll/tilt, pitch
+        if hover_term:
+            return "hover", hit
+        if oob:
+            return "oob", hit
+        if tilt_bad or roll_bad:
+            return "attitude-ROLL", hit
+        if pitch_bad:
+            return "attitude-PITCH", hit
+        if hit and cfg.post_hit_steps <= 0:
+            return "Hit", hit
+        if window_over:
+            return "Hit", hit
+        return None, hit
+
+
 def _v2_layout_for(checkpoint_path, obs_dim):
     """(threat slots, has zone timer, ally slots) when the run was trained with --obs-layout v2 (run_config.json: obs_layout, num_threats,
     num_allies), else None. v2 sizes can equal v1 sizes, so the layout is read from the run, not guessed from the input count."""
@@ -163,23 +319,54 @@ def _v2_layout_for(checkpoint_path, obs_dim):
     return slots, extra == 2, allies
 
 
-def _make_two_phase_env(checkpoint_path, model, threats=None, rng=None, hit_radius=None):
+def _two_phase_hit_radius(env):
+    """The effective hit radius of a two-phase env: the rc zone (override or the run's trained value), else the old
+    numpy instant-hit radius. Never the -1 that disables rewards.reward_func's hit for rc runs."""
+    rc_r = getattr(env, "rc_hit_radius", None)
+    return float(rc_r) if rc_r is not None else float(getattr(env, "hit_radius", HIT_THRESHOLD))
+
+
+def _two_phase_rules(env):
+    """The eval rules the page shows and the 3D player uses."""
+    rc = getattr(env, "rc_cfg", None)
+    hit_rule = None if rc is None else getattr(env, "rc_hit_rule", "trained")
+    return {
+        "hit_radius": _two_phase_hit_radius(env),
+        "hit_rule": hit_rule,
+        "hit_dwell_s": None if rc is None else (0.0 if hit_rule == "acro" else float(rc.zone_time)),
+        "hit_swept": hit_rule == "acro",
+        "action_repeat": int(getattr(env, "action_repeat", 1)),
+        "zone_time_s": None if rc is None else float(rc.zone_time),
+        "tilt_limit_deg": None if rc is None else float(rc.tilt_limit_deg),
+        "rc": rc is not None,
+    }
+
+
+def _make_two_phase_env(checkpoint_path, model, threats=None, rng=None, hit_radius=None, action_repeat=4,
+                        hit_rule="trained"):
     """The numpy env for an angle checkpoint. `threats` = {"active", "speed", "speed_min", "spread", "spawn_min", "spawn", "buffer",
     "radius", "release_frac_range", "max_tilt_deg"} switches on that many chasing drones (None = none; missing keys take the
     trainer's defaults). The chasers are drones with the learner's own physics, flown by the limit-LOS controller.
     A checkpoint trained with threat slots always gets all its slots filled -- unused ones are zeros, exactly as in training
     with fewer active threats than slots -- so it loads whether or not any chaser is on. A checkpoint with the two extra
     zone-timer inputs (23 + 7*K + 2) gets them too.
-    `hit_radius` (m) is the zone that ends the flight as a Hit; None = rewards.HIT_THRESHOLD. The zone-timer inputs keep the radius
-    the checkpoint was trained with, so the policy sees what it was trained on."""
+    `hit_radius` (m) overrides the Hit zone; None = the run's trained rc radius, else rewards.HIT_THRESHOLD. The
+    zone-timer inputs keep the radius/time the checkpoint was trained with, so the policy sees what it was trained on.
+    For --reward rc runs the old reward_func terminals are switched off (hit_radius=-1, attitude 360, oob inf) and the
+    episode is judged by _RCTerminalChecker at the policy rate, like isaac_eval. `action_repeat` is the number of 240 Hz
+    physics steps each policy action is held (4 = the 60 Hz Isaac policy). `hit_rule` is "trained" (the run's zone_time
+    dwell) or "acro" (first policy step inside + swept pass-through, the acro eval's rule)."""
+    if hit_rule not in _RCTerminalChecker.HIT_RULES:
+        raise ValueError(f"hit_rule must be one of {_RCTerminalChecker.HIT_RULES}, got {hit_rule!r}")
     threats = threats or {}
+    rc_cfg = rc_config_for(checkpoint_path)
     v2 = _v2_layout_for(checkpoint_path, model.obs_dim)
     slots, has_timer = (v2[0], v2[1]) if v2 else layout_from_obs_dim(model.obs_dim)
     env = ThreatDroneEnv(reward_func, pid_gains_path=None, max_steps=MAX_STEPS_CAP, position_mode=_position_mode_for(checkpoint_path))
     if v2:
         env.set_layout_v2(v2[2])
     if has_timer:
-        env.set_timer(*_zone_for(checkpoint_path))
+        env.set_timer(*((rc_cfg.hit_radius, rc_cfg.zone_time) if rc_cfg is not None else _zone_for(checkpoint_path)))
     env.set_threats(Threats(
         slots, int(threats.get("active", 0)), max_speed=threats.get("speed", 50.0), min_speed=threats.get("speed_min"),
         spread=threats.get("spread", 30.0), spawn_min=threats.get("spawn_min", 15.0), spawn=threats.get("spawn", "uniform"),
@@ -190,11 +377,23 @@ def _make_two_phase_env(checkpoint_path, model, threats=None, rng=None, hit_radi
         tail_gap=threats.get("tail_gap", (15.0, 40.0)),
         jitter=threats.get("jitter", 2.0),
         intercept_radius=_intercept_radius_for(checkpoint_path), rng=rng))
-    env.hit_radius = float(hit_radius) if hit_radius else float(HIT_THRESHOLD)      # read by rewards.reward_func
+    env.action_repeat = max(1, int(action_repeat))
     env.los_cfg = _los_cfg_for(checkpoint_path)
-    limits = _attitude_limits_for(checkpoint_path)
-    if limits is not None:
-        env.attitude_roll_deg, env.attitude_pitch_deg = limits       # read by rewards.reward_func
+    env.rc_cfg = rc_cfg
+    env.rc_hit_rule = hit_rule
+    if rc_cfg is not None:
+        # The numpy reward_func still pays the plant's shaping, but its terminals would fire every physics step with the
+        # old rules (instant 0.25 m hit, 65/80 deg attitude, 30 m OOB). Leave every terminal to the rc checker instead.
+        env.rc_hit_radius = float(hit_radius) if hit_radius else float(rc_cfg.hit_radius)
+        env.hit_radius = -1.0
+        env.attitude_roll_deg = env.attitude_pitch_deg = 360.0
+        env.oob_radius = math.inf
+    else:
+        env.rc_hit_radius = None
+        env.hit_radius = float(hit_radius) if hit_radius else float(HIT_THRESHOLD)      # read by rewards.reward_func
+        limits = _attitude_limits_for(checkpoint_path)
+        if limits is not None:
+            env.attitude_roll_deg, env.attitude_pitch_deg = limits       # read by rewards.reward_func
     return env
 
 
@@ -227,10 +426,18 @@ def _threats_meta(env):
 def run_episode_two_phase(model, env, start_pos, target_pos, target_yaw=0.0,
                            switch_dist=DEFAULT_SWITCH_DIST,
                            log_events=None, trace_every=0, cruise_speed=18.0, handoff_speed=None, track=False, recentre_z=None,
-                           lateral_frac=0.0, tilt_deg=0.0, rng=None):
-    """One two-phase episode: PID/carrot to switch_dist, then the model. trace_every > 0 logs per-step lines; info["diag"] has the miss analysis."""
+                           lateral_frac=0.0, tilt_deg=0.0, rng=None, action_repeat=None, hit_rule=None):
+    """One two-phase episode: PID/carrot to switch_dist, then the model. trace_every > 0 logs per-step lines; info["diag"] has
+    the miss analysis. `action_repeat` = physics steps each policy action is held (None = env.action_repeat); the rc
+    terminals are checked once per policy step, like the trainer's 60 Hz eval. `hit_rule` = "trained" (the run's dwell) or
+    "acro" (first step inside + swept pass-through); None = env.rc_hit_rule."""
     t0 = time.monotonic()
-    hit_r = float(getattr(env, "hit_radius", HIT_THRESHOLD))
+    action_repeat = max(1, int(action_repeat if action_repeat is not None else getattr(env, "action_repeat", 1)))
+    policy_dt = action_repeat * env.dt
+    rc_cfg = getattr(env, "rc_cfg", None)
+    hit_rule = hit_rule if hit_rule is not None else getattr(env, "rc_hit_rule", "trained")
+    rc = _RCTerminalChecker(rc_cfg, policy_dt, timer=getattr(env, "timer", None), hit_rule=hit_rule) if rc_cfg is not None else None
+    hit_r = _two_phase_hit_radius(env)
 
     def _log(msg):
         line = f"[{_fmt_elapsed(t0)}] {msg}"
@@ -240,12 +447,24 @@ def run_episode_two_phase(model, env, start_pos, target_pos, target_yaw=0.0,
 
     _log("init")
     obs, _ = env.reset(start_pos=start_pos, target_pos=target_pos, target_yaw=target_yaw)
+    if rc is not None:
+        rc.reset(env.start_dist)
     agent = TwoPhaseAgent(model, switch_dist=switch_dist, device=device, cruise_speed=cruise_speed,
                            handoff_speed=handoff_speed, recentre_z=recentre_z, lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng)
     agent.reset(env)
+    if rc is not None:
+        if hit_rule == "acro":
+            rules = (f"rc: hit {hit_r:g}m first policy step inside or swept between steps (acro rule), "
+                     f"post-hit {rc_cfg.post_hit_steps} steps")
+        else:
+            rules = (f"rc: hit {hit_r:g}m held {rc_cfg.zone_time:g}s ({rc.limit_steps_hit} policy steps), "
+                     f"post-hit {rc_cfg.post_hit_steps} steps")
+        rules += f", tilt {rc_cfg.tilt_limit_deg:g}deg"
+    else:
+        rules = f"hit_radius={hit_r:g}m (instant)"
     _log(f"pid guide  dist={env.prev_distance:.2f}m  gains={agent.gain_key}  target={_fmt_vec(target_pos)}  "
-         f"hit_radius={hit_r:g}m  switch_dist={switch_dist}m  max_steps={env.max_steps} "
-         f"(~{env.max_steps * env.dt:.0f}s sim)")
+         f"{rules}  policy={1.0 / policy_dt:.0f}Hz ({action_repeat} physics steps/action)  switch_dist={switch_dist}m  "
+         f"max_steps={env.max_steps} (~{env.max_steps * env.dt:.0f}s sim)")
 
     positions, dists, speeds = [], [], []
     quats, phases = [], []          # only filled when track=True (3D viewer playback)
@@ -257,9 +476,20 @@ def run_episode_two_phase(model, env, start_pos, target_pos, target_yaw=0.0,
     d0 = float(env.prev_distance)
     diag = {"min_dist": d0, "min_step": 0, "min_speed": 0.0, "handoff_step": None, "handoff_dist": None,
             "handoff_speed": None, "handoff_closing": None, "handoff_lateral": None, "peak_speed": 0.0,
-            "steps_within_1m": 0, "stall_steps": 0, "approaches": 0, "rl_steps": 0, "hit_radius": hit_r}
+            "steps_within_1m": 0, "stall_steps": 0, "approaches": 0, "rl_steps": 0, "hit_radius": hit_r,
+            "action_repeat": action_repeat, "policy_steps": 0, "tilt_max_deg": 0.0, "time_s": 0.0, "mean_speed": 0.0,
+            "hit_rule": None if rc is None else rc.hit_rule,
+            "hit_dwell_s": None if rc is None else rc.hit_dwell_s,
+            "hit_swept": None if rc is None else rc.hit_rule == "acro",
+            "zone_time_s": None if rc is None else rc_cfg.zone_time,
+            "tilt_limit_deg": None if rc is None else rc_cfg.tilt_limit_deg,
+            "hit_step": None, "post_hit_end_reason": None}
     inside2 = False
     step_i = 0
+    speed_sum = 0.0
+    tilt_max = 0.0
+    policy_steps = 0
+    hit_scored = False
     threats = getattr(env, "threats", None)
     n_threats = threats.active if threats is not None else 0
     threat_frames, threat_dists, threat_speeds, threat_los, threat_vels = [], [], [], [], []         # only filled when track=True and chasers are on
@@ -268,7 +498,8 @@ def run_episode_two_phase(model, env, start_pos, target_pos, target_yaw=0.0,
     while not done:
         was_pid = agent.phase == "PID"
         action = agent.get_action(obs, env)
-        if was_pid and agent.phase == "RL":
+        on_model = agent.phase == "RL"
+        if was_pid and on_model:
             speed, closing, lateral = _episode_kin(env)
             diag.update(handoff_step=agent.switch_step, handoff_dist=float(env.prev_distance),
                         handoff_speed=speed, handoff_closing=closing, handoff_lateral=lateral)
@@ -280,71 +511,117 @@ def run_episode_two_phase(model, env, start_pos, target_pos, target_yaw=0.0,
                  f"model_action={np.round(action, 3).tolist()}")
             for line in dyn.log_lines("OPEN  (policy takes over)"):
                 _log(line)
-        if threats is not None and agent.phase == "RL":      # chasers hover until the policy flies AND the drone has closed to their release fraction
+        if threats is not None and on_model:      # chasers hover until the policy flies AND the drone has closed to their release fraction
             p, v = env.drone_state.position, env.drone_state.velocity
             threats.spawn_at_handoff([p.x, p.y, p.z], [v.x, v.y, v.z], env.target_pos)      # spawn="geometry": chasers appear now
             threats.update_release(float(env.prev_distance), d0 if diag["handoff_dist"] is None else diag["handoff_dist"])
-        obs, reward, terminated, truncated, info = env.step(action)
-        dyn.add()
-        step_i += 1
-        total_reward += reward
-        positions.append([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
-        d = float(env.prev_distance)
-        speed, closing, lateral = _episode_kin(env)
-        dists.append(d)
-        speeds.append(speed)
-        los_cos.append(closing / speed if speed > 1e-6 else 0.0)
-        if n_threats:
-            dt_near = threats.nearest_distance([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
-            if not np.isfinite(dt_near):         # geometry spawn: nobody there yet (JSON has no infinity)
-                dt_near = 1.0e4
-            diag["min_threat_dist"] = min(diag["min_threat_dist"], dt_near)
+
+        # The policy acts at 60 Hz (Isaac's decimation); the PID phase still flies every physics step.
+        for _ in range(action_repeat if on_model else 1):
+            obs, reward, terminated, truncated, info = env.step(action)
+            dyn.add()
+            step_i += 1
+            total_reward += reward
+            positions.append([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
+            d = float(env.prev_distance)
+            speed, closing, lateral = _episode_kin(env)
+            dists.append(d)
+            speeds.append(speed)
+            speed_sum += speed
+            tilt_max = max(tilt_max, _tilt_from_quat_deg(env.drone_state.orientation))
+            los_cos.append(closing / speed if speed > 1e-6 else 0.0)
+            if n_threats:
+                dt_near = threats.nearest_distance([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
+                if not np.isfinite(dt_near):         # geometry spawn: nobody there yet (JSON has no infinity)
+                    dt_near = 1.0e4
+                diag["min_threat_dist"] = min(diag["min_threat_dist"], dt_near)
+                if track:
+                    threat_frames.append(np.round(threats.pos[:n_threats], 3).tolist())
+                    threat_dists.append(dt_near)
+                    c_speed, c_los, c_vel = threats.chaser_states([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
+                    threat_speeds.append(c_speed)
+                    threat_los.append(c_los)
+                    threat_vels.append(np.round(c_vel, 3).tolist())
             if track:
-                threat_frames.append(np.round(threats.pos[:n_threats], 3).tolist())
-                threat_dists.append(dt_near)
-                c_speed, c_los, c_vel = threats.chaser_states([env.drone_state.position.x, env.drone_state.position.y, env.drone_state.position.z])
-                threat_speeds.append(c_speed)
-                threat_los.append(c_los)
-                threat_vels.append(np.round(c_vel, 3).tolist())
-        if track:
-            q = env.drone_state.orientation
-            quats.append((q.x, q.y, q.z, q.w))
-            phases.append(1 if agent.phase == "RL" else 0)
+                q = env.drone_state.orientation
+                quats.append((q.x, q.y, q.z, q.w))
+                phases.append(1 if on_model else 0)
 
-        if d < diag["min_dist"]:
-            diag.update(min_dist=d, min_step=step_i, min_speed=speed)
-        diag["peak_speed"] = max(diag["peak_speed"], speed)
-        if d < 1.0:
-            diag["steps_within_1m"] += 1
-            if d > hit_r and speed < 0.3:
-                diag["stall_steps"] += 1
-        if d < 2.0 and not inside2:
-            inside2 = True
-            diag["approaches"] += 1
-        elif d > 3.0:
-            inside2 = False
-        if agent.phase == "RL":
-            diag["rl_steps"] += 1
+            if d < diag["min_dist"]:
+                diag.update(min_dist=d, min_step=step_i, min_speed=speed)
+            diag["peak_speed"] = max(diag["peak_speed"], speed)
+            if d < 1.0:
+                diag["steps_within_1m"] += 1
+                if d > hit_r and speed < 0.3:
+                    diag["stall_steps"] += 1
+            if d < 2.0 and not inside2:
+                inside2 = True
+                diag["approaches"] += 1
+            elif d > 3.0:
+                inside2 = False
+            if on_model:
+                diag["rl_steps"] += 1
 
-        if trace_every and step_i % trace_every == 0:
+            if trace_every and step_i % trace_every == 0:
+                roll, pitch = _tilt_deg(env)
+                _log(f"t={step_i * env.dt:6.1f}s step={step_i:6d} [{agent.phase:3s}] dist={d:7.2f}m  "
+                     f"speed={speed:5.2f} (closing={closing:+6.2f} lateral={lateral:5.2f})  "
+                     f"tilt r/p={roll:+5.1f}/{pitch:+5.1f}deg  action={np.round(action, 2).tolist()}")
+            if terminated or truncated:
+                break
+
+        if not on_model:
+            done = terminated or truncated
+            continue
+
+        policy_steps += 1
+        diag["policy_steps"] = policy_steps
+        diag["time_s"] = step_i * env.dt
+        diag["tilt_max_deg"] = tilt_max
+        diag["mean_speed"] = speed_sum / max(step_i, 1)
+        # rc terminals once per policy step, as isaac_eval checks them after the 4 physics substeps
+        if rc is not None and not (terminated or truncated):
+            p = env.drone_state.position
+            d = float(env.prev_distance)
             roll, pitch = _tilt_deg(env)
-            _log(f"t={step_i * env.dt:6.1f}s step={step_i:6d} [{agent.phase:3s}] dist={d:7.2f}m  "
-                 f"speed={speed:5.2f} (closing={closing:+6.2f} lateral={lateral:5.2f})  "
-                 f"tilt r/p={roll:+5.1f}/{pitch:+5.1f}deg  action={np.round(action, 2).tolist()}")
+            tilt = _tilt_from_quat_deg(env.drone_state.orientation)
+            term, hit_now = rc.step([p.x, p.y, p.z], d, speeds[-1], tilt, roll, pitch,
+                                    target_pos=env.target_pos)
+            if hit_now:
+                hit_scored = True
+                diag["hit_step"] = policy_steps               # policy steps, like zone_time / limit_steps_hit
+                info = dict(info, reason="Hit")
+                how = "swept through the zone" if d >= rc.hit_radius else "inside the zone"
+                _log(f"hit scored  {how}  dist={d:.2f}m  policy step {policy_steps}  "
+                     f"(post-hit window {rc_cfg.post_hit_steps} steps)")
+            if term:
+                terminated = True
+                info = dict(info, reason=term)
+                if hit_scored:
+                    diag["post_hit_end_reason"] = term
+                    _log(f"post-hit window ended: {term} -- the eval still counts this episode as a Hit")
+            if env.timer:      # the policy's timer inputs follow the trainer's policy-step counter
+                env._zone_s = rc_cfg.zone_time * rc.timer_progress()
+                obs = env._get_obs()
         done = terminated or truncated
 
-    outcome = info["reason"] or "timeout"
+    outcome = "Hit" if hit_scored else (info["reason"] or "timeout")
     n = len(positions)
     for line in dyn.log_lines(f"CLOSE (episode ended: {outcome})"):
         _log(line)
     final_speed, final_closing, _ = _episode_kin(env)
     diag.update(final_speed=final_speed, final_closing=final_closing, steps=n, final_dist=float(env.prev_distance),
                 outcome=outcome)
+    diag.setdefault("time_s", n * env.dt)
+    diag.setdefault("mean_speed", speed_sum / max(n, 1))
+    diag["tilt_max_deg"] = tilt_max
+    diag["policy_steps"] = policy_steps
     stride = max(1, n // 300)
     diag["trace"] = [[i + 1, float(dists[i]), float(speeds[i])] for i in range(0, n, stride)]
     if (n - 1) % stride:
         diag["trace"].append([n, float(dists[-1]), float(speeds[-1])])
     info = dict(info)
+    info["reason"] = outcome
     info["diag"] = diag
     if track:
         info["track"] = _build_track(positions, quats, phases, dists, speeds, env.dt, threat_frames, threat_dists, dyn,
@@ -355,22 +632,36 @@ def run_episode_two_phase(model, env, start_pos, target_pos, target_yaw=0.0,
     if n_threats:
         _log(f"chasers: {n_threats} active, closest any came to the drone {diag['min_threat_dist']:.2f}m "
              f"(catch radius {threats.intercept_radius:g}m)" + ("  -> CAUGHT" if outcome == "Intercepted" else ""))
-    _log(f"done  reason={outcome}  final_dist={env.prev_distance:.2f}m  steps={n}  final_speed={final_speed:.2f}m/s")
+    _log(f"done  reason={outcome}  final_dist={env.prev_distance:.2f}m  steps={n}  final_speed={final_speed:.2f}m/s  "
+         f"policy_steps={policy_steps}  max_tilt={tilt_max:.1f}deg")
     if "oob" in outcome:
-        # same test as rewards.reward_func: world-origin distance > max(OOB_RADIUS, 3 * start_dist), or z < 0
         p = env.drone_state.position
-        radius = max(OOB_RADIUS, env.start_dist * 3.0)
+        radius = (max(rc_cfg.oob_min_radius, env.start_dist * rc_cfg.oob_start_dist_mult) if rc is not None
+                  else max(OOB_RADIUS, env.start_dist * 3.0))
         _log(f"OOB  pos=({p.x:.1f}, {p.y:.1f}, {p.z:.1f})  |pos|={np.linalg.norm([p.x, p.y, p.z]):.1f}m  "
              f"limit={radius:.1f}m  z<0={p.z < 0.0}  start_dist={env.start_dist:.1f}m")
+    stall_range = f"{hit_r:g}-1m" if hit_r < 1.0 else "<1m"
     _log(f"closest approach {diag['min_dist']:.2f}m at step {diag['min_step']} (speed {diag['min_speed']:.2f}m/s)  "
-         f"| approaches<2m={diag['approaches']}  steps<1m={diag['steps_within_1m']}  stalled(0.25-1m,<0.3m/s)="
-         f"{diag['stall_steps']}  peak_speed={diag['peak_speed']:.1f}m/s  rl_steps={diag['rl_steps']}")
+         f"| approaches<2m={diag['approaches']}  steps<1m={diag['steps_within_1m']}  "
+         f"stalled({stall_range},<0.3m/s)={diag['stall_steps']}  "
+         f"peak_speed={diag['peak_speed']:.1f}m/s  rl_steps={diag['rl_steps']}")
     if outcome != "Hit":
         gap = diag["min_dist"] - hit_r
         if diag["min_dist"] < 2.0:
-            _log(f"NEAR MISS: closest {diag['min_dist']:.2f}m vs hit radius {hit_r:g}m (missed by {gap:.2f}m)")
+            if gap >= 0.0:
+                _log(f"NEAR MISS: closest {diag['min_dist']:.2f}m vs hit radius {hit_r:g}m (missed by {gap:.2f}m)")
+            elif rc is not None and rc.hit_rule == "trained":
+                _log(f"IN THE ZONE, NO DWELL: it got {diag['min_dist']:.2f}m inside the {hit_r:g}m zone but never held "
+                     f"{rc_cfg.zone_time:g}s ({rc.limit_steps_hit} consecutive policy steps) -- the rc reward needs a "
+                     f"held hit and the flight ended {outcome} first")
+            elif rc is not None:
+                _log(f"IN THE ZONE, NO HIT: it got {diag['min_dist']:.2f}m inside the {hit_r:g}m zone but the flight "
+                     f"ended {outcome} on that step (a crash beats a hit)")
+            else:
+                _log(f"INSIDE THE ZONE BUT NOT COUNTED AS A HIT: closest {diag['min_dist']:.2f}m < {hit_r:g}m, "
+                     f"flight ended {outcome}")
         if n and diag["stall_steps"] > 0.2 * n:
-            _log(f"STALL: {100.0 * diag['stall_steps'] / n:.0f}% of the episode hovering 0.25-1m from the target "
+            _log(f"STALL: {100.0 * diag['stall_steps'] / n:.0f}% of the episode hovering {hit_r:g}-1m from the target "
                  f"at <0.3m/s -- the policy is parking next to the target instead of closing the last bit")
         elif diag["approaches"] >= 3:
             _log(f"LOOPING: {diag['approaches']} separate approaches within 2m -- swings past the target and "
@@ -474,10 +765,12 @@ def render_dist_plot(diag, out_path, switch_dist, reason):
     return out_path
 
 
-def _set_episode_budget(env, dist, log_events=None):
-    """Set env.max_steps to steps_for_dist(dist), clamped to MAX_STEPS_CAP."""
+def _set_episode_budget(env, dist, log_events=None, action_repeat=1):
+    """Set env.max_steps to steps_for_dist(dist), clamped to MAX_STEPS_CAP. The budget is rounded up to a whole number
+    of policy steps, like isaac_eval's ceil(steps_for_dist / decimation), so the last action is not cut short."""
     wanted = steps_for_dist(dist)
-    budget = min(wanted, MAX_STEPS_CAP)
+    action_repeat = max(1, int(action_repeat))
+    budget = min(int(math.ceil(wanted / action_repeat)) * action_repeat, MAX_STEPS_CAP)
     if budget < wanted:
         msg = (f"[budget]  dist={dist:.1f}m wants steps_for_dist={wanted} steps -- "
                f"clamped to MAX_STEPS_CAP={MAX_STEPS_CAP} (~{MAX_STEPS_CAP * PHYSICS_DT:.0f}s sim time); "
@@ -491,23 +784,27 @@ def _set_episode_budget(env, dist, log_events=None):
 
 def record_checkpoint_two_phase(checkpoint_path, out_path, distance=30.0,
                                  seed=None, switch_dist=DEFAULT_SWITCH_DIST, cruise_speed=18.0, handoff_speed=None, recentre_z=None,
-                                 lateral_frac=0.0, tilt_deg=0.0, threats=None, hit_radius=None):
+                                 lateral_frac=0.0, tilt_deg=0.0, threats=None, hit_radius=None, action_repeat=4,
+                                 hit_rule="trained"):
     """Two-phase record_checkpoint: renders the mp4 and returns the phase-transition log."""
     rng = np.random.default_rng(seed)
     model = load_model_for_inference(checkpoint_path)
-    env = _make_two_phase_env(checkpoint_path, model, threats, rng, hit_radius)
+    env = _make_two_phase_env(checkpoint_path, model, threats, rng, hit_radius, action_repeat=action_repeat,
+                               hit_rule=hit_rule)
     start_pos, target_pos = sample_target_at_distance(distance, rng)
+    target_yaw = float(rng.uniform(-math.pi, math.pi))       # training's eval reset: random target yaw
 
     log_events = []
-    _set_episode_budget(env, distance, log_events=log_events)
+    _set_episode_budget(env, distance, log_events=log_events, action_repeat=action_repeat)
     note = _trained_range_note(checkpoint_path, switch_dist)
     if note:
         print(f"[record_run] {note}")
         log_events.append(note)
     positions, dists, info, total_reward, log_events = run_episode_two_phase(
-        model, env, start_pos, target_pos, switch_dist=switch_dist,
+        model, env, start_pos, target_pos, target_yaw=target_yaw, switch_dist=switch_dist,
         log_events=log_events, trace_every=240, cruise_speed=cruise_speed, handoff_speed=handoff_speed, recentre_z=recentre_z,
-        lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng,
+        lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng, action_repeat=action_repeat,
+        hit_rule=hit_rule,
     )
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     render_mp4(positions, dists, target_pos, out_path, info["reason"], total_reward)
@@ -525,10 +822,12 @@ def record_checkpoint_two_phase(checkpoint_path, out_path, distance=30.0,
         "total_reward": float(total_reward),
         "start_pos": start_pos.tolist(),
         "target_pos": target_pos.tolist(),
+        "target_yaw": target_yaw,
         "distance": distance,
         "switch_dist": switch_dist,
         "recentre_z": recentre_z,
         "position_mode": env.position_mode,
+        **_two_phase_rules(env),
         "log": log_events,
         "diag": {k: v for k, v in info["diag"].items() if k != "trace"},
         "plot_path": plot_path,
@@ -537,22 +836,24 @@ def record_checkpoint_two_phase(checkpoint_path, out_path, distance=30.0,
 
 def trajectory_two_phase(checkpoint_path, distance=30.0, seed=None, switch_dist=DEFAULT_SWITCH_DIST,
                           cruise_speed=18.0, handoff_speed=None, recentre_z=None, lateral_frac=0.0, tilt_deg=0.0, threats=None,
-                          hit_radius=None):
+                          hit_radius=None, action_repeat=4, hit_rule="trained"):
     """Like record_checkpoint_two_phase but skips the mp4/png: returns the episode stats plus a per-frame
     "track" (positions, orientation, phase, distance, speed, chaser positions) for the browser's three.js player."""
     rng = np.random.default_rng(seed)
     model = load_model_for_inference(checkpoint_path)
-    env = _make_two_phase_env(checkpoint_path, model, threats, rng, hit_radius)
+    env = _make_two_phase_env(checkpoint_path, model, threats, rng, hit_radius, action_repeat=action_repeat,
+                               hit_rule=hit_rule)
     start_pos, target_pos = sample_target_at_distance(distance, rng)
+    target_yaw = float(rng.uniform(-math.pi, math.pi))       # training's eval reset: random target yaw
     log_events = []
-    _set_episode_budget(env, distance, log_events=log_events)
+    _set_episode_budget(env, distance, log_events=log_events, action_repeat=action_repeat)
     note = _trained_range_note(checkpoint_path, switch_dist)
     if note:
         log_events.append(note)
     positions, dists, info, total_reward, log_events = run_episode_two_phase(
-        model, env, start_pos, target_pos, switch_dist=switch_dist, log_events=log_events, trace_every=240,
-        cruise_speed=cruise_speed, handoff_speed=handoff_speed, track=True, recentre_z=recentre_z,
-        lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng)
+        model, env, start_pos, target_pos, target_yaw=target_yaw, switch_dist=switch_dist, log_events=log_events,
+        trace_every=240, cruise_speed=cruise_speed, handoff_speed=handoff_speed, track=True, recentre_z=recentre_z,
+        lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng, action_repeat=action_repeat, hit_rule=hit_rule)
     return {
         "reason": info["reason"] or "timeout",
         "steps": int(len(positions)),
@@ -560,11 +861,12 @@ def trajectory_two_phase(checkpoint_path, distance=30.0, seed=None, switch_dist=
         "total_reward": float(total_reward),
         "start_pos": start_pos.tolist(),
         "target_pos": target_pos.tolist(),
+        "target_yaw": target_yaw,
         "distance": distance,
         "switch_dist": switch_dist,
         "recentre_z": recentre_z,
         "position_mode": env.position_mode,
-        "hit_radius": float(env.hit_radius),
+        **_two_phase_rules(env),
         "threats": _threats_meta(env),
         "log": log_events,
         "diag": {k: v for k, v in info["diag"].items() if k != "trace"},
@@ -574,23 +876,30 @@ def trajectory_two_phase(checkpoint_path, distance=30.0, seed=None, switch_dist=
 
 def evaluate_two_phase(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance=30.0,
                         seed=None, switch_dist=DEFAULT_SWITCH_DIST, cruise_speed=18.0, handoff_speed=None, recentre_z=None,
-                        lateral_frac=0.0, tilt_deg=0.0, threats=None, hit_radius=None):
-    """Two-phase evaluate_checkpoint: n_scenarios at the same distance, random directions, no rendering."""
+                        lateral_frac=0.0, tilt_deg=0.0, threats=None, hit_radius=None, action_repeat=4,
+                        hit_rule="trained"):
+    """Two-phase evaluate_checkpoint: n_scenarios at the same distance, random directions and target yaw, no rendering.
+    With an rc checkpoint this uses the run's eval endings (dwell, tilt crash, hover, post-hit window); `hit_rule="acro"`
+    swaps the dwell for the acro eval's first-step / swept rule."""
     rng = np.random.default_rng(seed)
     model = load_model_for_inference(checkpoint_path)
-    env = _make_two_phase_env(checkpoint_path, model, threats, rng, hit_radius)
-    budget = _set_episode_budget(env, distance)
+    env = _make_two_phase_env(checkpoint_path, model, threats, rng, hit_radius, action_repeat=action_repeat,
+                               hit_rule=hit_rule)
+    budget = _set_episode_budget(env, distance, action_repeat=action_repeat)
+    rules = _two_phase_rules(env)
 
     scenarios = []
-    totals = {"hit": 0, "oob": 0, "attitude": 0, "timeout": 0, "caught": 0}
+    totals = {"hit": 0, "oob": 0, "attitude": 0, "hover": 0, "timeout": 0, "caught": 0}
     all_log_lines = []
     for i in range(n_scenarios):
         start_pos, target_pos = sample_target_at_distance(distance, rng)
+        target_yaw = float(rng.uniform(-math.pi, math.pi))
         env.max_steps = budget  # _set_episode_budget already logged/clamped once above
         positions, dists, info, total_reward, log_events = run_episode_two_phase(
-            model, env, start_pos, target_pos, switch_dist=switch_dist,
+            model, env, start_pos, target_pos, target_yaw=target_yaw, switch_dist=switch_dist,
             log_events=[], cruise_speed=cruise_speed, handoff_speed=handoff_speed, recentre_z=recentre_z,
-            lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng,
+            lateral_frac=lateral_frac, tilt_deg=tilt_deg, rng=rng, action_repeat=action_repeat,
+            hit_rule=hit_rule,
         )
         outcome = _classify_outcome(info["reason"])
         for k, v in outcome.items():
@@ -603,32 +912,46 @@ def evaluate_two_phase(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance=3
             "min_dist": dg["min_dist"], "min_step": dg["min_step"], "handoff_speed": dg["handoff_speed"],
             "handoff_dist": dg["handoff_dist"], "approaches": dg["approaches"], "stall_steps": dg["stall_steps"],
             "final_speed": dg["final_speed"], "min_threat_dist": dg["min_threat_dist"],
+            "time_s": dg["time_s"], "mean_speed": dg["mean_speed"], "tilt_max_deg": dg["tilt_max_deg"],
+            "policy_steps": dg["policy_steps"], "hit_step": dg["hit_step"],
+            "post_hit_end_reason": dg["post_hit_end_reason"],
             **outcome,
         })
         all_log_lines.append(f"--- scenario {i + 1}/{n_scenarios} ---")
         all_log_lines.extend(log_events)
         print(f"[evaluate_two_phase] {i + 1}/{n_scenarios} dist={distance:.1f}m "
               f"reason={info['reason'] or 'timeout'} final_dist={final_dist} min_dist={dg['min_dist']:.2f} "
-              f"handoff_speed={dg['handoff_speed']}")
+              f"max_tilt={dg['tilt_max_deg']:.1f}deg handoff_speed={dg['handoff_speed']}")
 
     pct = {k: 100.0 * v / n_scenarios for k, v in totals.items()}
+    if not rules["rc"]:
+        hit_text = f"instant hit at {rules['hit_radius']:g} m"
+    elif rules["hit_rule"] == "acro":
+        hit_text = f"hit {rules['hit_radius']:g} m first policy step inside or swept between steps (acro rule)"
+    else:
+        hit_text = f"hit {rules['hit_radius']:g} m held {rules['zone_time_s']:g} s"
+    rules_line = (f"Policy: {1.0 / (rules['action_repeat'] * PHYSICS_DT):.0f} Hz "
+                  f"({rules['action_repeat']} physics steps per action), "
+                  + (f"rc endings: {hit_text}, tilt crash at {rules['tilt_limit_deg']:g} deg"
+                     if rules["rc"] else hit_text))
     lines = [f"Checkpoint: {checkpoint_path}",
              f"Mode: two-phase (PID midcourse, analytic gains -> "
              f"RL terminal at {switch_dist}m)" + (
                  f"  | {env.threats.active} chasing drone(s) of {env.threats.slots} slot(s): speed cap {env.threats.max_speed:g} m/s, "
                  f"{env.threats.spawn} spawn, spread {env.threats.spread:g} m, catch radius {env.threats.intercept_radius:g} m"
                  if env.threats.active else ""),
-             f"Scenarios: {n_scenarios}  distance={distance}m (random direction each run)", ""]
+             rules_line,
+             f"Scenarios: {n_scenarios}  distance={distance}m (random direction and target yaw each run)", ""]
     for s in scenarios:
         hs = f"{s['handoff_speed']:.1f}" if s["handoff_speed"] is not None else "n/a"
         lines.append(f"[{s['idx']:3d}] dist={s['dist']:5.2f}m spawn={_fmt_vec(s['spawn'])} "
                       f"target={_fmt_vec(s['target'])} -> {s['reason']:<16} "
                       f"final_dist={s['final_dist']:.2f}m closest={s['min_dist']:.2f}m@{s['min_step']} "
                       f"handoff_speed={hs}m/s approaches={s['approaches']} stalled={s['stall_steps']} "
-                      f"steps={s['steps']}")
+                      f"steps={s['steps']} time={s['time_s']:.1f}s max_tilt={s['tilt_max_deg']:.0f}deg")
     lines.append("")
     lines.append("Totals:")
-    for k in ("hit", "oob", "attitude", "timeout") + (("caught",) if env.threats.active else ()):
+    for k in ("hit", "oob", "attitude", "hover", "timeout") + (("caught",) if env.threats.active else ()):
         lines.append(f"  {k:<10} {totals[k]:3d}/{n_scenarios}  ({pct[k]:.1f}%)")
     misses = [s for s in scenarios if not s["hit"]]
     near = [s for s in misses if s["min_dist"] < 1.0]
@@ -636,7 +959,7 @@ def evaluate_two_phase(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance=3
     lines.append(f"Near-misses (not a hit, but closest approach < 1 m): {len(near)}/{len(misses)} of the misses")
     if misses:
         lines.append(f"  mean closest approach of misses: {np.mean([s['min_dist'] for s in misses]):.2f} m "
-                     f"(hit radius {env.hit_radius:g} m); mean final distance: "
+                     f"(hit radius {rules['hit_radius']:g} m); mean final distance: "
                      f"{np.mean([s['final_dist'] for s in misses]):.2f} m")
     hs_all = [s["handoff_speed"] for s in scenarios if s["handoff_speed"] is not None]
     if hs_all:
@@ -648,7 +971,7 @@ def evaluate_two_phase(checkpoint_path, n_scenarios=N_EVAL_SCENARIOS, distance=3
     summary_text = "\n".join(lines)
 
     return {"checkpoint": checkpoint_path, "scenarios": scenarios, "totals": totals,
-            "pct": pct, "summary_text": summary_text, "log": all_log_lines}
+            "pct": pct, "summary_text": summary_text, "log": all_log_lines, **rules}
 
 
 def _position_mode_for(checkpoint_path):
@@ -774,6 +1097,7 @@ def _classify_outcome(reason):
         "hit": reason == "Hit",
         "oob": "oob" in parts,
         "attitude": any(p.startswith("attitude") for p in parts),
+        "hover": reason == "hover",             # rc reward: parked outside the zone for hover_limit_s
         "timeout": reason is None,
         "caught": reason == "Intercepted",      # a chasing drone reached it
     }
@@ -1214,12 +1538,15 @@ def _parse_args():
                          help="evaluate an ACRO checkpoint like the trainer's isaac_eval (see evaluate_acro); uses --distance-low/high, "
                               "--n-scenarios, --seed, --tilt-limit, --action-repeat")
     parser.add_argument("--hit-radius", type=float, default=None,
-                         help="--acro only: hit zone in metres (default: the radius the run was trained with, else 0.25)")
+                         help="--acro / --two-phase: hit zone in metres (default: the radius the run was trained with, else 0.25)")
+    parser.add_argument("--hit-rule", choices=("trained", "acro"), default="trained",
+                         help="--two-phase only: 'trained' = the run's zone_time dwell (default, matches isaac_eval); "
+                              "'acro' = first policy step inside + swept pass-through (the acro eval's rule)")
     parser.add_argument("--start", choices=("auto", "rest"), default="auto",
                          help="--acro only: auto = launch like the run trained (run_config spawn speed), rest = from rest")
     parser.add_argument("--tilt-limit", type=float, default=120.0, help="--acro only: tilt limit (deg); crash at limit + 30")
     parser.add_argument("--action-repeat", type=int, default=4,
-                         help="--acro only: physics steps each action is held (Isaac: 4 = 60 Hz policy; 1 = 240 Hz)")
+                         help="--acro / --two-phase: physics steps each action is held (Isaac: 4 = 60 Hz policy; 1 = 240 Hz)")
     parser.add_argument("--two-phase", action="store_true",
                          help="PID flies midcourse (gains solved analytically for the exact --distance), "
                               "checkpoint flies the last --switch-dist meters (see app.control.two_phase) -- "
@@ -1253,13 +1580,15 @@ if __name__ == "__main__":
             result = evaluate_two_phase(checkpoint, n_scenarios=args.n_scenarios, distance=args.distance,
                                          seed=args.seed, switch_dist=args.switch_dist,
                                          cruise_speed=args.cruise_speed or None, handoff_speed=args.handoff_speed,
-                                         recentre_z=args.recentre_z)
+                                         recentre_z=args.recentre_z, hit_radius=args.hit_radius,
+                                         action_repeat=args.action_repeat, hit_rule=args.hit_rule)
             print(result["summary_text"])
         else:
             stats = record_checkpoint_two_phase(checkpoint, args.out, distance=args.distance,
                                                  seed=args.seed, switch_dist=args.switch_dist,
                                                  cruise_speed=args.cruise_speed or None, handoff_speed=args.handoff_speed,
-                                                 recentre_z=args.recentre_z)
+                                                 recentre_z=args.recentre_z, hit_radius=args.hit_radius,
+                                                 action_repeat=args.action_repeat, hit_rule=args.hit_rule)
             print(f"[record_run] done: {stats}")
     else:
         raise SystemExit("pick a mode: --two-phase [--evaluate] or --acro")
