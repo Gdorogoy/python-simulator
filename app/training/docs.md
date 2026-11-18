@@ -179,20 +179,21 @@ Trainer for `Isaac-Acro-Drone-Direct-v0`. It reuses the PPO update, phases and l
 "reach a target at U(distance-low, distance-high) m" (or from the `--buckets` curriculum), optionally behind the same
 handoff stage (`--handoff`).
 
-**Teacher (`--teacher`, 2026-10-24).** `los` = `LosTeacher`: the angle trainer's line-of-sight controller (`make_los_label`) produces
-an angle-style action `[thrust_delta, tau_x, tau_y, tau_z]`, and `angle_to_acro` turns it into a rate command with the same
-first-substep torque. `checkpoint` = `AngleTeacher`, a frozen angle-style policy (`--teacher-checkpoint`). `none` = no teacher.
-`acro` = `AcroTeacher` (added 2026-11-09), a frozen acro-style policy (e.g. a previous stage's `best.pt`): its output is already
-`[thrust_delta, p, q, r]` in this env's units, so the labels are used as-is with no `angle_to_acro`. It refuses a checkpoint whose
-action bounds differ from the env's, which catches an angle policy passed by mistake (angle rate bounds are +-1.5 / +-0.5, acro
-+-6 / +-3). With `--teacher acro` and no `--bc-checkpoint`, the student starts as an exact copy of the teacher (head kept).
-`auto` (default) picks `checkpoint` when `--teacher-checkpoint` is given, `none` when continuing from `--bc-checkpoint`, else `los`.
-**Use `--teacher acro` explicitly for acro checkpoints.** `auto` treats any `--teacher-checkpoint` as angle-style; an acro file
-then gets converted as if it were angle torques and the teacher flies at 0 %.
+**Teacher (`--teacher none | policy | los | pid`, the angle trainer's vocabulary).** `policy` = the frozen `--teacher-checkpoint`.
+The checkpoint's own action bounds pick the loader (2026-11-18): bounds equal to this env's acro rate bounds -> `AcroTeacher`, whose output
+`[thrust_delta, p, q, r]` is already in this env's units, so the labels are used as-is; any other bounds (or a file that stores none) ->
+`AngleTeacher`, an angle-style policy whose torques `angle_to_acro` turns into rates. This used to be two modes, `checkpoint` (angle) and
+`acro` (acro): naming the wrong one converted an acro file as if it held angle torques, and the teacher flew at 0 %.
+With `--teacher policy` and no `--bc-checkpoint`, the student starts as an exact copy of an acro teacher (head kept).
+`los` = `LosTeacher`: the angle trainer's line-of-sight controller (`make_los_label`) produces an angle-style action
+`[thrust_delta, tau_x, tau_y, tau_z]`, and `angle_to_acro` turns it into a rate command with the same first-substep torque.
+`pid` = `PidAcroTeacher`: the angle trainer's per-distance PID, converted the same way; it is stateful, so it is reset at every
+episode end. Its labels are not speed-faded (acro has no `--distill-fade-speed`), so use it mainly as a `--teacher-check-only`
+baseline rather than a long distillation teacher. `none` (default) = no teacher at all: no `TEACHER CHECK`, no DAgger-BC, no distillation.
 With the LOS teacher and no `--bc-checkpoint`, the student starts as a hover policy and runs 6 BC chunks by default.
 Flags: `--los-stop-speed`, `--los-max-tilt-deg` (0 < cap <= 90 unless `--teacher-accel` is given), `--teacher-cruise-gain`,
 `--teacher-accel`, `--max-speed`. `--pid-eval-every` flies the teacher alone every N chunks; that result is the `pid=` field of the
-console line (acro has no PID baseline).
+console line (with `--teacher pid` it is a real PID baseline).
 
 **Console output.** The per-chunk lines use the angle trainer's `[rtl]` format (see `rtl-handoff.md` section 9): one progress line, plus
 `eval endings` and `handoff check` lines on eval chunks. Differences: `tilt=` replaces `roll=`/`pitch=` in the endings, `caught` is always
@@ -205,7 +206,7 @@ line, speed shortfall fraction), and on `v4` `perp=` / `path=` / `hitv=` (perpen
 see "Reading the training logs" above.
 
 **Stages (run by hand).**
-1. *Stage 1*: the LOS teacher (default), or `--teacher-checkpoint <angle actor .pt>`, in which case the student starts from the teacher's
+1. *Stage 1*: the LOS teacher (`--teacher los`), or `--teacher policy --teacher-checkpoint <actor .pt>`, in which case the student starts from the teacher's
    trunk (same 23 -> 4 network). DAgger-BC runs first (up to `--bc-chunks`, default 6), then the usual PPO phases with a fading distillation term.
    BC aggregates every labelled state in a buffer (`--bc-buffer`), so states the student drifts into are kept (default cap 10M pairs, 250k per chunk).
    The teacher flies a fraction of the envs (`--bc-beta-start`) that decays to 0 over `--bc-beta-chunks` (default 4); after that the
@@ -288,14 +289,14 @@ Example (stage 1):
 ```bash
 /mnt/e/Isaac/env_isaaclab/Scripts/python.exe -u app/training/acro_rtl_train_isaac.py --headless \
       --num_envs 8192 --distance-low 3 --distance-high 50 --obs-position-mode height --tilt-limit 120 \
-      --teacher-checkpoint stable_models/handoff_v5_3_50m_18/best.pt \
+      --teacher policy --teacher-checkpoint stable_models/handoff_v5_3_50m_18/best.pt \
       --checkpoint-dir runs/acro_s1_L120_3_50m --init-std 0.07 --warmup-chunks 8 --stop-hit 0.9
 ```
 
 ### Fine-tuning a checkpoint (speed runs)
 
 `--bc-checkpoint <run>/best.pt` loads the weights and sets `bc_chunks` to 0, so there is no DAgger stage; with no
-`--teacher-checkpoint`, `--teacher auto` resolves to `none` and nothing distils back toward the teacher. That is
+`--teacher`, the default `none` means nothing distils back toward the teacher. That is
 the mode for a targeted fine-tune: one reward change, 20-30 chunks, same env. The worked example (1000-1500 m,
 v4 reward, constant LR) is "The fine-tune card" in `guide/05_rewards.md`.
 

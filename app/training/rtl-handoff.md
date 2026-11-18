@@ -661,9 +661,9 @@ swallow it.
 
 These supersede older statements in sections 5, 6 and 9 where they differ.
 
-- **Teacher is no longer always the PID.** `--teacher {auto,pid,policy,los}`. `los` is a scripted line-of-sight controller
+- **Teacher is no longer always the PID.** `--teacher {none,policy,los,pid}`. `los` is a scripted line-of-sight controller
   (`make_los_label`): fly straight at the target at `min(max_speed, sqrt(2 * accel * dist))`, braking down to `--los-stop-speed`.
-  `auto` = `policy` if a checkpoint was passed, else `los`. The PID still flies the handoff leg and the `pid=` baseline.
+  `none` (default) = no distillation at all. The PID still flies the handoff leg and the `pid=` baseline.
 - **Teacher check first.** With a non-PID teacher, the run flies the teacher alone through the handoff and prints `TEACHER CHECK`
   before any training. Under 50 % hits it warns: distilling from a teacher that cannot hit cannot work.
 - **Teacher BC** (`--teacher-bc-chunks`, `--scratch`): supervised DAgger onto the teacher before PPO, which is much faster than

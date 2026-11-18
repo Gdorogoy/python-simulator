@@ -251,7 +251,7 @@ PROFILES = {
             "--gamma": 0.995,
             "--lam": 1.0,
             "--bc-checkpoint": "stable_models/acro_1000_1500_40ms/best.pt",
-            "--teacher": "acro",
+            "--teacher": "policy",
             "--teacher-checkpoint": "stable_models/acro_1000_1500_40ms/best.pt",
             "--distill-start": 0.33,
             "--distill-end": 0.0,

@@ -1,9 +1,10 @@
 """Acro-style trainer: DAgger-BC from a teacher, then PPO + distillation with the quaternion tilt-limit reward.
-Teacher (--teacher): los = the angle trainer's straight-line-of-sight controller (make_los_label), its angle-style torques
-turned into body-rate commands; checkpoint = a frozen angle-style policy (--teacher-checkpoint); acro = a frozen acro-style policy (e.g. the previous stage best.pt),
-labels used as-is; none.
-Staged use: stage 1 = the los teacher (BC + PPO), later stages = --bc-checkpoint <previous best.pt> with a wider
---tilt-limit and no teacher. See app/training/docs.md "acro_rtl_train_isaac"."""
+Teacher (--teacher none | policy | los | pid, the angle trainer's vocabulary): los = the angle trainer's
+straight-line-of-sight controller (make_los_label); pid = its per-distance PID; both make angle-style torques, turned
+into body-rate commands. policy = the frozen --teacher-checkpoint, whose saved action bounds say whether it is an acro
+actor (labels used as-is) or an angle actor (torques converted); none = no teacher at all.
+Staged use: stage 1 = --teacher los (BC + PPO), later stages = --bc-checkpoint <previous best.pt> with a wider
+--tilt-limit and no teacher (the default). See app/training/docs.md "acro_rtl_train_isaac"."""
 from __future__ import annotations
 
 import argparse
@@ -100,8 +101,9 @@ class AcroTeacher:
         load_bc_checkpoint(self.net, path, map_location=device)
         ck_low, ck_high = self.net.action_low.clone(), self.net.action_high.clone()
         if not (torch.allclose(ck_low, self.low) and torch.allclose(ck_high, self.high)):
-            raise SystemExit(f"--teacher acro: {path!r} has action bounds {ck_low.tolist()} .. {ck_high.tolist()}, env uses "
-                             f"{self.low.tolist()} .. {self.high.tolist()}. Is it an angle-style policy? Use --teacher checkpoint for those.")
+            raise SystemExit(f"--teacher policy: {path!r} has action bounds {ck_low.tolist()} .. {ck_high.tolist()}, env uses "
+                             f"{self.low.tolist()} .. {self.high.tolist()}. The bounds are detected, so this file looks like an "
+                             f"angle-style actor: check it with --teacher-checkpoint alone (--teacher-check-only)")
         self.net.eval()
         for q in self.net.parameters():
             q.requires_grad_(False)
@@ -146,6 +148,73 @@ def angle_to_acro(u, a, low, high):
     rc = u._rate_ctrl
     cmd = u._robot.data.root_ang_vel_b + a[:, 1:4] / (rc.inertia * rc.kp)
     return torch.max(torch.min(torch.cat([a[:, :1], cmd], dim=-1), high), low)
+
+
+class PidAcroTeacher:
+    """--teacher pid: the angle trainer's per-distance PID (`best_pid_gains_per_dist.json`), its angle-style torque action
+    turned into body-rate commands with angle_to_acro. Same interface as the other teachers: label(obs) -> (normalised
+    label, action in acro units). Stateful, so reset(env_ids) at every episode end (see reset_teacher)."""
+
+    def __init__(self, env, gains_by_dist):
+        self.env = env
+        self.u = env.unwrapped
+        self.low = torch.as_tensor(self.u.single_action_space.low, device=self.u.device)
+        self.high = torch.as_tensor(self.u.single_action_space.high, device=self.u.device)
+        self._pid = PidTeacher(env, gains_by_dist)   # the gain table + the angle-bounds PID; reset() forwards to it
+        # PidTeacher.label() normalises with THIS env's action bounds, but the labels are angle actions: read the
+        # controller's own bounds instead (the same trick LosTeacher gets through make_los_label)
+        self.angle_low, self.angle_high = self._pid.pid.action_low, self._pid.pid.action_high
+        print("[rtl] TEACHER: pid (per-distance gains) -> body-rate commands")
+
+    def reset(self, env_ids):
+        self._pid.reset(env_ids)
+
+    @torch.no_grad()
+    def label(self, obs):
+        pos, vel, ang_vel, roll, pitch, yaw, target = self._pid._read_kinematics(self.env)
+        a = self._pid.pid.compute_action(pos, vel, ang_vel, roll, pitch, yaw, target,
+                                         self.u._desired_yaw_w, dt=1 / 240)
+        act = angle_to_acro(self.u, a, self.low, self.high)
+        return torch.clamp(2.0 * (act - self.low) / (self.high - self.low) - 1.0, -1.0, 1.0), act
+
+
+def teacher_style(path, env):
+    """Which frozen-actor loader --teacher-checkpoint needs: 'acro' when its saved action bounds are this env's own (an
+    acro actor, labels used as-is); 'angle' otherwise, or when the file carries no bounds (angle trainer torque units,
+    turned into body rates with angle_to_acro)."""
+    raw = torch.load(path, map_location="cpu")
+    if not isinstance(raw, dict) or "action_low" not in raw or "action_high" not in raw:
+        print("[rtl] --teacher policy: the checkpoint stores no action bounds; assuming an ANGLE-style actor")
+        return "angle"
+    u = env.unwrapped
+    low = torch.as_tensor(u.single_action_space.low).float().cpu()
+    high = torch.as_tensor(u.single_action_space.high).float().cpu()
+    same = (torch.allclose(torch.as_tensor(raw["action_low"]).float().cpu(), low)
+            and torch.allclose(torch.as_tensor(raw["action_high"]).float().cpu(), high))
+    return "acro" if same else "angle"
+
+
+def make_policy_teacher(path, env, device):
+    """--teacher policy: one mode for both kinds of frozen actor (it used to be --teacher acro vs --teacher checkpoint).
+    The checkpoint's own action bounds decide, so naming the wrong one is no longer possible."""
+    style = teacher_style(path, env)
+    print(f"[rtl] --teacher policy: {path} has {'ACRO' if style == 'acro' else 'ANGLE'}-style action bounds ("
+          + ("labels used as-is" if style == "acro" else "torques -> body rates") + ")")
+    return AcroTeacher(path, env, device) if style == "acro" else AngleTeacher(path, env, device)
+
+
+def validate_teacher_args(args):
+    """Fail fast, before the Isaac app boots, on a teacher the run cannot honour."""
+    if args.teacher == "policy" and not args.teacher_checkpoint:
+        raise SystemExit("--teacher policy needs --teacher-checkpoint (the frozen actor to distil from)")
+    if args.teacher == "none" and args.teacher_checkpoint:
+        print("[rtl] WARNING: --teacher none ignores --teacher-checkpoint")
+
+
+def reset_teacher(teacher, env_ids):
+    """Only the PID teacher carries per-episode state (integrators); the frozen and LOS teachers have no reset."""
+    if teacher is not None and hasattr(teacher, "reset"):
+        teacher.reset(env_ids)
 
 
 def controller_action(env, u, low, high):
@@ -194,6 +263,8 @@ def collect_rollout(env, model, teacher, obs, num_steps, gamma, bootstrap_timeou
         next_dict, reward, terminated, truncated, extras = env.step(action)
         next_obs = next_dict["policy"]
         done = terminated | truncated
+        if teacher is not None and bool(done.any()):
+            reset_teacher(teacher, torch.nonzero(done, as_tuple=False).squeeze(-1))   # PID integrators restart with the episode
         if handoff:
             u._refresh_handoff()
             js = torch.nonzero(ctrl & u._handed_off & ~done, as_tuple=False).squeeze(-1)
@@ -254,6 +325,7 @@ def reset_and_desync(env, model, teacher, args, ep_ret):
     u = env.unwrapped
     u._stagger_next = True      # random start point on the spawn->target line, like the angle trainer
     obs = env.reset()[0]["policy"]   # the env staggers episode_length_buf on a full reset; the reward treats the first (shortened) episode as partial
+    reset_teacher(teacher, None)
     u._stagger_next = False
     u._acro_stall.zero_()
     u._acro_away.zero_()
@@ -345,6 +417,7 @@ def isaac_eval(env, model, steps, tilt_limit_deg, noisy=False, teacher=None, dis
     bucket0 = bucket0.clone() if bucket0 is not None else None
     u._dist_buckets = saved_buckets               # the sampler only runs on reset; training keeps its curriculum
     zero_acro_clock(u)   # eval scores true first episodes: every clock back to 0
+    reset_teacher(teacher, None)   # the PID teacher's integrators must not carry over from the rollout into the eval
     speed0 = getattr(u, "_spawn_speed", torch.zeros(N, device=dev)).clone()   # handoff: the sampled takeover speed
     outcome = torch.zeros(N, dtype=torch.long, device=dev)
     hit_step = torch.zeros(N, device=dev)
@@ -432,6 +505,9 @@ def isaac_eval(env, model, steps, tilt_limit_deg, noisy=False, teacher=None, dis
         outcome = torch.where(out_of_time, torch.full_like(outcome, EVAL_CODES["timeout"]), outcome)
         if bool((outcome > 0).all()):
             break
+        ended = torch.nonzero(term | trunc, as_tuple=False).squeeze(-1)
+        if ended.numel() > 0:
+            reset_teacher(teacher, ended)
 
     res = {"hit": (outcome == EVAL_CODES["hit"]).float().mean().item()}
     for name, c in EVAL_CODES.items():
@@ -636,12 +712,15 @@ def build_parser():
                         "terminal straightness bonus (acro_reward_v4.py, hit_swept, line_path_leg, line_lead_s, path_leg)")
     p.add_argument("--reward-json", default=None, help="path or inline JSON with AcroRewardConfig (v2: AcroRewardV2Config, v3: AcroRewardV3Config, v4: AcroRewardV4Config) overrides, e.g. '{\"c_tumble\": 2e-4}'")
     # weights
-    p.add_argument("--teacher", choices=("auto", "los", "checkpoint", "acro", "none"), default="auto",
-                   help="DAgger-BC / distillation teacher. los: the angle trainer's line-of-sight controller. checkpoint: the frozen angle-style "
-                        "--teacher-checkpoint. acro: the frozen ACRO-style --teacher-checkpoint (e.g. the previous stage's best.pt), labels used as-is. "
-                        "auto: checkpoint if --teacher-checkpoint is given, none when continuing from --bc-checkpoint, else los")
-    p.add_argument("--teacher-checkpoint", default=None, help="frozen actor (.pt) used as DAgger-BC / distillation teacher: ANGLE-style for "
-                                                              "--teacher checkpoint, ACRO-style for --teacher acro")
+    p.add_argument("--teacher", choices=("none", "policy", "los", "pid"), default="none",
+                   help="DAgger-BC / distillation teacher (the angle trainer's vocabulary). none: no teacher at all (PPO alone). "
+                        "policy: the frozen --teacher-checkpoint; its saved action bounds decide whether it is an acro actor "
+                        "(labels used as-is) or an angle-style one (torques -> body rates). los: the angle trainer's "
+                        "line-of-sight controller. pid: the angle trainer's per-distance PID. los/pid are angle actions, "
+                        "turned into body-rate commands here.")
+    p.add_argument("--teacher-checkpoint", default=None,
+                   help="frozen actor (.pt) for --teacher policy. ACRO-style (this env's action bounds) is used as-is, "
+                        "ANGLE-style (the angle trainer's torque units) is converted; the bounds are detected, not declared")
     p.add_argument("--los-stop-speed", type=float, default=0.5,
                    help="--teacher los: the speed it brakes down to at the target. 0.5 = arrive and stop; >= --max-speed = never brake")
     p.add_argument("--los-max-tilt-deg", type=float, default=35.0,
@@ -799,12 +878,9 @@ def run(env, args):
     else:
         rcfg = install_acro_reward(u, AcroRewardConfig.from_overrides(overrides))
     teacher_mode = args.teacher
-    if teacher_mode == "auto":
-        teacher_mode = "checkpoint" if args.teacher_checkpoint else ("none" if args.bc_checkpoint_path else "los")
-    if teacher_mode in ("checkpoint", "acro") and not args.teacher_checkpoint:
-        raise SystemExit(f"--teacher {teacher_mode} needs --teacher-checkpoint")
+    validate_teacher_args(args)
     gains_by_dist = None
-    if args.handoff or teacher_mode == "los" or args.runner:
+    if args.handoff or teacher_mode in ("los", "pid") or args.runner:
         with open("app/control/best_pid_gains_per_dist.json") as f:
             gains_by_dist = json.load(f)
     if args.runner:
@@ -864,13 +940,14 @@ def run(env, args):
           f"(hard cap {rcfg.tilt_limit_deg + rcfg.tilt_hard_margin_deg} deg) | obs position mode {args.obs_position_mode}")
 
     teacher = (LosTeacher(env, gains_by_dist, args) if teacher_mode == "los"
-               else AngleTeacher(args.teacher_checkpoint, env, device) if teacher_mode == "checkpoint"
-               else AcroTeacher(args.teacher_checkpoint, env, device) if teacher_mode == "acro" else None)
+               else PidAcroTeacher(env, gains_by_dist) if teacher_mode == "pid"
+               else make_policy_teacher(args.teacher_checkpoint, env, device) if teacher_mode == "policy"
+               else None)
     model, from_teacher, (obs_dim, a_dim, low, high, hidden, layers) = load_student(args, env, teacher, device)
     chunk_steps = args.num_steps_per_chunk * N
     bc_chunks = args.bc_chunks if args.bc_chunks is not None else (6 if (teacher is not None and not args.bc_checkpoint_path) else 0)
     if bc_chunks > 0 and teacher is None:
-        raise SystemExit("--bc-chunks needs a teacher (--teacher los, or --teacher-checkpoint)")
+        raise SystemExit("--bc-chunks needs a teacher: --teacher policy, los or pid")
 
     ep_ret = torch.zeros(N, device=device)
     obs = env.reset()[0]["policy"]
@@ -878,6 +955,9 @@ def run(env, args):
 
     # ---- teacher check (same lines as the angle trainer): fly the teacher itself through the handoff. If IT fails, no student can
     # learn from its labels; this is the ceiling for BC. Labels go through angle_to_acro, so it can differ from the angle teacher. ----
+    if args.teacher_check_only and teacher is None:
+        print(f"[rtl] --teacher-check-only: --teacher {teacher_mode} has no teacher to fly, nothing to check")
+        return
     if teacher is not None:
         tv = isaac_eval(env, model, args.eval_steps, rcfg.tilt_limit_deg, teacher=teacher)
         print(f"[rtl] TEACHER CHECK ({teacher_mode} flying the policy's part, n={N}): "
@@ -1210,6 +1290,7 @@ def main():
         args.dist_buckets = parse_buckets(args.buckets)   # fail before the Isaac app starts
     except ValueError as e:
         parser.error(str(e))
+    validate_teacher_args(args)   # same: a teacher that cannot be built should not wait for Isaac to boot
     sim_app = AppLauncher(args).app
 
     import gymnasium as gym
