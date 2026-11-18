@@ -409,7 +409,7 @@ Part 14. Proposed next version: `alt_model.md`.
   (`best_eval_hit` in `metrics.csv`, formerly `best_train_hit_ma3`); at each eval chunk, if eval < best - `--guard-margin` the boost is multiplied (cap
   `--guard-boost-max`), otherwise it decays x0.9 and the bar rises with new bests. `--guard-min-episodes` (default 4 % of envs, min 50) only gates the baseline and the abort
   check now; chunks with no finished episode report NaN rates.
-- **`--anchor-checkpoint PATH` (new):** a frozen copy of those actor weights is the distillation teacher INSTEAD of the PID (label = `tanh(mean)`, no speed fade).
+- **`--teacher-checkpoint PATH` (new):** a frozen copy of those actor weights is the distillation teacher INSTEAD of the PID (label = `tanh(mean)`, no speed fade).
   The PID is still queried each step (integrators, the legacy short prefix leg, and the PID baseline in eval). At the start `agree` is 0.000 (student = anchor).
   Scale note and a measured result: a frozen-best anchor stays close to the student (`agree` ~0.01 -> squared error ~1e-4), so its loss is tiny next to the old PID-era
   loss (`agree` ~0.3). I expected the weak weight to be "almost no constraint" and therefore too weak; **the test showed the opposite** (1024 envs, 150-250 m spawn, 23 chunks,
@@ -480,7 +480,7 @@ In critic warmup only `vf_coef * L_v` is used (the actor receives no gradient).
 
 **4. Teacher label and distillation weight** (`PidTeacher.label`, `distill_scheduled`, the loop)
 ```
-a_teacher   = clamp( 2 (a_pid - low)/(high - low) - 1 , -1, 1 )                       (PID)   or   tanh(mu_frozen)   (--anchor-checkpoint)
+a_teacher   = clamp( 2 (a_pid - low)/(high - low) - 1 , -1, 1 )                       (PID)   or   tanh(mu_frozen)   (--teacher-checkpoint)
 tw          = clamp( 1 - speed / --distill-fade-speed , 0, 1 )                         (PID teacher; speed read from the observation)   tw = 1   (anchor)
 ds          = start + (end - start) * min(1, idx / decay_chunks)                       idx = number of chunks in which the actor was trainable
 coef_eff    = min( --distill-max , ds * boost )     while the actor trains,  0 otherwise      <- the CAP: --distill-start 20 with the default --distill-max 5 acts as 5.0
@@ -588,7 +588,7 @@ Where it is implemented: `build_observation(..., position_mode)` / `BaseDroneEnv
 
 **Numpy replay parity** (same 24 scenarios as the re-centring test, 250 m / switch 40 m, seed 0, same checkpoint, no `recentre_z`): `height` mode **24/24 hits** (stock `full` replay: 3/24; `full` + `recentre_z=20`: 24/24).
 A short run after that (10 chunks, `--obs-position-mode height`, frozen-best anchor 0.25 -> 0.1) held eval at 0.89-0.93 (too short to conclude more).
-So removing the absolute x/y inputs did not hurt the existing policy, it helped. Retrain command: add `--obs-position-mode height`; a `full`-mode `best.pt` is a valid `--bc-checkpoint` / `--anchor-checkpoint`.
+So removing the absolute x/y inputs did not hurt the existing policy, it helped. Retrain command: add `--obs-position-mode height`; a `full`-mode `best.pt` is a valid `--bc-checkpoint` / `--teacher-checkpoint`.
 Caveat on the anchor: it is fed the same `height` observation as the student, so it anchors to the start policy *as it behaves in that mode*.
 
 ---

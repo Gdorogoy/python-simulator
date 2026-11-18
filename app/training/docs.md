@@ -40,7 +40,7 @@ Useful flags (all have `--help` text):
 | `--distance-low/high` | The policy's own range: handoff distance `h`, and the eval range when a curriculum is on. |
 | `--buckets [SPEC]` (acro) | Distance curriculum: pass alone for `100-200:0.25,500-800:0.35,1000-1500:0.40`, or give `lo-hi:weight,...`. Also turns on the distance-dependent time bonus. See "Distance buckets" in the acro section. |
 | `--obs-position-mode {full,height}` | `height` removes absolute x/y. Use it for new runs. |
-| `--bc-checkpoint`, `--anchor-checkpoint` | Start weights, and the frozen policy used as the distillation anchor. |
+| `--bc-checkpoint`, `--teacher-checkpoint` | Start weights, and the frozen actor used as the `--teacher policy` teacher. |
 | `--distill-start/end/decay-chunks`, `--guard-*` | Teacher-loss schedule and the eval-driven guard that boosts it. |
 | `--settle/warmup/head-chunks`, `--lr-actor/critic` | Phase lengths and learning rates. |
 | `--eval-every`, `--eval-burnin`, `--pid-eval-every` | In-Isaac evaluation cadence. |
@@ -48,7 +48,7 @@ Useful flags (all have `--help` text):
 | `--handoff-speed` (acro) | Staggered start on the trainer's full resets: random point on the spawn->target line (0-70% of the leg), moving toward the target at U(0, X) m/s; default 1.0, 0 = from rest. Eval is never staggered. |
 | `--desync-steps` (acro) | Optional window after the reset in which each env is force-reset once at a random step (data discarded). Default 0 = off. |
 | `--reward {qv2,rc}`, `--reward-json` | Pick the angle reward; override any field of its config (`RewardQV2Config` / `RewardRCConfig`), from a file or inline JSON. |
-| `--teacher {auto,pid,policy,los}`, `--los-*`, `--teacher-bc-*`, `--scratch` | Who labels the distillation loss, the LOS controller's settings, and the supervised teacher-BC stage before PPO. |
+| `--teacher {none,policy,los,pid}`, `--teacher-checkpoint`, `--los-*`, `--teacher-bc-*`, `--scratch` | Who labels the distillation loss (`none` = no distillation, PPO alone), the frozen actor for `policy`, the LOS controller's settings, and the supervised teacher-BC stage before PPO. |
 | `--weight-decay` | AdamW weight decay for every optimiser (default `config.WEIGHT_DECAY` = 1e-4). |
 
 ## Reading the training logs
@@ -436,10 +436,10 @@ thrust = hover*(1 + accel_z/g)/cos(tilt) - hover ; des_roll/pitch = clamp(accel_
 torques from the SHORT-range PID attitude gains ; normalise with teacher.low/high
 ```
 
-**`load_anchor(args, env, device, teacher)`**: picks the distillation label source from `--teacher` (`resolve_teacher`): `pid` -> `None`
-(use the PID's labels, speed-faded), `los` -> `make_los_label(...)`, `policy` -> a frozen previous actor (`--anchor-checkpoint`, else
-`--bc-checkpoint`) returning `tanh(mean)`. `auto` = `policy` if a checkpoint was passed explicitly, else `los`. Non-PID teachers get no
-speed fade (weight 1).
+**`load_anchor(args, env, device, teacher)`**: picks the distillation label source from `--teacher` (`resolve_teacher`, which
+returns the mode verbatim -- there is no `auto`): `none` -> `None` with the distill coefficient forced to 0, `pid` -> `None`
+(use the PID's labels, speed-faded), `los` -> `make_los_label(...)`, `policy` -> a frozen previous actor (`--teacher-checkpoint`,
+else `--bc-checkpoint`) returning `tanh(mean)`. Non-PID teachers get no speed fade (weight 1).
 
 **Teacher check and teacher BC (in `run`).** With a non-PID teacher, `run` first flies the teacher alone through the handoff
 (`isaac_eval(..., actor=anchor)`) and prints `TEACHER CHECK` (endings), `teacher flight` (speed, closest approach p10/p50/p90) and a

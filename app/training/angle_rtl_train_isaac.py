@@ -931,8 +931,8 @@ def build_parser():
     p.add_argument("--distance-high", type=float, default=10.0)
     p.add_argument("--checkpoint-dir", default="runs/rtl_isaac")
     p.add_argument("--bc-checkpoint", dest="bc_checkpoint_path", default=None,
-                   help=f"student init weights (default {DEFAULT_BC_CHECKPOINT}); passing it explicitly also makes "
-                        "--teacher auto pick the policy teacher")
+                   help=f"student init weights (default {DEFAULT_BC_CHECKPOINT}); it is also the --teacher policy weights "
+                        "when no --teacher-checkpoint is given")
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--num-steps-per-chunk", type=int, default=256)
     p.add_argument("--spawn-speed-low", type=float, default=8.0,
@@ -1006,11 +1006,11 @@ def build_parser():
     p.add_argument("--log-std-max", type=float, default=-2.0)
     p.add_argument("--bootstrap-timeouts", action="store_true")
     # distillation teacher
-    p.add_argument("--teacher", choices=("auto", "pid", "policy", "los"), default="auto",
-                   help="who labels the distillation loss. pid: the per-distance PID (speed-faded). policy: a FROZEN actor "
-                        "(--anchor-checkpoint, else --bc-checkpoint). los: straight line of sight to the target at a "
-                        "braking-limited speed. auto: policy if --anchor-checkpoint or --bc-checkpoint was passed, else los. "
-                        "The PID still flies the handoff leg and the PID eval baseline in every mode.")
+    p.add_argument("--teacher", choices=("none", "policy", "los", "pid"), default="none",
+                   help="who labels the distillation loss. none: no distillation at all (PPO alone). pid: the per-distance "
+                        "PID (speed-faded). policy: a FROZEN actor (--teacher-checkpoint, else --bc-checkpoint). los: straight "
+                        "line of sight to the target at a braking-limited speed. The PID still flies the handoff leg and the "
+                        "PID eval baseline in every mode.")
     p.add_argument("--scratch", action="store_true",
                    help="random student: ignore every --bc-checkpoint (and the pretrained PID-imitation default) and skip the forced "
                         "PID imitation stage (only --imitation-fraction applies). Pair it with a teacher that is not the PID.")
@@ -1028,7 +1028,7 @@ def build_parser():
     p.add_argument("--los-max-tilt-deg", type=float, default=35.0,
                    help="--teacher los: tilt cap of the LOS controller (the PID's is 0.3 rad = 17 deg, which can't stop from "
                         "20 m/s inside 50 m; the reward ends an episode at 60 deg)")
-    p.add_argument("--anchor-checkpoint", default=None,
+    p.add_argument("--teacher-checkpoint", default=None,
                    help="actor weights (e.g. a previous best.pt) used as the FROZEN teacher for --teacher policy "
                         "(default: the --bc-checkpoint weights). The student is pulled toward that policy's action "
                         "(tanh(mean)) on the states it visits, at the --distill-* weight, with no speed fade.")
@@ -1121,15 +1121,17 @@ def build_parser():
 
 
 def resolve_teacher(args) -> str:
-    if args.teacher != "auto":
-        return args.teacher
-    return "policy" if (args.anchor_checkpoint or (args.bc_explicit and not args.scratch)) else "los"
+    """The teacher mode exactly as requested -- no implicit fallback, so --teacher none really means no distillation."""
+    return args.teacher
 
 
 def load_anchor(args, env, device, teacher):
     """Distillation teacher other than the PID, as a callable obs -> label in [-1, 1] (the space of the student's
-    tanh(mean)), or None for --teacher pid. policy: a FROZEN copy of a previous actor; los: see make_los_label."""
+    tanh(mean)), or None for --teacher pid / none. policy: a FROZEN copy of a previous actor; los: see make_los_label."""
     mode = resolve_teacher(args)
+    if mode == "none":
+        print("[rtl] TEACHER: none (no distillation; the actor learns from PPO alone)")
+        return None
     if mode == "pid":
         print("[rtl] TEACHER: pid")
         return None
@@ -1138,8 +1140,9 @@ def load_anchor(args, env, device, teacher):
               f"the PID is no longer the distillation teacher (speed fade off)")
         return make_los_label(env, teacher, args.max_speed, args.teacher_accel, args.teacher_cruise_gain,
                               stop_speed=args.los_stop_speed, max_tilt=math.radians(args.los_max_tilt_deg))
-    ckpt = args.anchor_checkpoint or args.bc_checkpoint_path
-    assert os.path.exists(ckpt), f"--teacher policy needs weights, {ckpt} not found"
+    ckpt = args.teacher_checkpoint or args.bc_checkpoint_path
+    assert os.path.exists(ckpt), (f"--teacher policy needs weights: neither --teacher-checkpoint nor --bc-checkpoint "
+                                  f"exists ({ckpt})")
     from app.guidance.export_onnx import infer_architecture
     u = env.unwrapped
     obs_dim = u.single_observation_space["policy"].shape[0]
@@ -1147,7 +1150,7 @@ def load_anchor(args, env, device, teacher):
     low, high = u.single_action_space.low, u.single_action_space.high
     raw = torch.load(ckpt, map_location="cpu")
     ck_obs, hidden, layers, ck_a = infer_architecture(raw)
-    assert ck_obs <= obs_dim and ck_a == a_dim, f"anchor dims {(ck_obs, ck_a)} != env {(obs_dim, a_dim)}"
+    assert ck_obs <= obs_dim and ck_a == a_dim, f"teacher checkpoint dims {(ck_obs, ck_a)} != env {(obs_dim, a_dim)}"
     net = ActorCritic(obs_dim, a_dim, low, high, hidden=hidden, num_hidden_layers=layers, dropout=0.0).to(device)
     load_bc_checkpoint(net, ckpt, map_location=device)
     net.eval()
@@ -1289,7 +1292,8 @@ def run(env, args):
     obs_dim, a_dim, low, high, hidden, layers = arch
     chunk_steps = args.num_steps_per_chunk * N
 
-    imit_frac = args.imitation_fraction if (have_ckpt or args.scratch) else max(args.imitation_fraction, 0.08)
+    imit_frac = args.imitation_fraction if (have_ckpt or args.scratch) else max(
+        args.imitation_fraction, 0.0 if resolve_teacher(args) == "none" else 0.08)
     if imit_frac > 0:
         imit_steps_per_env = max(1, int(imit_frac * args.total_timesteps) // N)
         print(f"[rtl] on-policy imitation stage: {imit_steps_per_env} steps/env")
@@ -1311,6 +1315,9 @@ def run(env, args):
 
     teacher = PidTeacher(env, gains_by_dist)
     anchor = load_anchor(args, env, device, teacher)
+    if args.teacher_check_only and anchor is None:
+        print(f"[rtl] --teacher-check-only: --teacher {resolve_teacher(args)} has no policy teacher to fly, nothing to check")
+        return
     from app.environmental.base_drone_env import VEL_SCALE   # only the obs-normalisation constant
 
     plain =ActorCritic(obs_dim, a_dim, low, high, hidden=hidden, num_hidden_layers=layers, dropout=0.0).to(device)
@@ -1424,14 +1431,16 @@ def run(env, args):
             lrs[nme] = lr
 
         ds = distill_scheduled(actor_idx, args.distill_start, args.distill_end, args.distill_decay_chunks)
-        coef_eff = min(args.distill_max, ds * boost) if train_actor else 0.0
+        coef_eff = (min(args.distill_max, ds * boost)
+                    if train_actor and resolve_teacher(args) != "none" else 0.0)
 
         tc = time.time()
         batch, obs, roll_stats = collect_rollout(env, model, teacher, obs, args.num_steps_per_chunk,
                                                  args.gamma, args.bootstrap_timeouts, ep_ret, anchor=anchor)
         t_roll = time.time() - tc
         # a frozen-model anchor is good at high speed too (unlike a hover PID), so no speed fade for it
-        batch["tw"] = (torch.ones(batch["obs"].shape[:-1], device=device) if anchor is not None
+        batch["tw"] = (torch.ones(batch["obs"].shape[:-1], device=device)
+                       if anchor is not None or resolve_teacher(args) == "none"
                        else teacher_weight(batch["obs"], args.distill_fade_speed, VEL_SCALE))
         train_stats = pop_reward_stats(u)
         agree = teacher_agreement(model, batch)
@@ -1660,6 +1669,11 @@ def main():
     args.bc_explicit = args.bc_checkpoint_path is not None
     if not args.bc_explicit:
         args.bc_checkpoint_path = DEFAULT_BC_CHECKPOINT
+    if args.teacher == "none":
+        if args.teacher_checkpoint:
+            print("[rtl] WARNING: --teacher none ignores --teacher-checkpoint")
+        if args.teacher_bc_chunks > 0:
+            raise SystemExit("--teacher-bc-chunks needs a teacher: use --teacher policy, los or pid")
     sim_app = AppLauncher(args).app
 
     import gymnasium as gym
