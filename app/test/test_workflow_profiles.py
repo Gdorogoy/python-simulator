@@ -57,6 +57,32 @@ def test_command_text_accepts_the_forms_copied_from_the_runner():
     assert workflow.command_argv(f"uv run {script} --headless", "/py") == ["/py", "-u", script, "--headless"]
 
 
+def test_command_text_tolerates_a_trailing_continuation():
+    # the exact shape pasted into `gh workflow run -f command=...`: backslash-newline continuations and a dangling
+    # trailing backslash, which shlex would otherwise reject as "No escaped character"
+    text = ("-u app/training/angle_rtl_train_isaac.py \\\n"
+            "    --checkpoint-dir runs/angle_evader_workflow \\\n"
+            "    --num_envs 8192 \\\n"
+            "    --max-speed 50 \\")
+    assert workflow.command_argv(text, "/py") == [
+        "/py", "-u", "app/training/angle_rtl_train_isaac.py",
+        "--checkpoint-dir", "runs/angle_evader_workflow", "--num_envs", "8192", "--max-speed", "50"]
+
+
+def test_ensure_headless_adds_the_flag_only_when_missing():
+    assert workflow.ensure_headless(["/py", "-u", "x.py"]) == ["/py", "-u", "x.py", "--headless"]
+    assert workflow.ensure_headless(["/py", "-u", "x.py", "--headless"]) == ["/py", "-u", "x.py", "--headless"]
+
+
+def test_dry_run_of_a_pasted_command_is_headless_and_keeps_its_flags(capsys):
+    code = workflow.main(["--profile", "angle", "--dry-run", "--command",
+                          "-u app/training/angle_rtl_train_isaac.py --num_envs 8192"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "--num_envs 8192" in out and "--headless" in out
+    assert "run dir: runs/angle_evader_workflow" in out
+
+
 def test_command_run_dir_reads_checkpoint_dir_or_falls_back_to_the_profile():
     argv = ["/py", "-u", "app/training/angle_rtl_train_isaac.py", "--checkpoint-dir", "runs/mine"]
     assert workflow.command_run_dir(argv, "angle") == "runs/mine"

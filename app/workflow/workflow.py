@@ -71,6 +71,8 @@ def command_argv(text: str, isaac_python: str = ISAAC_PYTHON) -> list[str]:
         app/training/angle_rtl_train_isaac.py --headless ...
     Backslash-newline continuations, plain newlines and a leading `cd ... &&` are tolerated."""
     text = text.replace("\\\r\n", " ").replace("\\\n", " ").replace("\r", " ").replace("\n", " ").strip()
+    while text.endswith("\\"):          # a trailing continuation with nothing after it
+        text = text[:-1].rstrip()
     if "&&" in text:
         text = text.rsplit("&&", 1)[1].strip()
     parts = shlex.split(text)
@@ -94,6 +96,12 @@ def command_run_dir(argv: list[str], profile: str) -> str:
         if token.startswith("--checkpoint-dir="):
             return token.split("=", 1)[1]
     return get_profile(profile)["checkpoint_dir"]
+
+
+def ensure_headless(argv: list[str]) -> list[str]:
+    """Add --headless when the pasted command omits it: the runner is a service with no display, so Isaac Sim would
+    try to open a GUI window instead of running."""
+    return argv if "--headless" in argv else [*argv, "--headless"]
 
 
 def main(argv=None) -> int:
@@ -133,7 +141,9 @@ def main(argv=None) -> int:
         except ValueError as error:
             p.error(str(error))
         run_dir = command_run_dir(cmd, args.profile)
-        source = "pasted command"
+        had_headless = "--headless" in cmd
+        cmd = ensure_headless(cmd)
+        source = "pasted command" + ("" if had_headless else " (+ --headless: the runner has no display)")
     else:
         cmd = build_cmd(args.profile, overrides, args.isaac_python)
         run_dir = get_profile(args.profile)["checkpoint_dir"]
