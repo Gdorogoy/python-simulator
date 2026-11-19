@@ -48,6 +48,7 @@ Useful flags (all have `--help` text):
 | `--handoff-speed` (acro) | Staggered start on the trainer's full resets: random point on the spawn->target line (0-70% of the leg), moving toward the target at U(0, X) m/s; default 1.0, 0 = from rest. Eval is never staggered. |
 | `--desync-steps` (acro) | Optional window after the reset in which each env is force-reset once at a random step (data discarded). Default 0 = off. |
 | `--reward {qv2,rc}`, `--reward-json` | Pick the angle reward; override any field of its config (`RewardQV2Config` / `RewardRCConfig`), from a file or inline JSON. |
+| `--hit-radius`, `--hit-zone` | Hit zone radius in metres, whichever name the chosen reward uses: `rc` -> `hit_radius` (default 0.75 m), `qv2` -> `hit_threshold` (default 0.25 m). An explicit key in `--reward-json` wins. The interceptor's catch radius is separate: `rc`'s `intercept_radius` (0.25 m), JSON only. |
 | `--teacher {none,policy,los,pid}`, `--teacher-checkpoint`, `--los-*`, `--teacher-bc-*`, `--scratch` | Who labels the distillation loss (`none` = no distillation, PPO alone), the frozen actor for `policy`, the LOS controller's settings, and the supervised teacher-BC stage before PPO. |
 | `--weight-decay` | AdamW weight decay for every optimiser (default `config.WEIGHT_DECAY` = 1e-4). |
 

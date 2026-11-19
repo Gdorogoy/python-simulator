@@ -1117,6 +1117,11 @@ def build_parser():
     p.add_argument("--num-allies", type=int, default=0, help="v2: ally slots (x, y, z, status, id); 0 = 1v1, no inputs")
     p.add_argument("--reward-json", default=None, help="path to a JSON file or an inline JSON object with "
                    "RewardQV1Config overrides, e.g. '{\"r_hit\": 20}'")
+    p.add_argument("--hit-radius", "--hit-zone", dest="hit_radius", type=float, default=None, metavar="M",
+                   help="hit zone radius in metres. The two rewards name it differently -- rc: hit_radius (default 0.75 m, "
+                        "drone inside this of the base), qv2: hit_threshold (default 0.25 m) -- so this flag sets whichever "
+                        "one --reward uses. An explicit key in --reward-json still wins. Not the interceptor's catch radius: "
+                        "that is rc's intercept_radius (default 0.25 m), set it in --reward-json")
     return p
 
 
@@ -1191,6 +1196,23 @@ def load_student(args, env, device):
     return model, have_ckpt, (obs_dim, a_dim, low, high, hidden, layers)
 
 
+# the same radius under two names: rc calls it hit_radius, qv2 calls it hit_threshold
+HIT_RADIUS_KEY = {"rc": "hit_radius", "qv2": "hit_threshold"}
+
+
+def apply_hit_radius(args, overrides):
+    """Fold --hit-radius into the reward overrides under the key the chosen reward understands. A radius the user wrote in
+    --reward-json wins (that is the more specific instruction), and every other JSON key is passed through untouched."""
+    radius = getattr(args, "hit_radius", None)
+    if radius is None:
+        return overrides
+    if radius <= 0:
+        raise SystemExit(f"--hit-radius must be > 0 m, got {radius:g}")
+    folded = dict(overrides or {})
+    folded.setdefault(HIT_RADIUS_KEY[args.reward], float(radius))
+    return folded
+
+
 def configure_env(u, args):
     """Everything between "env created" and "model built": reward, threats, observation mode, target range, handoff stage. Shared by
     run() and the web viewer's Isaac worker (guidance/isaac_worker.py), so a flight in the viewer is set up exactly like training.
@@ -1199,6 +1221,7 @@ def configure_env(u, args):
     if args.reward_json:
         reward_overrides = json.load(open(args.reward_json)) if os.path.exists(args.reward_json) \
             else json.loads(args.reward_json)
+    reward_overrides = apply_hit_radius(args, reward_overrides)
     if args.reward == "rc":
         from app.reward_functions.angle_reward_rc import RewardRCConfig, install_reward_rc
         rcfg = install_reward_rc(u, RewardRCConfig.from_overrides(reward_overrides))
@@ -1227,6 +1250,9 @@ def configure_env(u, args):
     else:
         from app.reward_functions.angle_reward_qv2 import RewardQV2Config, install_reward_qv2
         rcfg = install_reward_qv2(u, RewardQV2Config.from_overrides(reward_overrides))
+
+    hit_key = HIT_RADIUS_KEY[args.reward]
+    print(f"[rtl] HIT ZONE: {float(getattr(rcfg, hit_key)):g} m ({hit_key}; --hit-radius or --reward-json sets it)")
 
     oob_radius = max(20.0, args.distance_high * 3.0)
     # no finite target pool: every reset draws a fresh random target
@@ -1623,7 +1649,8 @@ def run(env, args):
         print(f"[rtl] summary plot failed: {e}")
     try:
         plot_training_run(log.csv_path, output_dir=os.path.join(args.checkpoint_dir, "plots"),
-                          hover_success_steps=200, n_diag_episodes=N_EVAL, hit_threshold=rcfg.hit_threshold,
+                          hover_success_steps=200, n_diag_episodes=N_EVAL,
+                          hit_threshold=float(getattr(rcfg, "hit_threshold", getattr(rcfg, "hit_radius", 0.25))),
                           max_steps=int(u.max_episode_length), oob_radius=oob_radius, hit_reward=rcfg.r_hit,
                           attitude_penalty=-rcfg.r_crash, oob_penalty=-rcfg.r_crash)
     except Exception as e:
