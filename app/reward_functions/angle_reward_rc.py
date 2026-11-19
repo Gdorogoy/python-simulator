@@ -12,7 +12,14 @@ from typing import NamedTuple
 import torch
 
 
-from app.reward_functions.proportion import RewardProportionMixin, _col, _fill, _is_zero, resolve_proportion
+from app.reward_functions.proportion import (
+    RewardProportionMixin,
+    _col,
+    _fill,
+    _is_zero,
+    resolve_proportion,
+    time_bonus_frac,
+)
 
 
 @dataclass
@@ -23,6 +30,7 @@ class RewardRCConfig(RewardProportionMixin):
     intercept_radius: float = 0.25      # interceptor within this of the drone = caught
     hit_radius: float = 0.75          # drone within this (total 3D dist) of the base = in zone
     r_hit: float = 45.0                 # TOTAL for entry + hold; completion pays r_hit - r_zone_entry
+    r_time_bonus: float = 0.0           # extra on a hit, scaled by the fraction of the per-episode time budget left (see proportion.time_bonus_frac; --buckets turns the clock on)
     r_intercepted: float = 15.0         # paid as -15
     r_crash: float = 15.0               # tilt / roll / pitch / oob / NaN; same cost as being caught
     # "potential": k*(ln(prev+eps) - ln(dist+eps)); sums to k*ln(d0/d_end), no gain from dithering.
@@ -124,7 +132,7 @@ def compute_reward_rc(*, pos: torch.Tensor, dist: torch.Tensor, prev_dist: torch
                       cfg: RewardRCConfig, rel: torch.Tensor | None = None,
                       prev_rel: torch.Tensor | None = None, vel: torch.Tensor | None = None,
                       hit_done: torch.Tensor | None = None, post_hit_count: torch.Tensor | None = None,
-                      los_gate: torch.Tensor | None = None) -> RewardRCOut:
+                      los_gate: torch.Tensor | None = None, time_left_frac: torch.Tensor | None = None) -> RewardRCOut:
     """pos: (N,3) env-local; dist/prev_dist/start_dist: (N,); tilt/roll/pitch: (N,) radians;
     interceptor_rel: (N,3) interceptor minus drone position, or None when there is no interceptor;
     stall_count: (N,) consecutive stalled steps INCLUDING this one;
@@ -204,12 +212,14 @@ def compute_reward_rc(*, pos: torch.Tensor, dist: torch.Tensor, prev_dist: torch
 
     zero = torch.zeros_like(dist)
     off = dead | after                                           # progress terms stop at death and once the hit is scored
+    time_bonus = (torch.zeros_like(dist) if time_left_frac is None
+                  else float(cfg.r_time_bonus) * time_left_frac.clamp(0.0, 1.0))
     parts = {
         "closing": torch.where(off, zero, closing),
         "axis": torch.where(off, zero, axis),
         "step": torch.where(after, zero, -_fill(dist, cfg.c_step)),
         "zone_entry": torch.where(zone_entry, _fill(dist, cfg.r_zone_entry), zero),
-        "hit": torch.where(hit, _fill(dist, cfg.r_hit) - _fill(dist, cfg.r_zone_entry), zero),
+        "hit": torch.where(hit, _fill(dist, cfg.r_hit - cfg.r_zone_entry) + time_bonus, zero),
         "intercepted": torch.where(caught, -_fill(dist, cfg.r_intercepted), zero),
         "crash": torch.where(crash, -_fill(dist, cfg.r_crash), zero),
         "hover": torch.where(live & (stall_count > grace_steps), -_fill(dist, cfg.c_hover), zero)
@@ -290,6 +300,9 @@ def install_reward_rc(unwrapped_env, cfg: RewardRCConfig | None = None) -> Rewar
 
         icpt_rel = self.nearest_threat_rel() if hasattr(self, "nearest_threat_rel") else None
 
+        # time budget for the hit bonus: one per episode, from the leg this env actually has to fly
+        time_left = time_bonus_frac(cfg, ref_dist, self.episode_length_buf, step_dt)
+
         # post-hit window: `_hit_done` was set on an earlier step; `post_hit` counts the steps since, including this one
         hit_done = self._hit_done
         post_hit = self._post_hit + hit_done.long()
@@ -307,7 +320,7 @@ def install_reward_rc(unwrapped_env, cfg: RewardRCConfig | None = None) -> Rewar
                                 zone_count=self._zone_count, first_entry=first_entry,
                                 grace_steps=grace_steps, limit_steps=limit_steps,
                                 limit_steps_hit=limit_steps_hit, cfg=cfg_eff, hit_done=hit_done, post_hit_count=post_hit,
-                                los_gate=los_gate)
+                                los_gate=los_gate, time_left_frac=time_left)
         self._hit_done = hit_done | out.hit
         self._post_hit = post_hit
 

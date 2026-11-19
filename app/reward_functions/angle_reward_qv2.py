@@ -9,7 +9,7 @@ from typing import NamedTuple
 
 import torch
 
-from app.reward_functions.proportion import RewardProportionMixin, _fill, resolve_proportion
+from app.reward_functions.proportion import RewardProportionMixin, _fill, resolve_proportion, time_bonus_frac
 from app.reward_functions.rewards import (
     ATTITUDE_PITCH_DEG,
     ATTITUDE_ROLL_DEG,
@@ -22,6 +22,7 @@ from app.reward_functions.rewards import (
 class RewardQV2Config(RewardProportionMixin):
     hit_threshold: float = HIT_THRESHOLD   # keep == PyBullet eval's radius
     r_hit: float = 10.0
+    r_time_bonus: float = 0.0              # extra on a hit, scaled by the fraction of the per-episode time budget left (proportion.time_bonus_frac; --buckets turns the clock on)
     r_crash: float = 5.0
     r_timeout: float = 3.0
     progress_k: float = 2.0
@@ -78,7 +79,8 @@ def potential(dist: torch.Tensor, eps: float) -> torch.Tensor:
 def compute_reward_qv2(*, pos: torch.Tensor, dist: torch.Tensor, prev_dist: torch.Tensor,
                        start_dist: torch.Tensor, roll: torch.Tensor, pitch: torch.Tensor,
                        ang_vel: torch.Tensor, timed_out: torch.Tensor, stall_count: torch.Tensor,
-                       grace_steps: int, limit_steps: int, cfg: RewardQV2Config) -> RewardOut:
+                       grace_steps: int, limit_steps: int, cfg: RewardQV2Config,
+                       time_left_frac: torch.Tensor | None = None) -> RewardOut:
     """pos: (N,3) env-local position; dist/prev_dist/start_dist: (N,); roll/pitch: (N,) radians;
     ang_vel: (N,3); timed_out: (N,) bool; stall_count: (N,) consecutive stalled steps INCLUDING this one."""
 
@@ -101,12 +103,14 @@ def compute_reward_qv2(*, pos: torch.Tensor, dist: torch.Tensor, prev_dist: torc
     hover_end = torch.where(hover_term, -_fill(dist, cfg.r_hover), zero)
 
     live = ~crash
+    time_bonus = (torch.zeros_like(dist) if time_left_frac is None
+                  else float(cfg.r_time_bonus) * time_left_frac.clamp(0.0, 1.0))
     parts = {
         "progress": torch.where(live, progress, zero),
         "step": torch.where(live & ~hit, step_cost, zero),
         "tumble": torch.where(live, tumble, zero),
         "tilt": torch.where(live, tilt_pen, zero),
-        "hit": torch.where(hit, _fill(dist, cfg.r_hit), zero),
+        "hit": torch.where(hit, _fill(dist, cfg.r_hit) + time_bonus, zero),
         "crash": torch.where(crash, -_fill(dist, cfg.r_crash), zero),
         "timeout": timeout_pen,
         "hover": torch.where(live & ~hit, hover_pen, zero) + hover_end,
@@ -204,6 +208,7 @@ def install_reward_qv2(unwrapped_env, cfg: RewardQV2Config | None = None) -> Rew
         else:
             ref_dist = self._start_dist
         cfg_eff = resolve_proportion(self._qv2_cfg, ref_dist, step_dt)      # one leg = one unit of reward
+        time_left = time_bonus_frac(cfg, ref_dist, self.episode_length_buf, step_dt)   # hit-bonus clock
 
         stalled = (dist > cfg_eff.hit_threshold) & (speed < cfg_eff.stall_speed)
         handed = getattr(self, "_handed_off", None)     # handoff stage: only count stalls once the policy flies
@@ -218,7 +223,7 @@ def install_reward_qv2(unwrapped_env, cfg: RewardQV2Config | None = None) -> Rew
         out = compute_reward_qv2(pos=pos, dist=dist, prev_dist=self._prev_distance, start_dist=self._start_dist,
                                  roll=roll, pitch=pitch, ang_vel=ang_vel, timed_out=timed_out,
                                  stall_count=self._qv2_stall, grace_steps=grace_steps, limit_steps=limit_steps,
-                                 cfg=cfg_eff)
+                                 cfg=cfg_eff, time_left_frac=time_left)
 
         self.extras["term_reasons"] = {"hit": out.hit, "oob": out.oob, "attitude_roll": out.roll_bad,
                                        "attitude_pitch": out.pitch_bad, "hover": out.hover_term}

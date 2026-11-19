@@ -28,6 +28,8 @@ from dataclasses import dataclass, replace
 
 import torch
 
+from app.control.step_budget import MIN_STEPS, STEPS_PER_METER
+
 
 @dataclass
 class RewardProportionMixin:
@@ -155,3 +157,23 @@ def resolve_proportion(cfg: RewardProportionMixin, ref_dist, step_dt: float) -> 
     if hasattr(cfg, "k_miss") and not _is_zero(cfg.k_miss):
         changes["k_miss"] = float(cfg.miss_leg) / max(float(cfg.miss_radius), 1e-6)
     return replace(cfg, **changes)
+
+
+def time_bonus_frac(cfg: RewardProportionMixin, ref_dist, age, step_dt: float) -> torch.Tensor:
+    """Fraction of this episode's time budget still left (1 at the start, 0 once used up), which scales ``r_time_bonus``
+    on a hit. Same rule as the acro reward:
+      * ``time_bonus_speed`` > 0 -> ``start_distance / speed`` clamped to ``min_leg_s``..``max_leg_s`` (the distance-
+        dependent clock a distance curriculum needs: 1200 m at 30 m/s = 40 s, 150 m = 5 s, floored),
+      * else ``time_bonus_budget_s`` > 0 -> one fixed clock,
+      * else the per-distance eval budget (``step_budget.steps_for_dist``), which no real flight beats at the reference
+        speed -- so with the defaults the bonus is ~1 on every hit and a curriculum sets ``time_bonus_speed`` instead.
+    ``ref_dist`` / ``age`` may be floats or (N,) tensors; ``age`` is the episode's elapsed policy steps."""
+    ref = ref_dist if torch.is_tensor(ref_dist) else torch.as_tensor(float(ref_dist))
+    if getattr(cfg, "time_bonus_speed", 0.0) > 0:
+        budget = (torch.clamp(ref / float(cfg.time_bonus_speed), min=float(cfg.min_leg_s), max=float(cfg.max_leg_s))
+                  / float(step_dt))
+    elif getattr(cfg, "time_bonus_budget_s", 0.0) > 0:
+        budget = float(cfg.time_bonus_budget_s) / float(step_dt)
+    else:
+        budget = torch.clamp(STEPS_PER_METER * ref, min=float(MIN_STEPS)) / (float(step_dt) * 240.0)
+    return (1.0 - torch.as_tensor(age).float() / budget).clamp(0.0, 1.0)

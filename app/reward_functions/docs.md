@@ -150,6 +150,9 @@ Added on top of qv1:
   target isn't either, because the drone must be free to turn around after an overshoot.
 - In the handoff stage, steps flown by the controller (`_handed_off == False`) never count as stalled.
 - A hover termination is a true terminal (no bootstrap), like a crash or a hit.
+- **Time bonus** (`r_time_bonus`, default 0 = off): extra on the hit, scaled by the fraction of the per-episode budget left
+  (`proportion.time_bonus_frac`); the clock comes from `time_bonus_speed` (distance / speed) or `time_bonus_budget_s`.
+  This is what the trainer's `--buckets` switches on (30 m/s, bonus 5).
 
 **Known limitation.** Progress is potential-based, so its total depends only on the start and end distance, not
 on the path. A detour such as climbing first and then diving costs only step cost and discounting. That is why
@@ -205,6 +208,12 @@ base for `zone_time`: +45 in total, 7 on entry and 38 on completion) -> post-hit
   at -20 (worse than a crash on purpose). Timeout costs -10. Stalls only count after the handoff.
 - **Zone hold:** the hit needs `zone_time` consecutive seconds inside `hit_radius` (default 5/60 s = 5 policy steps; the recent
   runs set 0.0167 s = 1 step). The trainer's `--reward` help text still says "+30 hit"; the code default is `r_hit` 45 in total.
+- **Time bonus** (`r_time_bonus`, default 0 = off; clock via `time_bonus_speed` / `time_bonus_budget_s`): extra paid on the hit,
+  scaled by the fraction of the per-episode budget still left (`proportion.time_bonus_frac`). The trainer's `--buckets` sets
+  `time_bonus_speed` 30 m/s and `r_time_bonus` 5, so the budget is that episode's own `start_distance / 30 m/s` clamped to
+  7.5-62.5 s (150 m -> 7.5 s floor, 1200 m -> 40 s). With no clock set the fallback is the per-distance eval budget
+  (`steps_for_dist`), which no real flight beats, so the bonus is ~max on every hit -- fine for one fixed distance, useless
+  under a curriculum.
 - **Threats:** read from `env.nearest_threat_rel()`, the swept closest approach during the step (two drones closing at 36 m/s
   move 0.6 m per 60 Hz step and would tunnel through a point check).
 - Training stats reuse qv2's accumulators, so the trainer's logging is unchanged; `train_caught_rate` is new.

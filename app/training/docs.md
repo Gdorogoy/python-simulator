@@ -38,7 +38,7 @@ Useful flags (all have `--help` text):
 |---|---|
 | `--handoff`, `--max-speed`, `--spawn-dist-low/high` | Handoff stage: speed buckets, and the carrot leg flown from spawn. |
 | `--distance-low/high` | The policy's own range: handoff distance `h`, and the eval range when a curriculum is on. |
-| `--buckets [SPEC]` (acro) | Distance curriculum: pass alone for `100-200:0.25,500-800:0.35,1000-1500:0.40`, or give `lo-hi:weight,...`. Also turns on the distance-dependent time bonus. See "Distance buckets" in the acro section. |
+| `--buckets [SPEC]` | Distance curriculum (both trainers): pass alone for `100-200:0.25,500-800:0.35,1000-1500:0.40`, or give `lo-hi:weight,...`. Also switches the hit time bonus to a per-episode clock (`start_distance / 30 m/s`, `r_time_bonus` 5) and leaves the eval on `--distance-low/high`. Ignored with `--handoff`. See "Distance buckets". |
 | `--obs-position-mode {full,height}` | `height` removes absolute x/y. Use it for new runs. |
 | `--bc-checkpoint`, `--teacher-checkpoint` | Start weights, and the frozen actor used as the `--teacher policy` teacher. |
 | `--distill-start/end/decay-chunks`, `--guard-*` | Teacher-loss schedule and the eval-driven guard that boosts it. |
@@ -256,6 +256,12 @@ reward). `--distance-low/high` stay the eval range, so every eval still measures
   `distance buckets (training distribution): d0 hit ... crash ... (n=...)`. `eval_hit` / `success_rate` stay on the eval range.
 - `run_name` carries `_bk<N>` instead of the distance pair. Ignored with `--handoff` (the handoff stage sets every episode's
   distance), with a printed note.
+
+*Angle trainer (2026-11-19).* `--buckets` now exists there too, with the same spec parser, the same `--handoff` guard and the
+same clock rule (`time_bonus_speed` 30, `r_time_bonus` 5, unless `--reward-json` sets them) — the bonus itself lives in the
+angle rewards: `RewardRCConfig.r_time_bonus` / `RewardQV2Config.r_time_bonus`, paid on the hit scaled by the fraction of the
+budget left. Differences: the eval is always pinned to U(`--distance-low`, `--distance-high`) (`isaac_eval` clears
+`_dist_buckets` for the reset and restores it), and there is no extra per-bucket eval pass, so no `eval_hit_d0..d2` rows.
 
 **Teacher conversion.** The angle actor outputs `[thrust_delta, tau_x, tau_y, tau_z]`; the acro action is
 `[thrust_delta, p, q, r]`. The rate loop outputs `I * kp * (cmd - w)`, so `cmd = w + tau / (I * kp)` reproduces the

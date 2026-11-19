@@ -25,6 +25,7 @@ from app.control.tilt import tilt_cone_torch
 from app.environmental.base_drone_env import VEL_SCALE  # obs-normalisation constant, needed outside run() too
 from app.guidance.train import ActorCritic, compute_gae, load_bc_checkpoint
 from app.training.config import WEIGHT_DECAY
+from app.training.distance_buckets import DEFAULT_BUCKETS, describe_buckets, parse_buckets
 
 PHASES = ("settle", "critic_warmup", "head_only", "full")
 GAIN_NAMES = ("kp_pos", "kd_pos", "ki_pos", "kp_att", "kd_att", "ki_att", "kp_yaw", "kd_yaw", "ki_yaw")
@@ -438,7 +439,12 @@ def isaac_eval(env, model, teacher, steps, use_pid=False, actor=None, recorder=N
     recorder(i, u, handed, terminated_or_truncated, outcome, reward): optional, called after every step (the viewer records tracks with it)."""
     u = env.unwrapped
     N, dev = u.num_envs, u.device
+    # the eval scores U(--distance-low, --distance-high) even when training samples from a --buckets curriculum, so
+    # best.pt stays comparable across runs (the sampler only runs on reset; training keeps its curriculum)
+    saved_buckets = getattr(u, "_dist_buckets", None)
+    u.set_target_distance_buckets(None)
     obs = env.reset()[0]["policy"]
+    u._dist_buckets = saved_buckets
     u.episode_length_buf.zero_()   # a full reset randomises the elapsed-time counter (desync) -> fake early timeouts
     teacher.reset(None)
     u._qv2_stall.zero_()
@@ -929,6 +935,13 @@ def build_parser():
     p.add_argument("--total_timesteps", type=int, default=128_000_000)
     p.add_argument("--distance-low", type=float, default=3.0)
     p.add_argument("--distance-high", type=float, default=10.0)
+    p.add_argument("--buckets", nargs="?", const=DEFAULT_BUCKETS, default=None, metavar="SPEC",
+                   help="distance curriculum: draw each training episode's spawn distance from weighted ranges instead of "
+                        f"U(--distance-low, --distance-high). Pass --buckets alone for the default '{DEFAULT_BUCKETS}', or a spec "
+                        "like '200-400:0.5,800-1200:0.5'. --distance-low/high stay the range the eval scores, so best.pt is "
+                        "comparable across runs. Also switches the hit time bonus to a per-episode clock "
+                        f"(budget = start_distance / {BUCKET_TIME_BONUS_SPEED:g} m/s, clamped to min_leg_s..max_leg_s, "
+                        f"r_time_bonus {BUCKET_TIME_BONUS:g}) unless --reward-json sets those; ignored with --handoff.")
     p.add_argument("--checkpoint-dir", default="runs/rtl_isaac")
     p.add_argument("--bc-checkpoint", dest="bc_checkpoint_path", default=None,
                    help=f"student init weights (default {DEFAULT_BC_CHECKPOINT}); it is also the --teacher policy weights "
@@ -1198,6 +1211,23 @@ def load_student(args, env, device):
 
 # the same radius under two names: rc calls it hit_radius, qv2 calls it hit_threshold
 HIT_RADIUS_KEY = {"rc": "hit_radius", "qv2": "hit_threshold"}
+# --buckets makes the hit time bonus a per-episode clock: budget = start_distance / 30 m/s (a hit is paid r_time_bonus *
+# fraction of that budget left). Same numbers as the acro trainer's distance minutes.
+BUCKET_TIME_BONUS_SPEED = 30.0
+BUCKET_TIME_BONUS = 5.0
+
+
+def apply_bucket_clock(overrides):
+    """--buckets: one time budget per episode, from the leg that env actually has to fly, so the bonus stops paying
+    ~max on every short episode. An explicit time_bonus_speed / r_time_bonus in --reward-json wins; a fixed
+    time_bonus_budget_s is replaced."""
+    folded = dict(overrides or {})
+    if "time_bonus_budget_s" in folded and "time_bonus_speed" not in folded:
+        print("[rtl] --buckets: replacing the fixed time_bonus_budget_s with a distance-dependent clock")
+        folded.pop("time_bonus_budget_s")
+    folded.setdefault("time_bonus_speed", BUCKET_TIME_BONUS_SPEED)
+    folded.setdefault("r_time_bonus", BUCKET_TIME_BONUS)
+    return folded
 
 
 def apply_hit_radius(args, overrides):
@@ -1222,6 +1252,14 @@ def configure_env(u, args):
         reward_overrides = json.load(open(args.reward_json)) if os.path.exists(args.reward_json) \
             else json.loads(args.reward_json)
     reward_overrides = apply_hit_radius(args, reward_overrides)
+    dist_buckets = getattr(args, "dist_buckets", None)
+    if dist_buckets is None and getattr(args, "buckets", None) is not None:
+        dist_buckets = parse_buckets(args.buckets)      # main() already parsed it; this covers direct run() callers
+    if args.handoff and dist_buckets is not None:
+        print("[rtl] --buckets ignored with --handoff: the handoff stage sets every episode's distance")
+        dist_buckets = None
+    if dist_buckets is not None:
+        reward_overrides = apply_bucket_clock(reward_overrides)
     if args.reward == "rc":
         from app.reward_functions.angle_reward_rc import RewardRCConfig, install_reward_rc
         rcfg = install_reward_rc(u, RewardRCConfig.from_overrides(reward_overrides))
@@ -1266,6 +1304,10 @@ def configure_env(u, args):
     prefix_hi = args.prefix_high if args.handoff else 0.0
     # in --handoff mode the env distance is the TOTAL one; the controller prefix eats up to prefix_hi of it
     u.set_target_distance_range(args.distance_low + prefix_hi, args.distance_high + prefix_hi)
+    u.set_target_distance_buckets(dist_buckets)     # None = the uniform range above
+    if dist_buckets is not None:
+        print(f"[rtl] distance buckets: {describe_buckets(dist_buckets)} | eval stays on U({args.distance_low:g}, "
+              f"{args.distance_high:g}) m | hit-bonus clock start_distance / {float(getattr(rcfg, 'time_bonus_speed', 0.0)):g} m/s")
     if args.handoff:
         # The env's own constant-speed spawn is replaced by the handoff wrapper.
         spawn_range = (SPEED_BUCKETS[0][0] * args.max_speed, args.max_speed)
@@ -1693,6 +1735,10 @@ def main():
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    try:
+        args.dist_buckets = parse_buckets(args.buckets)      # fail before the Isaac app starts
+    except ValueError as e:
+        parser.error(str(e))
     args.bc_explicit = args.bc_checkpoint_path is not None
     if not args.bc_explicit:
         args.bc_checkpoint_path = DEFAULT_BC_CHECKPOINT
