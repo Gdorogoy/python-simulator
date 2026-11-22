@@ -1,0 +1,16 @@
+{
+  "aborted": null,
+  "best": {
+    "checkpoint": "runs/angle_los_1000_1500\\model_127926272.pt",
+    "chunk": 60,
+    "phase": "full",
+    "score": 0.95849609375,
+    "train_hit_rate": 0.8571428571428571,
+    "eval_hit_rate": 0.95849609375,
+    "timesteps": 127926272
+  },
+  "chunks_run": 95,
+  "baseline_train_hit_rate": null,
+  "pid_success_rate": 0.0,
+  "duration_s": 4672.547424077988
+}

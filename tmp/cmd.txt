@@ -1,0 +1,64 @@
+-u app/training/angle_rtl_train_isaac.py \
+    --checkpoint-dir runs/angle_los_1000_1500 \
+    --num_envs 8192 \
+    --num-steps-per-chunk 256 \
+    --total_timesteps 200000000 \
+    --distance-low 1000 \
+    --distance-high 1500 \
+    --max-speed 55 \
+    --hit-radius 1.0 \
+    --obs-position-mode height \
+    --reward rc \
+    --from-rest \
+    --reward-json '{"intercept_radius": 1.0, "closing_lambda": 1.0, "c_step": 0.01, "los_k": 0.1, "los_gate_frac": 0.0, "los_aligned": 0.0, "los_a": 15, "los_b": 60, "zone_time": 0.05, "post_hit_steps": 6, "r_zone_entry": 0, "tilt_limit_deg": 85, "roll_limit_deg": 360, "pitch_limit_deg": 360}' \
+    --gamma 0.99 \
+    --lam 0.995 \
+    --settle-chunks 2 \
+    --warmup-chunks 2 \
+    --head-chunks 2 \
+    --lr-ramp-chunks 3 \
+    --epochs 5 \
+    --warmup-epochs 4 \
+    --num-minibatches 32 \
+    --target-kl 0.01 \
+    --max-grad-norm 0.5 \
+    --lr-actor 0.0001 \
+    --weight-decay 0.0001 \
+    --lr-critic 0.0003 \
+    --lr-min-ratio 0.3 \
+    --critic-hidden 128 \
+    --critic-layers 2 \
+    --init-std 0.15 \
+    --log-std-min -3.5 \
+    --log-std-max -1.2 \
+    --ent-coef 0.0 \
+    --bc-checkpoint runs/angle_los_500_1000/best.pt \
+    --teacher-checkpoint runs/angle_los_500_1000/best.pt \
+    --teacher policy \
+    --distill-start 0.25 \
+    --distill-end 0.0 \
+    --distill-decay-chunks 20 \
+    --distill-max 1.0 \
+    --guard-margin 0.25 \
+    --guard-gain 0 \
+    --guard-boost-max 20 \
+    --abort-hit-rate 0.0 \
+    --num-threats 0 \
+    --active-threats 1 \
+    --threat-speed 50 \
+    --threat-speed-min 45 \
+    --threat-radius 1.0 \
+    --threat-spread 30 \
+    --threat-spawn-min 15 \
+    --threat-spawn geometry \
+    --threat-geometry-weights 1.0 0.0 \
+    --threat-reaction-s 0.65 \
+    --threat-tail-gap 3.0 3.0 \
+    --threat-jitter 2 \
+    --threat-prob 0.6 \
+    --threat-buffer 0.5 \
+    --threat-release-after 0.0 0.0 \
+    --obs-layout v2 \
+    --num-allies 0 \
+    --eval-every 10 \
+    --headless
