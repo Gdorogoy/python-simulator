@@ -15,6 +15,7 @@ classical PID controller acts as both teacher and baseline, and PPO policies are
 parallel in **NVIDIA Isaac Lab**.
 
 The deployed system is **two-phase**:
+
 1. a controller flies the long midcourse leg at cruise speed;
 2. at the **handoff point**, a learned policy takes over for the terminal phase: braking, aiming, hitting, and turning
    around if it missed.
@@ -24,6 +25,7 @@ spawn ──── PID / carrot cruise (≤ 18 m/s) ────► handoff (3-5
 ```
 
 ## Highlights
+
 - **Own physics engine** (`app/dynamics`): rotor thrust and torque, mixer inversion, motor lag, drag, wind,
   gyroscopic coupling. A numpy reference implementation plus a batched torch mirror, diff-tested to 1e-9.
 - **Closed-form PID tuning**: pole placement per target distance, with no search.
@@ -38,11 +40,12 @@ spawn ──── PID / carrot cruise (≤ 18 m/s) ────► handoff (3-5
 ## Results (released models in `stable_models/`)
 
 | Model                           | Task                                                                                                        | Eval hit rate |
-|---------------------------------|-------------------------------------------------------------------------------------------------------------|---------------|
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------- |
 | `handoff_v3_150_250_30_50_18ms` | Two-phase: 150-250 m spawn (can be any dist 150-250 is base), handoff at 3-50 m, up to 18 m/s, `height` obs | **0.95**      |
 | `handoff_v5_3_50m_18`           | Handoff stage at 3-50 m, up to 18 m/s (no long leg)                                                         | 0.91          |
-| `acro_1000_1500_40ms`           | Acro: one pass over 1000-1500 m, no handoff, 1 m hit radius, 80 deg tilt cap, `height` obs                  | **0.966**     |
-| `acro_1000_1500_40ms_unstable`  | Same stage after the 25-chunk constant-LR fine-tune; kept to document the failure (peaks 0.960, ends 0.758)  | 0.960         |
+| `acro_1000_1500_40ms`           | Acro: one pass over 1000-1500 m, no handoff, 1 m hit radius, no tilt cap, `height` obs                      | **0.966**     |
+| `acro_1000_1500_40ms_unstable`  | Same stage after the 25-chunk constant-LR fine-tune; kept to document the failure (peaks 0.960, ends 0.758) | 0.960         |
+| `angle_1000_1500_non_evader`    | Angle: one pass over 1000-1500m , no handoff , 1m hit radius , 85 deg tilt cap , `heigth` obs               | 0.95          |
 | `angle_600_40ms_non_evader`     | Handoff 60-160 m from a 400-600 m spawn, up to 40 m/s, no threats                                           | 0.964         |
 | `anlge_evader_600_40ms`         | Handoff 100-250 m from a 600-800 m spawn, up to 45 m/s, 1 active threat of 5                                | 0.846         |
 | `3_10m_v2_res01`                | Earlier PID-residual policy, 3-10 m from rest                                                               | grade 0.92    |
@@ -78,12 +81,13 @@ Every `app/<folder>/docs.md` explains that folder's design, gotchas and history.
 The trainer's full guide is [`app/training/rtl-handoff.md`](app/training/rtl-handoff.md).
 
 ## Requirements
+
 The project uses **two Python environments**:
 
-| Environment | Python | Used for |
-|---|---|---|
-| **uv env** (`.venv`) | 3.12 | Web viewer, replay/recording, BC, tests, plots. No Isaac needed. |
-| **Isaac Lab venv** | 3.11 | Anything that simulates in Isaac: demo collection, DAgger, training, the MLflow UI for Isaac runs. |
+| Environment          | Python | Used for                                                                                           |
+| -------------------- | ------ | -------------------------------------------------------------------------------------------------- |
+| **uv env** (`.venv`) | 3.12   | Web viewer, replay/recording, BC, tests, plots. No Isaac needed.                                   |
+| **Isaac Lab venv**   | 3.11   | Anything that simulates in Isaac: demo collection, DAgger, training, the MLflow UI for Isaac runs. |
 
 - **uv env:** install [uv](https://docs.astral.sh/uv/), then run `uv sync` in the repo root. PyTorch comes from the
   CUDA 13.0 index configured in `pyproject.toml`.
@@ -106,6 +110,7 @@ uv run uvicorn app.guidance.serve_run:app --port 8000                  # web vie
 Open **http://localhost:8000**.
 
 ## Web viewer
+
 The viewer flies a checkpoint **deterministically in the numpy simulator**, with no Isaac needed. Start it with
 `uv run uvicorn app.guidance.serve_run:app --port 8000`. The server lists every `.pt` under `runs/` and
 `app/control/`, with `best.pt` first. To make a released model selectable, copy its **whole folder** so its
@@ -115,9 +120,9 @@ The viewer flies a checkpoint **deterministically in the numpy simulator**, with
 mkdir -p runs && cp -r stable_models/handoff_v3_150_250_30_50_18ms runs/
 ```
 
-| Tab | What it does |
-|---|---|
-| **Two-phase** | The PID / carrot cruise flies to the switch distance, then the checkpoint takes over. Pick a listed checkpoint, or **Upload .pt** (an upload has no `run_config.json`, so it is treated as a `full`-mode model). Set the target distance, switch distance, cruise speed (use the run's `--max-speed`) and handoff speed. **Run & play in 3D** gives an interactive replay (orbit, zoom, scrub, follow); **Run test batch** gives the hit rate over N random scenarios. |
+| Tab           | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Two-phase** | The PID / carrot cruise flies to the switch distance, then the checkpoint takes over. Pick a listed checkpoint, or **Upload .pt** (an upload has no `run_config.json`, so it is treated as a `full`-mode model). Set the target distance, switch distance, cruise speed (use the run's `--max-speed`) and handoff speed. **Run & play in 3D** gives an interactive replay (orbit, zoom, scrub, follow); **Run test batch** gives the hit rate over N random scenarios.                                                        |
 | **Acro eval** | Scores an acro checkpoint the way the trainer's eval does (clean start from rest, deterministic, first episode, per-distance budget) in the numpy plant: hit / out of bounds / tilt / hover / timeout, per scenario and per distance. **Fly one episode & play in 3D** gives the same interactive replay as the two-phase tab. Start "as trained" launches the drone with the run's spawn speed (what the trainer's eval does), "from rest" starts at rest. Use it to check that the viewer plant agrees with the Isaac eval. |
 
 Keep the switch distance inside the range the model was trained on (3-50 m for the released handoff models). The observation
@@ -135,6 +140,7 @@ uv run python -m app.guidance.record_run runs/<acro run>/best.pt --acro --n-scen
 ```
 
 ## MLflow
+
 Isaac training runs log to `mlflow_isaac.db` in the repo root. Open the UI with the **Isaac venv's** mlflow: the db
 schema matches that mlflow version.
 
@@ -146,6 +152,7 @@ Then open **http://localhost:5000**. Older numpy-side runs (deprecated trainers)
 `uv run mlflow ui --backend-store-uri sqlite:///mlflow.db`.
 
 ## Training pipeline
+
 Steps 1-3 build the warm-start policy. Step 4 is the real training. Pretrained outputs of steps 1-3 are already
 committed (`app/control/pretrained_bc.pt`, `pretrained_bc_dagger.pt`), so you can start at step 4.
 
@@ -212,6 +219,7 @@ uv run python scripts/isaac_lab/diff_test_pid.py                     # torch PID
 ```
 
 ## Known limitations
+
 - The policy observes the **exact** target position. A noisy server-feed / camera estimator is planned
   (`app/environmental/perception.py` is the starting point, `app/navigation` the estimator).
 - The handoff rewards are path-independent, so handoff policies may climb before approaching
