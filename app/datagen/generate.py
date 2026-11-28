@@ -29,6 +29,7 @@ from app.datagen.config import CLIP_COUNT, RANGE_BUCKETS_M, DatagenConfig
 from app.datagen.export_yolo import ExportStats, crop_origin, export_clip, load_labels
 from app.datagen.ir_composite import SunState, make_fpn
 from app.datagen.rig import (
+    IsaacReplicatorBackend,
     Optics,
     PTZState,
     RigActor,
@@ -640,63 +641,100 @@ def main() -> int:
     parser.add_argument("--shard", default="1/1", help="shard i/n for multi-GPU runs")
     parser.add_argument("--out", default="/tmp/datagen_clips")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument("--backend", default="auto", choices=("auto", "isaac", "synthetic"))
     parser.add_argument("--benchmark", action="store_true", help="run Milestone D1+D2 benchmark & bucket audit")
     parser.add_argument("--bench-frames", type=int, default=250, help="frames for the D1 timing clip")
+
+    try:
+        from isaaclab.app import AppLauncher
+
+        AppLauncher.add_app_launcher_args(parser)
+        has_isaaclab = True
+    except ImportError:
+        parser.add_argument("--headless", action="store_true", default=True)
+        has_isaaclab = False
+
     args = parser.parse_args()
+    use_isaac = (args.backend == "isaac") or (args.backend == "auto" and has_isaaclab)
+    if args.backend == "isaac" and not has_isaaclab:
+        raise RuntimeError("--backend isaac requested, but isaaclab.app is not installed in this venv")
 
-    cfg = DatagenConfig(sensor_tier=args.sensor, headless=args.headless)
+    sim_app = None
+    if use_isaac:
+        args.enable_cameras = True
+        print("[datagen] booting Isaac Sim (AppLauncher, enable_cameras=True)...")
+        sim_app = AppLauncher(args).app
 
-    if args.benchmark:
-        bench_dir = Path(args.out) / "_d1_bench"
-        d1 = benchmark_throughput(cfg, out_root=bench_dir, n_frames=args.bench_frames)
-        print(
-            f"D1 benchmark ({d1.sensor_tier}, {d1.n_frames} frames): {d1.fps_measured} fps  "
-            f"({d1.sec_per_clip_avg}s/clip)  2k_pilot={d1.pilot_2k_hours}h  20k_full={d1.full_20k_hours}h"
+    try:
+        cfg = DatagenConfig(sensor_tier=args.sensor, headless=bool(getattr(args, "headless", True)))
+        ground = GroundZ.load(DEFAULT_NPY) if DEFAULT_NPY.exists() else build_ground(cfg)[0]
+        backend: RigBackend = (
+            IsaacReplicatorBackend(ground, cfg) if use_isaac else SyntheticRigBackend(ground)
         )
+        print(f"[datagen] active backend: {type(backend).__name__}")
+
+        if args.benchmark:
+            bench_dir = Path(args.out) / "_d1_bench"
+            d1 = benchmark_throughput(
+                cfg, out_root=bench_dir, n_frames=args.bench_frames, ground=ground, backend=backend
+            )
+            print(
+                f"D1 benchmark ({d1.sensor_tier}, {d1.n_frames} frames): {d1.fps_measured} fps  "
+                f"({d1.sec_per_clip_avg}s/clip)  2k_pilot={d1.pilot_2k_hours}h  20k_full={d1.full_20k_hours}h"
+            )
+            results = generate_dataset(
+                cfg=cfg,
+                clips=args.clips,
+                out_root=args.out,
+                duration_s=args.duration,
+                shard=args.shard,
+                ground=ground,
+                backend=backend,
+                seed=args.seed,
+            )
+            spans = audit_bucket_spans(results, cfg)
+            rep = pilot_report(args.out)
+            print(
+                f"D2 pilot audit: clips={rep['clips']}  min_in_crop={rep['min_in_crop_ratio']}  "
+                f"pass_gate={rep['pass_gate']}"
+            )
+            for row in spans:
+                print(
+                    f"  {row['clip']:<44} bucket={row['bucket']:<10} "
+                    f"px={row['measured_px']:5.2f} (exp {row['expected_px']:5.2f})  in_bounds={row['in_bounds']}"
+                )
+            return 0
+
+        started = time.perf_counter()
         results = generate_dataset(
             cfg=cfg,
             clips=args.clips,
             out_root=args.out,
             duration_s=args.duration,
             shard=args.shard,
+            ground=ground,
+            backend=backend,
             seed=args.seed,
         )
-        spans = audit_bucket_spans(results, cfg)
-        rep = pilot_report(args.out)
-        print(f"D2 pilot audit: clips={rep['clips']}  min_in_crop={rep['min_in_crop_ratio']}  pass_gate={rep['pass_gate']}")
-        for row in spans:
+        elapsed = time.perf_counter() - started
+        total_frames = sum(r.n_frames for r in results)
+        fps_eff = total_frames / max(elapsed, 1e-6)
+
+        print(
+            f"generated {len(results)} clips ({total_frames} frames) in {elapsed:.2f}s "
+            f"({fps_eff:.1f} frames/s) -> {args.out}"
+        )
+        for r in results:
+            b0, b1 = int(r.spec.bucket_m[0]), int(r.spec.bucket_m[1])
             print(
-                f"  {row['clip']:<44} bucket={row['bucket']:<10} "
-                f"px={row['measured_px']:5.2f} (exp {row['expected_px']:5.2f})  in_bounds={row['in_bounds']}"
+                f"  {r.clip_dir.name:<44} frames={r.n_frames:3d}  "
+                f"in_crop={r.in_crop_ratio * 100:5.1f}%  attempts={r.attempts}  "
+                f"boxes={r.yolo_stats.boxes_out}  bucket={b0}-{b1}m"
             )
         return 0
-
-    started = time.perf_counter()
-    results = generate_dataset(
-        cfg=cfg,
-        clips=args.clips,
-        out_root=args.out,
-        duration_s=args.duration,
-        shard=args.shard,
-        seed=args.seed,
-    )
-    elapsed = time.perf_counter() - started
-    total_frames = sum(r.n_frames for r in results)
-    fps_eff = total_frames / max(elapsed, 1e-6)
-
-    print(
-        f"generated {len(results)} clips ({total_frames} frames) in {elapsed:.2f}s "
-        f"({fps_eff:.1f} frames/s) -> {args.out}"
-    )
-    for r in results:
-        b0, b1 = int(r.spec.bucket_m[0]), int(r.spec.bucket_m[1])
-        print(
-            f"  {r.clip_dir.name:<44} frames={r.n_frames:3d}  "
-            f"in_crop={r.in_crop_ratio * 100:5.1f}%  attempts={r.attempts}  "
-            f"boxes={r.yolo_stats.boxes_out}  bucket={b0}-{b1}m"
-        )
-    return 0
+    finally:
+        if sim_app is not None:
+            sim_app.close()
 
 
 if __name__ == "__main__":

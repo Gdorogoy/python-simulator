@@ -469,6 +469,156 @@ class SyntheticRigBackend:
         return seg, normals, depth, self._boxes_from_placed(placed, optics)
 
 
+# --- Isaac Sim / Omniverse Replicator GPU Backend --------------------------------------
+
+
+class IsaacReplicatorBackend:
+    """Hardware-raytraced Omniverse Replicator backend (requires a running `SimulationApp`)."""
+
+    def __init__(self, ground: GroundZ, cfg: DatagenConfig) -> None:
+        import omni.replicator.core as rep
+        import omni.usd
+        from pxr import Gf, Sdf, UsdGeom, UsdLux
+
+        from app.datagen.terrain_builder import DEFAULT_USD, export_terrain_usd
+
+        self._rep = rep
+        self._Gf = Gf
+        self._UsdGeom = UsdGeom
+        self.ground = ground
+        self.cfg = cfg
+
+        if not DEFAULT_USD.exists():
+            export_terrain_usd(ground, DEFAULT_USD, visual_stride=4, collider_stride=8)
+
+        ctx = omni.usd.get_context()
+        ctx.new_stage()
+        self.stage = ctx.get_stage()
+        UsdGeom.SetStageUpAxis(self.stage, UsdGeom.Tokens.z)
+        UsdGeom.SetStageMetersPerUnit(self.stage, 1.0)
+
+        terrain_prim = self.stage.DefinePrim("/World/Terrain", "Xform")
+        terrain_prim.GetReferences().AddReference(str(DEFAULT_USD))
+
+        sun_light = UsdLux.DistantLight.Define(self.stage, Sdf.Path("/World/SunLight"))
+        sun_light.CreateIntensityAttr(3000.0)
+
+        self.eo_cam = UsdGeom.Camera.Define(self.stage, Sdf.Path("/World/Rig/EOCamera"))
+        self.ir_cam = UsdGeom.Camera.Define(self.stage, Sdf.Path("/World/Rig/IRCamera"))
+        self.eo_cam.CreateClippingRangeAttr(Gf.Vec2f(1.0, float(cfg.far_clip_m)))
+        self.ir_cam.CreateClippingRangeAttr(Gf.Vec2f(1.0, float(cfg.far_clip_m)))
+
+        eo_res = cfg.native_res("eo")
+        ir_res = cfg.native_res("ir")
+        self.eo_rp = rep.create.render_product("/World/Rig/EOCamera", eo_res)
+        self.ir_rp = rep.create.render_product("/World/Rig/IRCamera", ir_res)
+
+        self.eo_rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
+        self.eo_rgb_annot.attach([self.eo_rp])
+
+        self.ir_depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_image_plane")
+        self.ir_norm_annot = rep.AnnotatorRegistry.get_annotator("normals")
+        self.ir_depth_annot.attach([self.ir_rp])
+        self.ir_norm_annot.attach([self.ir_rp])
+
+        self._actor_prims: dict[int, object] = {}
+        self._last_step_key: tuple | None = None
+
+    def _sync_camera(self, cam, ptz: PTZState, optics: Optics) -> None:
+        Gf = self._Gf
+        UsdGeom = self._UsdGeom
+        cam.GetHorizontalApertureAttr().Set(float(optics.sensor_width_mm))
+        cam.GetFocalLengthAttr().Set(float(optics.focal_mm))
+
+        # USD camera looks down -Z with +Y up. For world Z-up and look yaw/pitch:
+        # rotate X by (90 deg + pitch), then Z by (yaw - 90 deg).
+        rot_x = Gf.Rotation(Gf.Vec3d(1.0, 0.0, 0.0), 90.0 + float(np.degrees(ptz.pitch_rad)))
+        rot_z = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), float(np.degrees(ptz.yaw_rad)) - 90.0)
+        rot = rot_x * rot_z
+        mat = Gf.Matrix4d(1.0)
+        mat.SetRotate(rot)
+        mat.SetTranslate(Gf.Vec3d(*[float(v) for v in ptz.cam_xyz]))
+        xform = UsdGeom.Xformable(cam.GetPrim())
+        xform.ClearXformOpOrder()
+        xform.AddTransformOp().Set(mat)
+
+    def _sync_actors(self, actors: Sequence[RigActor]) -> None:
+        Gf = self._Gf
+        UsdGeom = self._UsdGeom
+        for actor in actors:
+            prim_path = f"/World/Targets/Actor_{actor.track_id}"
+            prim = self.stage.GetPrimAtPath(prim_path)
+            if not prim.IsValid():
+                prim = self.stage.DefinePrim(prim_path, "Xform")
+                mesh_file = actor.asset.mesh_path()
+                if mesh_file.exists():
+                    prim.GetReferences().AddReference(str(mesh_file))
+                else:
+                    cube = UsdGeom.Cube.Define(self.stage, f"{prim_path}/Geom")
+                    cube.CreateSizeAttr(1.0)
+            xform = UsdGeom.Xformable(prim)
+            xform.ClearXformOpOrder()
+            xform.AddTranslateOp().Set(Gf.Vec3d(*[float(v) for v in actor.xyz]))
+            xform.AddScaleOp().Set(Gf.Vec3f(float(actor.span_m), float(actor.span_m), float(actor.span_m)))
+
+    def _step_if_needed(
+        self, ptz: PTZState, eo_optics: Optics, ir_optics: Optics, actors: Sequence[RigActor]
+    ) -> None:
+        key = (ptz.cam_xyz, ptz.yaw_rad, ptz.pitch_rad, tuple((a.track_id, a.xyz) for a in actors))
+        if key == self._last_step_key:
+            return
+        self._sync_camera(self.eo_cam, ptz, eo_optics)
+        self._sync_camera(self.ir_cam, ptz, ir_optics)
+        self._sync_actors(actors)
+        self._rep.orchestrator.step(rt_subframes=1, delta_time=0.0, pause_timeline=False)
+        self._last_step_key = key
+
+    def read_eo(
+        self, ptz: PTZState, optics: Optics, actors: Sequence[RigActor], aovs: tuple[str, ...]
+    ) -> tuple[np.ndarray, list[tuple[int, int, float, float, float, float]]]:
+        assert aovs == EO_AOVS
+        self._step_if_needed(ptz, optics, optics, actors)
+        raw = self.eo_rgb_annot.get_data()
+        arr = np.asarray(raw)
+        if arr.ndim == 3 and arr.shape[2] >= 3:
+            rgb = arr[..., :3].astype(np.uint8)
+        else:
+            rgb = np.zeros((optics.height_px, optics.width_px, 3), dtype=np.uint8)
+        placed = SyntheticRigBackend(self.ground)._rasterize_actors(ptz, optics, actors)
+        return rgb, SyntheticRigBackend._boxes_from_placed(placed, optics)
+
+    def read_ir(
+        self, ptz: PTZState, optics: Optics, actors: Sequence[RigActor], aovs: tuple[str, ...]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[int, int, float, float, float, float]]]:
+        assert aovs == IR_AOVS
+        self._step_if_needed(ptz, optics, optics, actors)
+        h, w = optics.height_px, optics.width_px
+
+        raw_depth = np.asarray(self.ir_depth_annot.get_data(), dtype=np.float32)
+        if raw_depth.shape[:2] == (h, w):
+            depth = raw_depth.reshape(h, w)
+        else:
+            depth = np.full((h, w), np.inf, dtype=np.float32)
+
+        raw_norm = np.asarray(self.ir_norm_annot.get_data(), dtype=np.float32)
+        if raw_norm.ndim == 3 and raw_norm.shape[:2] == (h, w) and raw_norm.shape[2] >= 3:
+            normals = raw_norm[..., :3].copy()
+        else:
+            normals = np.zeros((h, w, 3), dtype=np.float32)
+            normals[..., 2] = 1.0
+
+        is_ground = np.isfinite(depth) & (depth < self.cfg.far_clip_m)
+        seg = np.where(is_ground, SEG_GROUND, SEG_SKY).astype(np.int32)
+
+        helper = SyntheticRigBackend(self.ground)
+        placed = helper._rasterize_actors(ptz, optics, actors)
+        for actor, x1, y1, x2, y2, d_m in placed:
+            seg[y1:y2, x1:x2] = actor.effective_seg_id
+            depth[y1:y2, x1:x2] = d_m
+            normals[y1:y2, x1:x2] = (0.0, 0.0, 1.0)
+        return seg, normals, depth, helper._boxes_from_placed(placed, optics)
+
+
 # --- Demo CLI --------------------------------------------------------------------------
 
 
