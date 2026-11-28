@@ -1,0 +1,90 @@
+{
+  "created": "2026-11-28T22:03:11",
+  "edges_add": [
+    {
+      "k": "implemented_in",
+      "s": "feature:datagen",
+      "t": "file:app/datagen/generate.py"
+    },
+    {
+      "k": "implemented_in",
+      "s": "feature:datagen",
+      "t": "file:app/datagen/rig.py"
+    }
+  ],
+  "edges_remove": [],
+  "name": "vision-sys-datagen",
+  "nodes": {
+    "feature:datagen": {
+      "label": "datagen",
+      "op": "add",
+      "reason": "branch vision-sys adds app/datagen/ for 20k-clip EO/IR generation",
+      "summary": "Synthetic EO/IR Counter-UAS dataset pipeline (terrain, +K hotspots, PTZ rig, YOLO export, D1/D2 benchmark)",
+      "type": "feature"
+    },
+    "file:app/datagen/assets.py": {
+      "hash": "6172e7228350",
+      "label": "app/datagen/assets.py",
+      "op": "add",
+      "path": "app/datagen/assets.py",
+      "reason": "per-part thermal signatures without splitting single-mesh GLBs",
+      "summary": "15 Sketchfab .glb downloader and +K hotspot projection onto IR masks",
+      "type": "feature"
+    },
+    "file:app/datagen/config.py": {
+      "hash": "8d3a3d0ca954",
+      "label": "app/datagen/config.py",
+      "op": "add",
+      "path": "app/datagen/config.py",
+      "reason": "single source of truth for datagen parameters",
+      "summary": "DatagenConfig, native/crop resolutions, range buckets, EO/IR AOV split",
+      "type": "feature"
+    },
+    "file:app/datagen/export_yolo.py": {
+      "hash": "165e434cbfc2",
+      "label": "app/datagen/export_yolo.py",
+      "op": "add",
+      "path": "app/datagen/export_yolo.py",
+      "reason": "preserves mrad/px by cropping instead of resizing",
+      "summary": "Native-to-square-crop YOLO label remapper and drop counters",
+      "type": "feature"
+    },
+    "file:app/datagen/generate.py": {
+      "hash": "79ac30322983",
+      "label": "app/datagen/generate.py",
+      "op": "add",
+      "path": "app/datagen/generate.py",
+      "reason": "end-to-end clip generation and throughput benchmark",
+      "summary": "CLI dataset runner, >=95% crop gate, track features, D1/D2 benchmark",
+      "type": "feature"
+    },
+    "file:app/datagen/ir_composite.py": {
+      "hash": "281c698b9034",
+      "label": "app/datagen/ir_composite.py",
+      "op": "add",
+      "path": "app/datagen/ir_composite.py",
+      "reason": "Isaac Sim renders visible light only, IR is composited in NumPy",
+      "summary": "LWIR thermal synthesis from AOVs, +K hotspots, Beer-Lambert, NETD/FPN, white-hot",
+      "type": "feature"
+    },
+    "file:app/datagen/rig.py": {
+      "hash": "5f41f0526319",
+      "label": "app/datagen/rig.py",
+      "op": "add",
+      "path": "app/datagen/rig.py",
+      "reason": "dual-camera EO/IR rig and backends",
+      "summary": "camera_optics, spawn_in_frustum, step_ptz, render_rig_frame, SyntheticRigBackend, IsaacReplicatorBackend",
+      "type": "feature"
+    },
+    "file:app/datagen/terrain_builder.py": {
+      "hash": "237855a286e5",
+      "label": "app/datagen/terrain_builder.py",
+      "op": "add",
+      "path": "app/datagen/terrain_builder.py",
+      "reason": "baked once to avoid per-clip terrain rebuild cost",
+      "summary": "10x10km Galilee heightmap (ground_z.npy) and USD mesh export (map_10km.usda)",
+      "type": "feature"
+    }
+  },
+  "notes": []
+}
