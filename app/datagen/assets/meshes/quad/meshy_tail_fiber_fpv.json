@@ -1,0 +1,80 @@
+{
+  "slug": "meshy_tail_fiber_fpv",
+  "name": "[Meshy] Tail FPV Optic Fibre Drone",
+  "class_name": "quad",
+  "class_id": 0,
+  "sketchfab_uid": "0f037de4489b4c6eaae3edc4d9ae23b2",
+  "sketchfab_url": "https://sketchfab.com/3d-models/meshy-tail-fpv-optic-fibre-drone-0f037de4489b4c6eaae3edc4d9ae23b2",
+  "mesh_file": "meshy_tail_fiber_fpv.glb",
+  "span_range_m": [
+    0.45,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.86,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "motor_fl",
+      "offset_norm": [
+        0.32,
+        0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_fr",
+      "offset_norm": [
+        0.32,
+        -0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rl",
+      "offset_norm": [
+        -0.32,
+        0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rr",
+      "offset_norm": [
+        -0.32,
+        -0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "battery_esc",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 11.0,
+      "epsilon": 0.92
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "24.0k faces, CC-BY. Fused AI mesh with rear fiber-optic spool (+2 K) and 4 motor spots (+35 K)."
+}

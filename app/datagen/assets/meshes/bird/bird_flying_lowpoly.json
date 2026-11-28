@@ -1,0 +1,36 @@
+{
+  "slug": "bird_flying_lowpoly",
+  "name": "Bird Flying Animation (Flock LOD)",
+  "class_name": "bird",
+  "class_id": 3,
+  "sketchfab_uid": "61e8ff53d4e845d5b0aeaaf39b5869ef",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-61e8ff53d4e845d5b0aeaaf39b5869ef",
+  "mesh_file": "bird_flying_lowpoly.glb",
+  "span_range_m": [
+    0.25,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 121,
+    "epsilon": 0.98,
+    "delta_t_k": 1.0
+  },
+  "hotspots": [
+    {
+      "name": "torso_core",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius_norm": 0.12,
+      "delta_t_k": 11.0,
+      "epsilon": 0.98
+    }
+  ],
+  "flap_hz_range": [
+    2.0,
+    6.0
+  ],
+  "notes": "174 faces, CC-BY. Cool wings (+1 K) with warm torso core (+12 K peak) and 2-6 Hz flap."
+}

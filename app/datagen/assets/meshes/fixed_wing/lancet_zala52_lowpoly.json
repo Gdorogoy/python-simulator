@@ -1,0 +1,47 @@
+{
+  "slug": "lancet_zala52_lowpoly",
+  "name": "Lancet Zala-52 (Low-poly X-wing)",
+  "class_name": "fixed_wing",
+  "class_id": 1,
+  "sketchfab_uid": "e6bbd4ae1c3543339160317fb111b502",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-e6bbd4ae1c3543339160317fb111b502",
+  "mesh_file": "lancet_zala52_lowpoly.glb",
+  "span_range_m": [
+    1.2,
+    2.5
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.86,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "tail_motor_exhaust",
+      "offset_norm": [
+        -0.4,
+        0.0,
+        0.01
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 58.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "avionics_battery",
+      "offset_norm": [
+        0.08,
+        0.0,
+        0.0
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 8.0,
+      "epsilon": 0.9
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "1.2k faces, CC-BY. Cruciform loitering munition with tail pusher hotspot (+60 K)."
+}

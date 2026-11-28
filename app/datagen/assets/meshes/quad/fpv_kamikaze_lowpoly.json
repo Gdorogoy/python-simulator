@@ -1,0 +1,80 @@
+{
+  "slug": "fpv_kamikaze_lowpoly",
+  "name": "FPV kamikaze drone Low-poly",
+  "class_name": "quad",
+  "class_id": 0,
+  "sketchfab_uid": "87f5bbb5b08641b782bc084ddd4082a7",
+  "sketchfab_url": "https://sketchfab.com/3d-models/fpv-kamikaze-drone-low-poly-87f5bbb5b08641b782bc084ddd4082a7",
+  "mesh_file": "fpv_kamikaze_lowpoly.glb",
+  "span_range_m": [
+    0.45,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.85,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "motor_fl",
+      "offset_norm": [
+        0.32,
+        0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 34.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_fr",
+      "offset_norm": [
+        0.32,
+        -0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 34.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rl",
+      "offset_norm": [
+        -0.32,
+        0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 34.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rr",
+      "offset_norm": [
+        -0.32,
+        -0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 34.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "battery_esc",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 11.0,
+      "epsilon": 0.92
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "24.4k faces, CC-BY. Under-slung warhead stays at +2 K; 4 motors at +36 K peak."
+}

@@ -1,0 +1,47 @@
+{
+  "slug": "orlan_10",
+  "name": "Orlan-10 Recon UAV",
+  "class_name": "fixed_wing",
+  "class_id": 1,
+  "sketchfab_uid": "e2efb223c1814b7291818a9a7b4e80c5",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-e2efb223c1814b7291818a9a7b4e80c5",
+  "mesh_file": "orlan_10.glb",
+  "span_range_m": [
+    1.8,
+    2.5
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.85,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "nose_engine_exhaust",
+      "offset_norm": [
+        0.42,
+        0.0,
+        -0.02
+      ],
+      "radius_norm": 0.085,
+      "delta_t_k": 58.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "fuselage_bay",
+      "offset_norm": [
+        0.05,
+        0.0,
+        0.0
+      ],
+      "radius_norm": 0.11,
+      "delta_t_k": 9.0,
+      "epsilon": 0.9
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "37.6k faces, CC-BY. Front-mounted internal combustion exhaust at +X nose (+60 K)."
+}

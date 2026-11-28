@@ -1,0 +1,80 @@
+{
+  "slug": "combat_fpv_rpg7",
+  "name": "Combat FPV drone (RPG-7 warhead)",
+  "class_name": "quad",
+  "class_id": 0,
+  "sketchfab_uid": "df640a20c2af49a6af7c371b2d49d51f",
+  "sketchfab_url": "https://sketchfab.com/3d-models/combat-fpv-drone-df640a20c2af49a6af7c371b2d49d51f",
+  "mesh_file": "combat_fpv_rpg7.glb",
+  "span_range_m": [
+    0.45,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.85,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "motor_fl",
+      "offset_norm": [
+        0.32,
+        0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 35.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_fr",
+      "offset_norm": [
+        0.32,
+        -0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 35.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rl",
+      "offset_norm": [
+        -0.32,
+        0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 35.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rr",
+      "offset_norm": [
+        -0.32,
+        -0.32,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 35.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "battery_esc",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 12.0,
+      "epsilon": 0.92
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "39.7k faces, CC-BY. Heavy payload pulls higher motor load (+37 K peak)."
+}

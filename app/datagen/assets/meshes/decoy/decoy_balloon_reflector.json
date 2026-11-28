@@ -1,0 +1,24 @@
+{
+  "slug": "decoy_balloon_reflector",
+  "name": "Passive Thermal/Radar Decoy",
+  "class_name": "decoy",
+  "class_id": 2,
+  "sketchfab_uid": "e6bbd4ae1c3543339160317fb111b502",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-e6bbd4ae1c3543339160317fb111b502",
+  "mesh_file": "decoy_balloon_reflector.glb",
+  "span_range_m": [
+    0.2,
+    1.5
+  ],
+  "base_material": {
+    "seg_id": 140,
+    "epsilon": 0.97,
+    "delta_t_k": 8.0
+  },
+  "hotspots": [],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "Passive decoy: uniform +8 K solar-warmed surface, zero motor hotspots."
+}

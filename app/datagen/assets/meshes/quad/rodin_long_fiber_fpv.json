@@ -1,0 +1,80 @@
+{
+  "slug": "rodin_long_fiber_fpv",
+  "name": "[Rodin] Long FPV Optic Fibre Drone",
+  "class_name": "quad",
+  "class_id": 0,
+  "sketchfab_uid": "b7ca3ae3f8294752bcab959fb3b756b4",
+  "sketchfab_url": "https://sketchfab.com/3d-models/rodin-long-fpv-optic-fibre-drone-b7ca3ae3f8294752bcab959fb3b756b4",
+  "mesh_file": "rodin_long_fiber_fpv.glb",
+  "span_range_m": [
+    0.45,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.86,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "motor_fl",
+      "offset_norm": [
+        0.33,
+        0.33,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_fr",
+      "offset_norm": [
+        0.33,
+        -0.33,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rl",
+      "offset_norm": [
+        -0.33,
+        0.33,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_rr",
+      "offset_norm": [
+        -0.33,
+        -0.33,
+        0.02
+      ],
+      "radius_norm": 0.08,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "battery_esc",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.03
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 11.0,
+      "epsilon": 0.92
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "38.3k faces, CC-BY. Elongated fiber-optic spool cylinder + 4 motor hotspots."
+}

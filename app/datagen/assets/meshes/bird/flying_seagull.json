@@ -1,0 +1,36 @@
+{
+  "slug": "flying_seagull",
+  "name": "Flying Seagull",
+  "class_name": "bird",
+  "class_id": 3,
+  "sketchfab_uid": "07dde3ea7d9048588d3c4edfd37ac20d",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-07dde3ea7d9048588d3c4edfd37ac20d",
+  "mesh_file": "flying_seagull.glb",
+  "span_range_m": [
+    0.55,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 121,
+    "epsilon": 0.98,
+    "delta_t_k": 1.0
+  },
+  "hotspots": [
+    {
+      "name": "torso_core",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius_norm": 0.12,
+      "delta_t_k": 11.0,
+      "epsilon": 0.98
+    }
+  ],
+  "flap_hz_range": [
+    2.0,
+    4.5
+  ],
+  "notes": "1.1k faces, CC-BY-SA. Close-range (300-800 m) bird asset."
+}

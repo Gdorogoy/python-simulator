@@ -1,0 +1,47 @@
+{
+  "slug": "lancet_detailed",
+  "name": "ZALA Lancet (Detailed X-wing)",
+  "class_name": "fixed_wing",
+  "class_id": 1,
+  "sketchfab_uid": "311f824410b840cf8da15f951b791e01",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-311f824410b840cf8da15f951b791e01",
+  "mesh_file": "lancet_detailed.glb",
+  "span_range_m": [
+    1.2,
+    2.5
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.86,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "tail_motor_exhaust",
+      "offset_norm": [
+        -0.4,
+        0.0,
+        0.01
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 58.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "avionics_battery",
+      "offset_norm": [
+        0.08,
+        0.0,
+        0.0
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 8.0,
+      "epsilon": 0.9
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "14.7k faces, CC-BY. Close-range (300-1200 m) cruciform wing."
+}

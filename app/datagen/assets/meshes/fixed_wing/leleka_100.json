@@ -1,0 +1,47 @@
+{
+  "slug": "leleka_100",
+  "name": "DeViRo Leleka-100 Fixed-wing UAV",
+  "class_name": "fixed_wing",
+  "class_id": 1,
+  "sketchfab_uid": "ac9fafc59bbe4991820bf21a3f3b1d17",
+  "sketchfab_url": "https://sketchfab.com/3d-models/none-ac9fafc59bbe4991820bf21a3f3b1d17",
+  "mesh_file": "leleka_100.glb",
+  "span_range_m": [
+    1.5,
+    2.2
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.85,
+    "delta_t_k": 2.0
+  },
+  "hotspots": [
+    {
+      "name": "tail_motor_exhaust",
+      "offset_norm": [
+        -0.4,
+        0.0,
+        0.01
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 58.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "avionics_battery",
+      "offset_norm": [
+        0.08,
+        0.0,
+        0.0
+      ],
+      "radius_norm": 0.1,
+      "delta_t_k": 8.0,
+      "epsilon": 0.9
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "35.8k faces, CC-BY. High-wing recon UAV with rear electric pusher."
+}

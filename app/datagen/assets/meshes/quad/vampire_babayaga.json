@@ -1,0 +1,102 @@
+{
+  "slug": "vampire_babayaga",
+  "name": "Vampire UAV (BabaYaga hexacopter)",
+  "class_name": "quad",
+  "class_id": 0,
+  "sketchfab_uid": "f49e65781b32465c86841617e82fcae7",
+  "sketchfab_url": "https://sketchfab.com/3d-models/vampire-uav-babayaga-f49e65781b32465c86841617e82fcae7",
+  "mesh_file": "vampire_babayaga.glb",
+  "span_range_m": [
+    0.75,
+    1.0
+  ],
+  "base_material": {
+    "seg_id": 111,
+    "epsilon": 0.86,
+    "delta_t_k": 2.5
+  },
+  "hotspots": [
+    {
+      "name": "motor_1",
+      "offset_norm": [
+        0.3118,
+        0.18,
+        0.03
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_2",
+      "offset_norm": [
+        0.0,
+        0.36,
+        0.03
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_3",
+      "offset_norm": [
+        -0.3118,
+        0.18,
+        0.03
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_4",
+      "offset_norm": [
+        -0.3118,
+        -0.18,
+        0.03
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_5",
+      "offset_norm": [
+        -0.0,
+        -0.36,
+        0.03
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "motor_6",
+      "offset_norm": [
+        0.3118,
+        -0.18,
+        0.03
+      ],
+      "radius_norm": 0.075,
+      "delta_t_k": 33.0,
+      "epsilon": 0.95
+    },
+    {
+      "name": "power_core",
+      "offset_norm": [
+        0.0,
+        0.0,
+        0.02
+      ],
+      "radius_norm": 0.12,
+      "delta_t_k": 12.0,
+      "epsilon": 0.92
+    }
+  ],
+  "flap_hz_range": [
+    0.0,
+    0.0
+  ],
+  "notes": "16.2k faces, CC-BY-NC-SA. 6-rotor heavy bomber layout at top of 0.45-1.0 m band."
+}

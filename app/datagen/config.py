@@ -1,13 +1,13 @@
 """DatagenConfig — single source of truth for the synthetic EO/IR dataset.
 
-See `app/datagen/docs.md` §0.1 (reconciled values) and §3 (camera rig) / §5 (output).
+See `app/datagen/plan.md` §0.1 (reconciled values) and §3 (camera rig) / §5 (output).
 Imported, never copied, so the doc and the code cannot silently drift apart — the same rule
 `app/training/config.py` follows for the PPO hyperparameters.
 """
 
 from dataclasses import dataclass, field
 
-# Pinned by docs.md §0.1. Frame counts are derived from these, never configured separately.
+# Pinned by plan.md §0.1. Frame counts are derived from these, never configured separately.
 FPS_BY_TIER: dict[str, int] = {"tier1": 60, "tier2": 30}
 
 # Contiguous and non-overlapping. A gap here is a bug — see app/test/test_datagen_config.py.
@@ -21,14 +21,14 @@ RANGE_BUCKETS_M: tuple[tuple[float, float], ...] = (
 )
 
 # Share of CLIP_COUNT per bucket, same order as RANGE_BUCKETS_M. Equal shares by default;
-# raise the long-range weights if hard cases need oversampling (docs.md §5.3).
+# raise the long-range weights if hard cases need oversampling (plan.md §5.3).
 BUCKET_WEIGHTS: tuple[float, ...] = (0.20, 0.20, 0.20, 0.20, 0.20)
 
 CLIP_COUNT = 20_000
 
 CLASS_IDS: dict[str, int] = {"quad": 0, "fixed_wing": 1, "decoy": 2, "bird": 3}
 
-# Native sensor rasters, keyed by (tier, modality). docs.md §3.2/§3.3.
+# Native sensor rasters, keyed by (tier, modality). plan.md §3.2/§3.3.
 NATIVE_RES: dict[tuple[str, str], tuple[int, int]] = {
     ("tier1", "eo"): (1920, 1080),
     ("tier1", "ir"): (640, 512),
@@ -45,7 +45,7 @@ TRAIN_CROP_PX: dict[tuple[str, str], int] = {
     ("tier2", "ir"): 1024,
 }
 
-# AOV split (docs.md §3.5): the IR compositor needs full rasters; EO needs only the picture and
+# AOV split (plan.md §3.5): the IR compositor needs full rasters; EO needs only the picture and
 # its labels. Requesting masks/normals/depth at 2560x1440 would cost 5x the readback for nothing.
 EO_AOVS: tuple[str, ...] = ("rgb", "bounding_box_2d_tight", "camera_params")
 IR_AOVS: tuple[str, ...] = (
@@ -57,10 +57,10 @@ IR_AOVS: tuple[str, ...] = (
     "camera_params",
 )
 
-# Actual threat band: fiber-optic FPV, tip-to-tip including propellers (docs.md §2).
+# Actual threat band: fiber-optic FPV, tip-to-tip including propellers (plan.md §2).
 QUAD_SPAN_M: tuple[float, float] = (0.45, 1.0)
 
-# Optional close-range rotor-detail capture only (docs.md §3.1); never a dataset-wide rate.
+# Optional close-range rotor-detail capture only (plan.md §3.1); never a dataset-wide rate.
 HIGH_RATE_CAPTURE_HZ = 240
 
 
@@ -120,7 +120,7 @@ class DatagenConfig:
 
     @property
     def shutter_max_s(self) -> float:
-        """Longest legal exposure: one frame period (docs.md §3.1 shutter law)."""
+        """Longest legal exposure: one frame period (plan.md §3.1 shutter law)."""
         return 1.0 / self.fps
 
     @property

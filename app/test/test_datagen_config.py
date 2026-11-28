@@ -1,4 +1,4 @@
-"""Guards the facts docs.md §0.1 pins: fps derivation, the shutter law, bucket gaps, class ids.
+"""Guards the facts plan.md §0.1 pins: fps derivation, the shutter law, bucket gaps, class ids.
 
 fix(#12) — the doc used to assert these in prose (25 vs 50 vs 30 Hz, "125–500 frames", buckets
 with holes, an unmapped class_id). Prose cannot fail a test; this can.
